@@ -84,8 +84,7 @@ $('#app').innerHTML = `
             <div class="bv-scroll" id="bvScroll"></div>
             <div class="bv-input">
               <span class="bv-prompt" id="bvPrompt">❯</span>
-              <input class="bv-cmd" id="bvCmd" placeholder="Run a command — ↑/↓ history · Ctrl+C interrupt" spellcheck="false" autocomplete="off">
-              <button class="bv-run" id="bvRun" title="Run (Enter)">Run</button>
+              <textarea class="bv-cmd" id="bvCmd" rows="1" placeholder="type a command — Enter runs · Shift+Enter new line · ↑ recalls" spellcheck="false" autocomplete="off"></textarea>
             </div>
           </div>
         </div>
@@ -197,6 +196,17 @@ function makeEditable(el: HTMLElement, commit: (v: string) => void) {
   el.onblur = () => done(true);
 }
 function shortCwd(c: string) { const h = state.settings.workspace; return c && h && c.startsWith(h) ? '…' + (c.slice(h.length) || '/') : (c || '~'); }
+// Real identity + a home-relative cwd for the Blocks-view prompt line (agent@host ~/path $).
+const SYS = ((relay.sys as { user: string; host: string; home: string }) || { user: 'user', host: 'relay', home: '' });
+function promptCwd(c: string) {
+  let p = (c || SYS.home || '~').replace(/\\/g, '/');
+  const home = (SYS.home || '').replace(/\\/g, '/');
+  if (home && (p === home || p.startsWith(home + '/'))) p = '~' + p.slice(home.length);
+  return p;
+}
+function promptLine(cwd: string) {
+  return `<span class="p-user">${esc(SYS.user)}</span><span class="p-at">@</span><span class="p-host">${esc(SYS.host)}</span> <span class="p-path">${esc(promptCwd(cwd))}</span><span class="p-dollar"> $</span>`;
+}
 // Last path segment of a folder path (handles both \ and /), for naming a folder's terminal.
 function baseName(p: string): string { const s = p.replace(/[\\/]+$/, ''); const i = Math.max(s.lastIndexOf('\\'), s.lastIndexOf('/')); return (i >= 0 ? s.slice(i + 1) : s) || s; }
 
@@ -267,9 +277,10 @@ function switchTab(id: string) {
 function closeTab(id: string) {
   const i = state.tabs.findIndex((t) => t.id === id); if (i < 0) return;
   const [t] = state.tabs.splice(i, 1);
+  flushTabToLibrary(t); // keep its Library entry current so reopening restores the latest history
   relay.ptyDetach(id); t.term.dispose(); t.el.remove(); // keep the shell alive so it can be resumed
   if (state.active === id) state.active = state.tabs[Math.max(0, i - 1)]?.id || '';
-  if (!state.tabs.length) { $('#termEmpty').style.display = 'grid'; renderTabs(); updateStatus(); }
+  if (!state.tabs.length) { $('#termEmpty').style.display = 'grid'; renderTabs(); updateStatus(); updateMainView(); }
   else switchTab(state.active);
   persistWorkspace();
 }
@@ -448,6 +459,19 @@ async function saveActive() {
   renderLibrary(); persistWorkspace(); toast(prev ? `Updated "${t.name}"` : `Saved "${t.name}"`, true);
 }
 async function deleteLib(id: string) { state.library = await relay.deleteSession(id); renderLibrary(); toast('Deleted'); }
+// When a saved terminal is closed, push its CURRENT blocks/scrollback/chat into its Library
+// entry so reopening restores the latest history — not just whatever was there at the last
+// manual Save. Updates state.library in memory immediately so an instant reopen sees it too.
+function flushTabToLibrary(t: Tab) {
+  const libId = t.libId || state.library.find((s) => s.termId === t.id)?.id;
+  if (!libId) return; // not a saved terminal — it isn't listed in the Library, so nothing to restore
+  const prev = state.library.find((s) => s.id === libId);
+  const rec: SavedSession = { id: libId, termId: t.id, name: t.name, cwd: t.cwd, model: t.model, scrollback: t.ser.serialize({ scrollback: 800 }), tabBg: t.tabBg, tabFg: t.tabFg, bodyBg: t.bodyBg, bodyFg: t.bodyFg, chat: t.chat.slice(-100), blocks: slimBlocks(t.blocks), createdAt: prev?.createdAt ?? Date.now(), lastUsed: Date.now() };
+  const idx = state.library.findIndex((s) => s.id === libId);
+  if (idx >= 0) state.library[idx] = rec; else state.library.push(rec);
+  relay.upsertSession(rec).then((lib: SavedSession[]) => { state.library = lib; renderLibrary(); }).catch(() => {});
+  renderLibrary();
+}
 
 /* ----------------------------- file browser (follows the active terminal) ----------------------------- */
 async function renderFiles() {
@@ -671,6 +695,27 @@ function blockHtml(b: Block, color = false): string {
     <div class="hb-actions"><button data-act="copycmd">Copy cmd</button><button data-act="copyout">Copy output</button><button data-act="rerun">Re-run</button><button data-act="pin">${b.pinned ? '★ Pinned' : '☆ Pin'}</button><button data-act="share">Share</button>${failed ? '<button data-act="fix" class="fix">Ask agent to fix</button>' : ''}</div>
   </div>`;
 }
+// Blocks-view (Warp-style transcript) renderer — matches the artifact: a colored
+// `user@host ~/path $ command` prompt line, output beneath, subtle left-accent band,
+// hover-revealed actions. Output keeps its ANSI colors.
+function bvBlockHtml(b: Block): string {
+  const cwd = b.cwd || activeTab()?.cwd || '';
+  const cmd = cmdRaw(b); // display exactly as typed — newlines preserved (CSS renders them)
+  const d = new Date(b.startedAt);
+  const clock = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`;
+  const dur = b.endedAt && b.startedAt ? fmtDur(b.endedAt - b.startedAt) : '';
+  if (b.interactive) {
+    return `<div class="bvb int" data-bid="${b.id}" title="ran in ${esc(promptCwd(cwd))}"><div class="bvb-cmd"><span class="bvb-line"><span class="bvb-p">◧</span> <span class="bvb-text">${esc(cmd || 'interactive')}</span></span><span class="bvb-ts">${clock}</span></div><div class="bvb-out"><span class="o-dim">— interactive full-screen session · ran live in the terminal —</span></div></div>`;
+  }
+  const failed = b.exitCode != null && b.exitCode !== 0;
+  const cls = b.running ? 'run' : failed ? 'fail' : 'info';
+  const badge = b.running ? '<span class="bvb-badge run">running…</span>' : failed ? `<span class="bvb-badge fail">exit ${b.exitCode}</span>` : '';
+  const out = ansiToHtml(b.output);
+  return `<div class="bvb ${cls}" data-bid="${b.id}" title="ran in ${esc(promptCwd(cwd))}">
+    <div class="bvb-cmd"><span class="bvb-line"><span class="bvb-p">❯</span> <span class="bvb-text">${cmd ? esc(cmd) : ''}</span></span>${badge}<span class="bvb-ts">${dur ? esc(dur) + ' · ' : ''}${clock}</span>
+      <span class="bvb-actions"><button data-act="copyout" title="Copy output">copy</button><button data-act="rerun" title="Re-run">re-run</button><button data-act="pin" title="Pin">${b.pinned ? '★' : 'pin'}</button><button data-act="share" title="Export block">share</button>${failed ? '<button data-act="fix" title="Ask the agent to fix">ask agent</button>' : ''}</span>
+    </div>${out.trim() ? `<div class="bvb-out">${out}</div>` : ''}</div>`;
+}
 function realBlock(b: Block): boolean { return !!((b.command && b.command.trim()) || b.output.trim() || b.interactive); }
 function renderHistory() {
   const list = $('#histList'); const rail = $('#histRail'); const t = activeTab();
@@ -707,7 +752,16 @@ function updateMainView() {
   $('#btnBlocks').classList.toggle('on', !!state.settings.blocksView);
   $('#btnBlocks').textContent = state.settings.blocksView ? '⊞' : '▭';
   if (on) { renderBlocksView(); setTimeout(() => ($('#bvCmd') as HTMLElement)?.focus(), 0); }
-  else if (t) { t.fit.fit(); if (t.term.cols > 0) relay.ptyResize(t.id, t.term.cols, t.term.rows); t.term.focus(); }
+  else if (t) {
+    // Reveal the live terminal, then fit AFTER the layout settles and FORCE a resize, so a
+    // full-screen app (Claude Code, vim, top) redraws to the exact visible size — otherwise it
+    // can keep a stale (too-tall) row count and its bottom line renders under the status bar.
+    requestAnimationFrame(() => {
+      t.fit.fit();
+      if (t.term.cols > 0) { t.lastCols = t.term.cols; t.lastRows = t.term.rows; relay.ptyResize(t.id, t.term.cols, t.term.rows); }
+      t.term.focus(); t.term.scrollToBottom();
+    });
+  }
 }
 function refreshBlockViews() {
   if ($('#historyPanel').classList.contains('show')) renderHistory();
@@ -718,24 +772,34 @@ function renderBlocksView() { if (_bvRAF) return; _bvRAF = requestAnimationFrame
 function renderBlocksViewNow() {
   const wrap = $('#bvScroll'); const t = activeTab();
   if (!t) { wrap.innerHTML = '<div class="bv-empty">No terminal open.</div>'; return; }
+  ($('#bvPrompt') as HTMLElement).textContent = '❯'; // minimal prompt (folder shown in the status bar / block tooltips)
   const blocks = t.blocks.filter(realBlock);
   const atBottom = wrap.scrollTop + wrap.clientHeight >= wrap.scrollHeight - 80;
   if (!blocks.length) wrap.innerHTML = `<div class="bv-empty">Commands you run appear here as blocks.<br><span class="dim">Type below to run one · ⊞/▭ toggles Classic terminal.</span></div>`;
-  else wrap.innerHTML = blocks.map((b) => blockHtml(b, true)).join('');
+  else wrap.innerHTML = blocks.map(bvBlockHtml).join('');
   if (atBottom) wrap.scrollTop = wrap.scrollHeight;
 }
 // Send the composed line to the shell. PSReadLine's Enter handler turns it into a block.
+function bvGrow(inp: HTMLTextAreaElement) { inp.style.height = 'auto'; inp.style.height = Math.min(inp.scrollHeight, 160) + 'px'; }
 function bvSend() {
   const t = activeTab(); if (!t) return;
-  const inp = $('#bvCmd') as HTMLInputElement; const cmd = inp.value;
-  relay.ptyWrite(t.id, cmd + '\r');
+  const inp = $('#bvCmd') as HTMLTextAreaElement; const cmd = inp.value;
+  sendCommand(t.id, cmd);
   if (cmd.trim()) { t.cmdHistory.push(cmd); if (t.cmdHistory.length > 200) t.cmdHistory.shift(); }
   t.histIdx = t.cmdHistory.length;
-  inp.value = '';
+  inp.value = ''; bvGrow(inp);
 }
 type ExFmt = 'md' | 'json' | 'txt' | 'html';
 function outText(b: Block): string { return b.interactive ? '(interactive session)' : stripAnsi(b.output).replace(/\r/g, '').trimEnd(); }
 function cmdText(b: Block): string { return stripAnsi(b.command).replace(/[\r\n]+/g, ' ').trim(); }
+// The command exactly as typed — newlines preserved (for display + faithful re-run).
+function cmdRaw(b: Block): string { return stripAnsi(b.command).replace(/\r\n?/g, '\n').replace(/\s+$/, ''); }
+// Run a command line in a terminal: multi-line goes as a bracketed paste (one command),
+// single-line as a plain Enter.
+function sendCommand(id: string, raw: string) {
+  if (raw.includes('\n')) relay.ptyWrite(id, '\x1b[200~' + raw.replace(/\r\n/g, '\n') + '\x1b[201~\r');
+  else relay.ptyWrite(id, raw + '\r');
+}
 // Serialize a terminal's blocks (+ chat) to Markdown / JSON / plain text / HTML. `blocks`
 // is passed in so this covers both whole-session export and single-block "share".
 function buildExport(t: Tab, blocks: Block[], fmt: ExFmt): { content: string; ext: string } {
@@ -906,14 +970,14 @@ $('#histRail').addEventListener('click', (e) => {
 $('#histFilter').onclick = () => { histFilterFail = !histFilterFail; $('#histFilter').classList.toggle('on', histFilterFail); renderHistory(); };
 function onBlockAreaClick(e: Event) {
   const el = e.target as HTMLElement;
-  const card = el.closest('.hb') as HTMLElement | null; if (!card) return;
+  const card = el.closest('.hb, .bvb') as HTMLElement | null; if (!card) return;
   const t = activeTab(); const b = t?.blocks.find((x) => x.id === card.dataset.bid); if (!t || !b) return;
   const act = (el.closest('[data-act]') as HTMLElement | null)?.dataset.act;
   if (!act) return; // clicking the block body does nothing — only the ▾ arrow collapses (so you can read/select output)
   if (act === 'collapse') { const bid = card.dataset.bid!; if (collapsedBlocks.has(bid)) collapsedBlocks.delete(bid); else collapsedBlocks.add(bid); card.classList.toggle('collapsed'); }
   else if (act === 'copycmd') { navigator.clipboard?.writeText(cmdText(b)); toast('Copied command', true); }
   else if (act === 'copyout') { navigator.clipboard?.writeText(stripAnsi(b.output).replace(/\r/g, '')); toast('Copied output', true); }
-  else if (act === 'rerun') { relay.ptyWrite(t.id, cmdText(b) + '\r'); if (!blocksMode(t)) switchTab(t.id); toast('Re-ran command', true); }
+  else if (act === 'rerun') { sendCommand(t.id, cmdRaw(b)); if (!blocksMode(t)) switchTab(t.id); toast('Re-ran command', true); }
   else if (act === 'pin') { b.pinned = !b.pinned; refreshBlockViews(); persistWorkspace(); }
   else if (act === 'share') shareBlock(b);
   else if (act === 'fix') askAgentFix(b);
@@ -924,15 +988,16 @@ $('#shellIntegration').addEventListener('change', async (e) => { state.settings 
 async function toggleBlocksView() { state.settings = await relay.patchSettings({ blocksView: !state.settings.blocksView }); updateMainView(); }
 $('#btnBlocks').onclick = toggleBlocksView;
 $('#blocksViewSet').addEventListener('change', async (e) => { state.settings = await relay.patchSettings({ blocksView: (e.target as HTMLInputElement).checked }); updateMainView(); });
-$('#bvRun').onclick = bvSend;
 $('#bvCmd').addEventListener('keydown', (e) => {
-  const ev = e as KeyboardEvent; const t = activeTab(); const inp = ev.target as HTMLInputElement;
-  if (ev.key === 'Enter') { ev.preventDefault(); bvSend(); }
-  else if (ev.key === 'ArrowUp') { if (t && t.cmdHistory.length) { ev.preventDefault(); t.histIdx = Math.max(0, t.histIdx - 1); inp.value = t.cmdHistory[t.histIdx] || ''; requestAnimationFrame(() => inp.setSelectionRange(inp.value.length, inp.value.length)); } }
-  else if (ev.key === 'ArrowDown') { if (t && t.cmdHistory.length) { ev.preventDefault(); t.histIdx = Math.min(t.cmdHistory.length, t.histIdx + 1); inp.value = t.cmdHistory[t.histIdx] || ''; } }
-  else if (ev.ctrlKey && ev.key.toLowerCase() === 'c') { if (t) { relay.ptyWrite(t.id, '\x03'); inp.value = ''; } }
+  const ev = e as KeyboardEvent; const t = activeTab(); const inp = ev.target as HTMLTextAreaElement;
+  if (ev.key === 'Enter' && !ev.shiftKey) { ev.preventDefault(); bvSend(); }                    // Enter runs
+  else if (ev.key === 'Enter') { requestAnimationFrame(() => bvGrow(inp)); }                     // Shift+Enter: insert a newline, then grow
+  else if (ev.key === 'ArrowUp' && !inp.value.includes('\n')) { if (t && t.cmdHistory.length) { ev.preventDefault(); t.histIdx = Math.max(0, t.histIdx - 1); inp.value = t.cmdHistory[t.histIdx] || ''; bvGrow(inp); requestAnimationFrame(() => inp.setSelectionRange(inp.value.length, inp.value.length)); } }
+  else if (ev.key === 'ArrowDown' && !inp.value.includes('\n')) { if (t && t.cmdHistory.length) { ev.preventDefault(); t.histIdx = Math.min(t.cmdHistory.length, t.histIdx + 1); inp.value = t.cmdHistory[t.histIdx] || ''; bvGrow(inp); } }
+  else if (ev.ctrlKey && ev.key.toLowerCase() === 'c') { if (t) { relay.ptyWrite(t.id, '\x03'); inp.value = ''; bvGrow(inp); } }
   else if (ev.key === 'Tab') ev.preventDefault(); // no shell completion in Blocks mode — use Classic
 });
+$('#bvCmd').addEventListener('input', (e) => bvGrow(e.target as HTMLTextAreaElement));
 $('#btnSave').onclick = saveActive;
 $('#btnClear').onclick = clearActive;
 $('#btnSidebar').onclick = toggleSidebar;

@@ -1,5 +1,9 @@
 import { contextBridge, ipcRenderer } from 'electron';
+import * as os from 'node:os';
 import type { Settings, SavedSession, AgentEvent, ApprovalRequest, ChatTurn, Workspace, Block } from './shared/types';
+
+// Real identity for the Blocks-view prompt line (user@host + home for ~ shortening).
+function sysInfo() { try { return { user: os.userInfo().username, host: os.hostname().split('.')[0], home: os.homedir() }; } catch { return { user: 'user', host: 'relay', home: '' }; } }
 
 type BlockEvt = { type: 'start' | 'update' | 'end'; block: Block };
 
@@ -76,6 +80,7 @@ const api = {
 
   // --- platform + custom window controls ---
   platform: process.platform,
+  sys: sysInfo(),
   winMinimize: () => ipcRenderer.send('win:minimize'),
   winMaximize: () => ipcRenderer.send('win:maximize'),
   winClose: () => ipcRenderer.send('win:close'),

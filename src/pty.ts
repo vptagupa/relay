@@ -19,14 +19,14 @@ interface Term {
 const terms = new Map<string, Term>();
 const BUF_CAP = 512 * 1024;       // cap replay buffer (~512 KB of output)
 
-// We replay restored history into SCROLLBACK (above a clean viewport — see createTerm),
-// which is immune to viewport clears and resizes. The only sequences that could still
-// reach scrollback are erase-scrollback (CSI 3J) and full reset (ESC c), which a fresh
-// shell can emit on startup — so we strip just those for a short window after spawn.
-// Everything else (viewport clears, cursor moves, alt-screen) is harmless to scrollback
-// and left untouched, so normal shell behaviour (cls, vim, …) is unaffected.
+// On restore we replay the previous session's output INLINE so it's visible in the terminal
+// (matching the Blocks view). Because the shell is spawned at the correct size (fit-before-
+// spawn), there's no resize repaint; the only thing that could wipe the replayed history is
+// the fresh shell's own startup clear — erase-scrollback (CSI 3J), erase-viewport (CSI 2J),
+// or full reset (ESC c) — so we strip just those for a short window after spawn. Cursor moves
+// and alt-screen are left untouched, so normal shell behaviour (cls, vim, …) is unaffected.
 const STARTUP_GUARD_MS = 1500;
-const STARTUP_CLEARS = /\x1b\[3J|\x1bc/g;
+const STARTUP_CLEARS = /\x1b\[3J|\x1b\[2J|\x1bc/g;
 
 function defaultShell(): string {
   if (process.platform === 'win32') return process.env.RELAY_SHELL || 'powershell.exe';
@@ -57,12 +57,18 @@ export function createTerm(id: string, cwd: string, wc: WebContents, cols = 80, 
   const spawnArgs = isPwsh
     ? ['-NoLogo', '-NoExit', '-EncodedCommand', Buffer.from(shellIntegrationInit('powershell'), 'utf16le').toString('base64')]
     : [];
+  const env = { ...process.env, TERM: 'xterm-256color' } as Record<string, string>;
+  // Relay may itself be launched from inside a Claude Code session; its environment then
+  // carries Claude Code runtime/session markers. If those leak into the shell, a `claude`
+  // run INSIDE Relay thinks it's a nested child session and disables transcript saving.
+  // Scrub the markers so Claude Code launched in Relay is always a clean top-level session.
+  for (const k of ['CLAUDECODE', 'CLAUDE_CODE_CHILD_SESSION', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_CODE_SSE_PORT', 'CLAUDE_CODE_SESSION_ID']) delete env[k];
   const proc = pty.spawn(shellPath, spawnArgs, {
     name: 'xterm-color',
     cols,
     rows,
     cwd: startDir,
-    env: { ...process.env, TERM: 'xterm-256color' } as Record<string, string>,
+    env,
   });
   const term: Term = { proc, buf: '', wc, parser: null };
   terms.set(id, term);
@@ -83,8 +89,8 @@ export function createTerm(id: string, cwd: string, wc: WebContents, cols = 80, 
   // history left on screen. So we push the replayed history up into the SCROLLBACK with
   // trailing newlines, leaving a clean viewport for the fresh shell.
   if (restore) {
-    const pushToScrollback = '\r\n'.repeat(Math.max(rows, 1));
-    term.buf = restore + '\r\n\x1b[90m— end of restored session · scroll up ↑ · shell below is fresh —\x1b[0m' + pushToScrollback;
+    // Replay inline (a couple of blank lines separate it from the fresh shell's first prompt).
+    term.buf = restore + '\r\n\x1b[90m— restored session · live shell below —\x1b[0m\r\n\r\n';
     if (!wc.isDestroyed()) wc.send('pty:data', { id, data: term.buf });
   }
 
