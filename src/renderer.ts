@@ -3,7 +3,7 @@ import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { SerializeAddon } from '@xterm/addon-serialize';
 import { MODELS, modelById, DEFAULT_MODEL } from './shared/models';
-import type { Settings, SavedSession, AgentEvent, ApprovalRequest, ChatTurn, OpenTab, Block } from './shared/types';
+import type { Settings, SavedSession, AgentEvent, ApprovalRequest, ChatTurn, OpenTab, Block, Bookmark, BookmarkGroup } from './shared/types';
 
 const relay = (window as any).relay;
 const $ = <T extends HTMLElement = HTMLElement>(s: string) => document.querySelector(s) as T;
@@ -73,6 +73,7 @@ $('#app').innerHTML = `
           <div class="tt-spacer"></div>
           <button class="tt-model" id="tabModelBtn" title="Model for this terminal"><span class="dot"></span><span id="tabModelName">Opus 5</span> ▾</button>
           <button class="tt-icon blocks-toggle on" id="btnBlocks" title="Blocks view / Classic terminal (⌘⇧B)">⊞</button>
+          <button class="tt-icon" id="btnBookmarks" title="Bookmarks — highlight a command to save one (⌘⇧K)">★</button>
           <button class="tt-icon" id="btnSave" title="Save to Library (⌘S)">⤓</button>
           <button class="tt-icon" id="btnClear" title="Clear terminal (⌃L)">⌫</button>
         </div>
@@ -156,6 +157,20 @@ $('#app').innerHTML = `
     <div class="a-foot"><button class="btn" id="apDeny">Deny</button><button class="btn primary" id="apAllow">Allow</button></div>
   </div>
 
+  <aside class="history bookmarks" id="bookmarksPanel" role="dialog" aria-label="Bookmarks">
+    <div class="hist-head"><div class="hist-title">★ Bookmarks</div><button class="hist-x" id="btnBookmarksClose" aria-label="Close">✕</button></div>
+    <div class="hist-tools"><button class="hist-filter" id="bkmAddGroup" title="Add a group">＋ Group</button></div>
+    <div class="hist-list" id="bkmList"></div>
+  </aside>
+
+  <div class="bkm-pop" id="bkmPop"><button id="bkmAdd">★ Bookmark</button></div>
+
+  <div class="confirm" id="confirmBox" role="alertdialog" aria-labelledby="cfTitle">
+    <div class="a-title" id="cfTitle">Close terminal?</div>
+    <div class="a-detail" id="cfDetail"></div>
+    <div class="a-foot"><button class="btn" id="cfCancel">Cancel</button><button class="btn primary" id="cfOk">Close</button></div>
+  </div>
+
   <div class="toast-wrap" id="toastWrap"></div>
 `;
 
@@ -227,6 +242,7 @@ async function newTab(seed?: Partial<OpenTab> & { libId?: string }, activate = t
   state.tabs.push(tab);
   applyTermColors(tab); // honor any restored per-terminal body/text colors
   term.onData((d) => relay.ptyWrite(id, d));
+  term.onSelectionChange(() => { if (state.active === id) refreshPill(); }); // show the ★ pill for terminal selections
   let saveT: any;
   term.onData(() => { clearTimeout(saveT); saveT = setTimeout(persistWorkspace, 1500); }); // keep the persisted snapshot fresh
   if (activate) {
@@ -274,8 +290,33 @@ function switchTab(id: string) {
   if ($('#historyPanel').classList.contains('show')) renderHistory(); // history follows the active terminal
   updateMainView(); // show Blocks or Classic for this terminal (and focus the right surface)
 }
-function closeTab(id: string) {
-  const i = state.tabs.findIndex((t) => t.id === id); if (i < 0) return;
+// A small centered confirm dialog. Resolves true (confirmed) / false (cancelled).
+let confirmResolve: ((v: boolean) => void) | null = null;
+function confirmDialog(title: string, detail: string, okLabel = 'Close'): Promise<boolean> {
+  if (confirmResolve) { confirmResolve(false); confirmResolve = null; } // supersede any open confirm
+  $('#cfTitle').textContent = title;
+  $('#cfDetail').textContent = detail;
+  ($('#cfOk') as HTMLElement).textContent = okLabel;
+  $('#confirmBox').classList.add('show'); $('#scrim').classList.add('show');
+  setTimeout(() => ($('#cfOk') as HTMLElement).focus(), 0);
+  return new Promise((res) => { confirmResolve = res; });
+}
+function closeConfirm(v: boolean) {
+  if (!$('#confirmBox').classList.contains('show')) return;
+  $('#confirmBox').classList.remove('show');
+  if (!$('#settings').classList.contains('show') && !$('#palette').classList.contains('show')) $('#scrim').classList.remove('show');
+  const r = confirmResolve; confirmResolve = null; r?.(v);
+}
+async function closeTab(id: string, skipConfirm = false) {
+  const t0 = state.tabs.find((x) => x.id === id); if (!t0) return;
+  if (!skipConfirm) {
+    const saved = t0.libId || state.library.some((s) => s.termId === t0.id);
+    const detail = saved
+      ? `“${t0.name}” is saved in your Library — you can reopen it anytime with its history.`
+      : `“${t0.name}” isn't saved. Save it (⤓) first if you want to reopen it later.`;
+    if (!(await confirmDialog('Close terminal?', detail, 'Close'))) return;
+  }
+  const i = state.tabs.findIndex((x) => x.id === id); if (i < 0) return; // re-find (state may have changed during confirm)
   const [t] = state.tabs.splice(i, 1);
   flushTabToLibrary(t); // keep its Library entry current so reopening restores the latest history
   relay.ptyDetach(id); t.term.dispose(); t.el.remove(); // keep the shell alive so it can be resumed
@@ -311,7 +352,13 @@ function applyTermColors(t: Tab) {
 }
 
 /* ----------------------------- bulk tab close + context menu ----------------------------- */
-function closeTabs(ids: string[]) { for (const id of ids) closeTab(id); }
+// Confirm once for the whole batch, then close each without a per-tab prompt.
+async function closeTabs(ids: string[]) {
+  if (!ids.length) return;
+  if (ids.length === 1) return void closeTab(ids[0]);
+  if (!(await confirmDialog(`Close ${ids.length} terminals?`, `${ids.length} terminals will close. Saved ones stay in your Library; unsaved ones lose their history.`, `Close ${ids.length}`))) return;
+  for (const id of [...ids]) await closeTab(id, true);
+}
 function closeOthers(id: string) { closeTabs(state.tabs.filter((t) => t.id !== id).map((t) => t.id)); }
 function closeRight(id: string) { const i = state.tabs.findIndex((t) => t.id === id); if (i >= 0) closeTabs(state.tabs.slice(i + 1).map((t) => t.id)); }
 function closeLeft(id: string) { const i = state.tabs.findIndex((t) => t.id === id); if (i >= 0) closeTabs(state.tabs.slice(0, i).map((t) => t.id)); }
@@ -739,8 +786,123 @@ function renderHistory() {
   list.innerHTML = blocks.map((b) => blockHtml(b)).join('');
   if (atBottom && !q) list.scrollTop = list.scrollHeight;
 }
-function openHistory() { closeAgent(); $('#historyPanel').classList.add('show'); renderHistory(); }
+function openHistory() { closeAgent(); closeBookmarks(); $('#historyPanel').classList.add('show'); renderHistory(); }
 function closeHistory() { $('#historyPanel').classList.remove('show'); }
+
+/* ----------------------------- bookmarks (saved command snippets, grouped) ----------------------------- */
+function bookmarks(): Bookmark[] { return state.settings.bookmarks || []; }
+function bookmarkGroups(): BookmarkGroup[] { return state.settings.bookmarkGroups || []; }
+// The group a bookmark effectively belongs to (undefined if none / group was deleted).
+function groupOf(b: Bookmark): string | undefined { return bookmarkGroups().some((g) => g.id === b.groupId) ? b.groupId : undefined; }
+const collapsedGroups = new Set<string>(); // collapsed group ids ('' = the Ungrouped section)
+
+async function addBookmark(raw: string) {
+  const text = raw.replace(/\s+$/, '').replace(/^\s+/, '');
+  if (!text) { toast('Nothing selected'); return; }
+  const list = [{ id: uid(), text, createdAt: Date.now() }, ...bookmarks().filter((b) => b.text !== text)].slice(0, 300);
+  state.settings = await relay.patchSettings({ bookmarks: list });
+  renderBookmarks(); toast('Bookmarked ★', true);
+}
+async function deleteBookmark(id: string) {
+  state.settings = await relay.patchSettings({ bookmarks: bookmarks().filter((b) => b.id !== id) });
+  renderBookmarks();
+}
+// Move a bookmark to `gid` group and reorder it: drop `before`/after `beforeId` (a sibling),
+// or append to the group when no sibling target (dropped on empty group area).
+async function dropBookmark(id: string, gid: string | undefined, beforeId: string | null, before: boolean) {
+  const list = [...bookmarks()];
+  const di = list.findIndex((b) => b.id === id); if (di < 0) return;
+  const dragged = { ...list[di], groupId: gid };
+  list.splice(di, 1);
+  if (beforeId && beforeId !== id) {
+    let ti = list.findIndex((b) => b.id === beforeId);
+    if (ti < 0) ti = list.length; else if (!before) ti += 1;
+    list.splice(ti, 0, dragged);
+  } else {
+    // append after the last item already in the target group
+    let at = list.length;
+    for (let k = list.length - 1; k >= 0; k--) { if (groupOf(list[k]) === gid) { at = k + 1; break; } }
+    list.splice(at, 0, dragged);
+  }
+  state.settings = await relay.patchSettings({ bookmarks: list });
+  renderBookmarks();
+}
+async function addBookmarkGroup() {
+  const g = { id: uid(), name: 'New group' };
+  state.settings = await relay.patchSettings({ bookmarkGroups: [...bookmarkGroups(), g] });
+  renderBookmarks();
+  const nameEl = document.querySelector(`[data-grename="${g.id}"]`) as HTMLElement | null;
+  if (nameEl) makeEditable(nameEl, (v) => renameBookmarkGroup(g.id, v));
+}
+async function renameBookmarkGroup(id: string, v: string) {
+  const name = v.trim(); if (!name) { renderBookmarks(); return; }
+  state.settings = await relay.patchSettings({ bookmarkGroups: bookmarkGroups().map((g) => g.id === id ? { ...g, name } : g) });
+  renderBookmarks();
+}
+async function deleteBookmarkGroup(id: string) {
+  state.settings = await relay.patchSettings({
+    bookmarkGroups: bookmarkGroups().filter((g) => g.id !== id),
+    bookmarks: bookmarks().map((b) => b.groupId === id ? { ...b, groupId: undefined } : b), // orphans fall back to Ungrouped
+  });
+  renderBookmarks();
+}
+function runBookmark(text: string) {
+  const t = activeTab(); if (!t) { toast('Open a terminal first'); return; }
+  sendCommand(t.id, text); if (!blocksMode(t)) switchTab(t.id);
+  closeBookmarks(); toast('Ran bookmark', true);
+}
+function renderBookmarks() {
+  const el = $('#bkmList'); const list = bookmarks(); const groups = bookmarkGroups();
+  if (!list.length && !groups.length) { el.innerHTML = '<div class="hist-empty">No bookmarks yet.<br><span class="dim">Highlight a command in a block and click ★ Bookmark. Use ＋ Group to organize them.</span></div>'; return; }
+  const itemHtml = (b: Bookmark) => `<div class="bkm-item" data-bid="${b.id}" draggable="true">
+    <span class="bkm-grip" title="Drag to reorder or move to a group">⠿</span>
+    <div class="bkm-text" data-run="${b.id}">${esc(b.text)}</div>
+    <div class="bkm-actions"><button data-bact="run">Run</button><button data-bact="copy">Copy</button><button data-bact="del" title="Delete">✕</button></div>
+  </div>`;
+  const count = (gid: string | undefined) => list.filter((b) => groupOf(b) === gid).length;
+  const sectionItems = (gid: string | undefined) => { const items = list.filter((b) => groupOf(b) === gid); return items.length ? items.map(itemHtml).join('') : '<div class="bkm-gempty">drop bookmarks here</div>'; };
+  const col = (gid: string) => collapsedGroups.has(gid) ? ' collapsed' : '';
+  let html = '';
+  for (const g of groups) {
+    html += `<div class="bkm-group${col(g.id)}" data-gid="${g.id}"><div class="bkm-ghead" draggable="true"><span class="bkm-grip" title="Drag to reorder group">⠿</span><button class="bkm-gchev" data-gact="gcollapse" title="Collapse / expand">▾</button><span class="bkm-gname" data-grename="${g.id}">${esc(g.name)}</span><span class="bkm-gcount">${count(g.id)}</span><span class="bkm-gsp"></span><span class="bkm-gactions"><button data-gact="grename" title="Rename group">✎</button><button data-gact="gdel" title="Delete group">🗑</button></span></div><div class="bkm-gitems">${sectionItems(g.id)}</div></div>`;
+  }
+  html += `<div class="bkm-group${col('')}" data-gid=""><div class="bkm-ghead ung"><button class="bkm-gchev" data-gact="gcollapse" title="Collapse / expand">▾</button><span class="bkm-gname">Ungrouped</span><span class="bkm-gcount">${count(undefined)}</span></div><div class="bkm-gitems">${sectionItems(undefined)}</div></div>`;
+  el.innerHTML = html;
+}
+function openBookmarks() { closeAgent(); closeHistory(); $('#bookmarksPanel').classList.add('show'); renderBookmarks(); }
+function closeBookmarks() { $('#bookmarksPanel').classList.remove('show'); }
+// Save the current highlighted text (DOM selection in a block, or the xterm selection).
+function bookmarkSelection() {
+  let text = (window.getSelection()?.toString() || '').trim();
+  if (!text) text = (activeTab()?.term.getSelection() || '').trim();
+  if (!text) { toast('Highlight a command first'); return; }
+  addBookmark(text); hideBkmPop();
+}
+// Floating "★ Bookmark" pill shown next to a text selection (in a block OR the live terminal).
+let pendingBkmText = ''; // captured when the pill shows, so a click can't lose it
+function hideBkmPop() { $('#bkmPop').classList.remove('show'); }
+function xtermSelection(): string { try { return (activeTab()?.term.getSelection() || '').trim(); } catch { return ''; } }
+function showBkmPopAt(cx: number, top: number) {
+  const pop = $('#bkmPop'); pop.classList.add('show');
+  pop.style.left = Math.min(Math.max(cx - 55, 8), window.innerWidth - 130) + 'px';
+  pop.style.top = Math.max(top - 40, 8) + 'px';
+}
+// Show the pill for the current selection — a DOM selection inside a block/history entry, or the
+// live terminal's (xterm) selection. NEVER auto-hides on an empty selection (a TUI like Claude
+// Code redraws and clears the terminal selection); dismissal is click-away / Escape / after save.
+let lastMouse = { x: 0, y: 0 };
+function refreshPill(mx?: number, my?: number) {
+  const sel = window.getSelection(); const dom = (sel?.toString() || '').trim();
+  const anchor = sel && sel.anchorNode ? (sel.anchorNode.nodeType === 1 ? sel.anchorNode as HTMLElement : sel.anchorNode.parentElement) : null;
+  if (dom && dom.length <= 800 && anchor && anchor.closest('#bvScroll, #histList')) {
+    pendingBkmText = dom;
+    const rect = sel!.getRangeAt(0).getBoundingClientRect();
+    showBkmPopAt(rect.left + rect.width / 2, rect.top);
+    return;
+  }
+  const x = xtermSelection();
+  if (x && x.length <= 800) { pendingBkmText = x; showBkmPopAt(mx ?? lastMouse.x, my ?? lastMouse.y); }
+}
 
 /* --------------------- Blocks (Warp-style) main view --------------------- */
 // The live xterm is always mounted underneath; the Blocks view overlays it and becomes the
@@ -893,6 +1055,8 @@ function paletteActions(): PalAction[] {
     { g: 'View', t: 'Toggle auto-save', run: toggleAutosave },
     { g: 'View', t: 'Ask the agent', run: openAgent },
     { g: 'View', t: 'Command history', run: openHistory },
+    { g: 'View', t: 'Bookmarks', run: openBookmarks },
+    { g: 'View', t: 'Bookmark highlighted text', run: bookmarkSelection },
     { g: 'View', t: 'Toggle Blocks / Classic terminal', run: toggleBlocksView },
     { g: 'Terminal', t: 'Launch Claude Code', run: newClaudeTab },
     { g: 'App', t: 'Open folder in new terminal…', run: addFolderTab },
@@ -949,7 +1113,7 @@ function renameTab(id: string, v: string) { const t = state.tabs.find((x) => x.i
 async function renameLib(id: string, v: string) { const s = state.library.find((x) => x.id === id); if (s && v) { s.name = v; state.library = await relay.upsertSession(s); } renderLibrary(); }
 
 /* ----------------------------- agent open/close ----------------------------- */
-function openAgent() { closeHistory(); $('#agentPanel').classList.add('show'); renderChat(); ($('#agentInput') as HTMLElement).focus(); }
+function openAgent() { closeHistory(); closeBookmarks(); $('#agentPanel').classList.add('show'); renderChat(); ($('#agentInput') as HTMLElement).focus(); }
 function closeAgent() { $('#agentPanel').classList.remove('show'); closeModelMenu(); }
 
 /* ----------------------------- wiring ----------------------------- */
@@ -958,6 +1122,92 @@ $('#btnAddFolder').onclick = addFolderTab;
 $('#btnClaude').onclick = newClaudeTab;
 $('#btnHistory').onclick = () => ($('#historyPanel').classList.contains('show') ? closeHistory() : openHistory());
 $('#btnHistoryClose').onclick = closeHistory;
+$('#btnBookmarks').onclick = () => ($('#bookmarksPanel').classList.contains('show') ? closeBookmarks() : openBookmarks());
+$('#btnBookmarksClose').onclick = closeBookmarks;
+$('#bkmAdd').onmousedown = (e) => e.preventDefault(); // keep the text selection intact
+$('#bkmAdd').onclick = () => { if (pendingBkmText) addBookmark(pendingBkmText); hideBkmPop(); };
+// Show the floating "★ Bookmark" pill when text is highlighted in a block/history (DOM selection)
+// or the live terminal (xterm — see newTab's onSelectionChange). The deferred mouse-up catches
+// terminal selections after xterm has finalized them.
+document.addEventListener('selectionchange', () => { if (!$('#bkmPop').contains(document.activeElement)) refreshPill(); });
+document.addEventListener('mousemove', (e) => { lastMouse = { x: (e as MouseEvent).clientX, y: (e as MouseEvent).clientY }; });
+document.addEventListener('mouseup', (e) => { const m = e as MouseEvent; setTimeout(() => refreshPill(m.clientX, m.clientY), 0); });
+document.addEventListener('mousedown', (e) => { if (!(e.target as HTMLElement).closest('#bkmPop')) hideBkmPop(); });
+$('#bkmAddGroup').onclick = addBookmarkGroup;
+$('#bkmList').addEventListener('click', (e) => {
+  const el = e.target as HTMLElement;
+  const gact = (el.closest('[data-gact]') as HTMLElement | null)?.dataset.gact;
+  if (gact) {
+    const grp = el.closest('.bkm-group') as HTMLElement | null;
+    const gid = grp?.dataset.gid ?? '';
+    if (gact === 'gcollapse') { if (collapsedGroups.has(gid)) collapsedGroups.delete(gid); else collapsedGroups.add(gid); grp?.classList.toggle('collapsed'); return; }
+    if (!gid) return; // rename/delete need a real (non-Ungrouped) group
+    if (gact === 'gdel') deleteBookmarkGroup(gid);
+    else if (gact === 'grename') { const n = document.querySelector(`[data-grename="${gid}"]`) as HTMLElement | null; if (n) makeEditable(n, (v) => renameBookmarkGroup(gid, v)); }
+    return;
+  }
+  const item = el.closest('.bkm-item') as HTMLElement | null; if (!item) return;
+  const b = bookmarks().find((x) => x.id === item.dataset.bid); if (!b) return;
+  const act = (el.closest('[data-bact]') as HTMLElement | null)?.dataset.bact;
+  const run = el.closest('[data-run]');
+  if (act === 'run' || (run && !act)) runBookmark(b.text);
+  else if (act === 'copy') { navigator.clipboard?.writeText(b.text); toast('Copied', true); }
+  else if (act === 'del') deleteBookmark(b.id);
+});
+$('#bkmList').addEventListener('dblclick', (e) => {
+  const n = (e.target as HTMLElement).closest('[data-grename]') as HTMLElement | null; if (!n) return;
+  makeEditable(n, (v) => renameBookmarkGroup(n.dataset.grename!, v));
+});
+// Drag-and-drop: reorder bookmarks & move them between groups; reorder groups.
+let dragBkm: string | null = null;
+let dragGrp: string | null = null;
+const clearBkmDrop = () => document.querySelectorAll('#bkmList .drop-top,#bkmList .drop-bottom,#bkmList .drop-into,#bkmList .gdrop-top,#bkmList .gdrop-bottom').forEach((x) => x.classList.remove('drop-top', 'drop-bottom', 'drop-into', 'gdrop-top', 'gdrop-bottom'));
+const endBkmDrag = () => { dragBkm = null; dragGrp = null; clearBkmDrop(); document.querySelectorAll('#bkmList .dragging').forEach((x) => x.classList.remove('dragging')); };
+$('#bkmList').addEventListener('dragstart', (e) => {
+  const t = e.target as HTMLElement;
+  const it = t.closest('.bkm-item') as HTMLElement | null;
+  const gh = t.closest('.bkm-ghead') as HTMLElement | null;
+  if (it && it.getAttribute('draggable') !== 'false') { dragBkm = it.dataset.bid!; it.classList.add('dragging'); (e as DragEvent).dataTransfer!.effectAllowed = 'move'; }
+  else if (gh && gh.getAttribute('draggable') !== 'false') { const gid = (gh.closest('.bkm-group') as HTMLElement | null)?.dataset.gid; if (gid) { dragGrp = gid; gh.classList.add('dragging'); (e as DragEvent).dataTransfer!.effectAllowed = 'move'; } }
+});
+$('#bkmList').addEventListener('dragover', (e) => {
+  const ev = e as DragEvent;
+  if (dragBkm) {
+    ev.preventDefault(); clearBkmDrop();
+    const it = (ev.target as HTMLElement).closest('.bkm-item') as HTMLElement | null;
+    if (it && it.dataset.bid !== dragBkm) { const r = it.getBoundingClientRect(); it.classList.add(ev.clientY < r.top + r.height / 2 ? 'drop-top' : 'drop-bottom'); }
+    else { const grp = (ev.target as HTMLElement).closest('.bkm-group') as HTMLElement | null; if (grp) grp.classList.add('drop-into'); }
+  } else if (dragGrp) {
+    ev.preventDefault(); clearBkmDrop();
+    const grp = (ev.target as HTMLElement).closest('.bkm-group') as HTMLElement | null;
+    if (grp && grp.dataset.gid && grp.dataset.gid !== dragGrp) { const r = grp.getBoundingClientRect(); grp.classList.add(ev.clientY < r.top + r.height / 2 ? 'gdrop-top' : 'gdrop-bottom'); }
+  }
+});
+$('#bkmList').addEventListener('drop', async (e) => {
+  const ev = e as DragEvent; ev.preventDefault();
+  if (dragBkm) {
+    const it = (ev.target as HTMLElement).closest('.bkm-item') as HTMLElement | null;
+    const grp = (ev.target as HTMLElement).closest('.bkm-group') as HTMLElement | null;
+    if (it && it.dataset.bid !== dragBkm) {
+      const target = bookmarks().find((b) => b.id === it.dataset.bid!);
+      const r = it.getBoundingClientRect();
+      await dropBookmark(dragBkm, target?.groupId, it.dataset.bid!, ev.clientY < r.top + r.height / 2);
+    } else if (grp) {
+      await dropBookmark(dragBkm, grp.dataset.gid || undefined, null, false);
+    }
+  } else if (dragGrp) {
+    const grp = (ev.target as HTMLElement).closest('.bkm-group') as HTMLElement | null;
+    if (grp && grp.dataset.gid && grp.dataset.gid !== dragGrp) {
+      const r = grp.getBoundingClientRect();
+      const gs = [...bookmarkGroups()];
+      reorderById(gs, (g) => g.id, dragGrp, grp.dataset.gid!, ev.clientY < r.top + r.height / 2);
+      state.settings = await relay.patchSettings({ bookmarkGroups: gs });
+      renderBookmarks();
+    }
+  }
+  endBkmDrag();
+});
+$('#bkmList').addEventListener('dragend', endBkmDrag);
 $('#histExport').onclick = (e) => { (e as MouseEvent).stopPropagation(); $('#histExMenu').classList.toggle('show'); };
 $('#histExMenu').addEventListener('click', (e) => { const b = (e.target as HTMLElement).closest('[data-fmt]') as HTMLElement | null; if (!b) return; $('#histExMenu').classList.remove('show'); doExport(b.dataset.fmt as ExFmt); });
 document.addEventListener('click', (e) => { if (!(e.target as HTMLElement).closest('.hist-exwrap')) $('#histExMenu').classList.remove('show'); });
@@ -1152,7 +1402,9 @@ $('#palList').addEventListener('click', (e) => { const it = (e.target as HTMLEle
 // settings
 $('#btnSettings').onclick = openSettings;
 $('#settingsClose').onclick = closeSettings;
-$('#scrim').onclick = () => { closeSettings(); closePalette(); };
+$('#cfOk').onclick = () => closeConfirm(true);
+$('#cfCancel').onclick = () => closeConfirm(false);
+$('#scrim').onclick = () => { closeConfirm(false); closeSettings(); closePalette(); };
 $('#setWsBtn').onclick = async () => { state.settings = await relay.openWorkspace(); updateStatus(); reflectSettings(); };
 $('#autoApprove').addEventListener('change', async (e) => { state.settings = await relay.patchSettings({ autoApprove: (e.target as HTMLInputElement).checked }); });
 document.querySelectorAll('.set[data-key]').forEach((b) => b.addEventListener('click', async () => {
@@ -1166,7 +1418,9 @@ document.querySelectorAll('.set[data-key]').forEach((b) => b.addEventListener('c
 document.addEventListener('click', (e) => { const t = e.target as HTMLElement; if ($('#modelMenu').classList.contains('show') && !t.closest('#modelMenu') && !t.closest('#modelBtn') && !t.closest('#tabModelBtn')) closeModelMenu(); });
 document.addEventListener('keydown', (e) => {
   const mod = e.ctrlKey || e.metaKey;
-  if (mod && e.key.toLowerCase() === 'k') { e.preventDefault(); $('#palette').classList.contains('show') ? closePalette() : openPalette(); }
+  if (mod && e.shiftKey && e.key.toLowerCase() === 'k') { e.preventDefault(); $('#bookmarksPanel').classList.contains('show') ? closeBookmarks() : openBookmarks(); }
+  else if (mod && e.key.toLowerCase() === 'k') { e.preventDefault(); $('#palette').classList.contains('show') ? closePalette() : openPalette(); }
+  else if (mod && !e.shiftKey && e.key.toLowerCase() === 'd') { e.preventDefault(); bookmarkSelection(); }
   else if (mod && e.shiftKey && e.key.toLowerCase() === 'o') { e.preventDefault(); addFolderTab(); }
   else if (mod && e.shiftKey && e.key.toLowerCase() === 'c') { e.preventDefault(); newClaudeTab(); }
   else if (mod && e.shiftKey && e.key.toLowerCase() === 'h') { e.preventDefault(); $('#historyPanel').classList.contains('show') ? closeHistory() : openHistory(); }
@@ -1176,7 +1430,7 @@ document.addEventListener('keydown', (e) => {
   else if (mod && e.key.toLowerCase() === 's') { e.preventDefault(); saveActive(); }
   else if (mod && e.key.toLowerCase() === 'l') { e.preventDefault(); clearActive(); }
   else if (mod && e.key.toLowerCase() === 'w') { e.preventDefault(); state.active && closeTab(state.active); }
-  else if (e.key === 'Escape') { closeModelMenu(); closePalette(); closeSettings(); closeTabMenu(); closeColorPop(); closeHistory(); }
+  else if (e.key === 'Escape') { closeConfirm(false); closeModelMenu(); closePalette(); closeSettings(); closeTabMenu(); closeColorPop(); closeHistory(); closeBookmarks(); hideBkmPop(); }
 });
 
 relay.onPtyData((id: string, data: string) => { state.tabs.find((t) => t.id === id)?.term.write(data); persistWorkspace(); });

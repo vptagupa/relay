@@ -54,6 +54,20 @@ export interface Workspace {
   tabs: OpenTab[];
 }
 
+// A saved command snippet — created by highlighting text in a block and bookmarking it.
+export interface Bookmark {
+  id: string;
+  text: string;
+  createdAt: number;
+  groupId?: string;                 // which BookmarkGroup it belongs to (undefined = ungrouped)
+}
+
+// A named group of bookmarks. Array order in Settings.bookmarkGroups is the display order.
+export interface BookmarkGroup {
+  id: string;
+  name: string;
+}
+
 export interface Settings {
   workspace: string | null;         // opened project root
   defaultModel: string;
@@ -67,6 +81,8 @@ export interface Settings {
   sidebarWidth: number;             // sidebar width in px
   shellIntegration: boolean;        // inject command-block markers into new shells
   blocksView: boolean;              // Warp-style blocks as the main view (vs classic xterm)
+  bookmarks: Bookmark[];            // saved command snippets
+  bookmarkGroups: BookmarkGroup[];  // groups for organizing bookmarks (display order = array order)
   hasKey: Record<string, boolean>;  // provider -> whether a key is stored (never the key itself)
 }
 
