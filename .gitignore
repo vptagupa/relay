@@ -1,0 +1,9 @@
+node_modules/
+.vite/
+out/
+dist/
+*.log
+.DS_Store
+
+# stray build bundle at repo root (vite emits to .vite/)
+/main.js

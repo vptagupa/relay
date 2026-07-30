@@ -1,0 +1,1510 @@
+<title>Relay — Agent Terminal</title>
+
+<style>
+/* ============================================================
+   RELAY — token system (both themes designed, not inverted)
+   ============================================================ */
+:root{
+  /* light is the default ground; dark redefined below */
+  --bg:#eef1f5;
+  --surface:#ffffff;
+  --surface-2:#f4f6f9;
+  --surface-3:#e9edf2;
+  --canvas:#f7f8fb;          /* terminal viewport */
+  --border:#dce1e8;
+  --border-strong:#c6cfda;
+  --text:#1a2028;
+  --text-dim:#4f5a68;
+  --muted:#8894a3;
+  --accent:#b0761a;          /* amber, darkened for light-ground contrast */
+  --accent-2:#916013;
+  --accent-ghost:rgba(176,118,26,.12);
+  --accent-line:rgba(176,118,26,.55);
+  --ok:#1a7f37;
+  --err:#cf222e;
+  --c-green:#1a7f37;
+  --c-red:#cf222e;
+  --c-blue:#0969da;
+  --c-magenta:#8250df;
+  --c-cyan:#0b6e78;
+  --c-yellow:#9a6700;
+  --sel:rgba(176,118,26,.18);
+  --shadow:0 12px 40px -12px rgba(26,32,40,.28);
+  --shadow-sm:0 2px 8px -3px rgba(26,32,40,.22);
+  --radius:10px;
+  --mono:ui-monospace,"SF Mono","Cascadia Code","JetBrains Mono","Fira Code",Menlo,Consolas,"Liberation Mono",monospace;
+  --sans:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+}
+@media (prefers-color-scheme:dark){
+  :root{
+    --bg:#0e1116;
+    --surface:#12161d;
+    --surface-2:#171c25;
+    --surface-3:#1e2530;
+    --canvas:#0b0e13;
+    --border:#232b36;
+    --border-strong:#333d4d;
+    --text:#d8dee7;
+    --text-dim:#98a3b2;
+    --muted:#66717f;
+    --accent:#f0b429;
+    --accent-2:#ffcf5c;
+    --accent-ghost:rgba(240,180,41,.12);
+    --accent-line:rgba(240,180,41,.6);
+    --ok:#7ee787;
+    --err:#ff7b72;
+    --c-green:#7ee787;
+    --c-red:#ff7b72;
+    --c-blue:#6cb6ff;
+    --c-magenta:#d2a8ff;
+    --c-cyan:#56d4dd;
+    --c-yellow:#f0b429;
+    --sel:rgba(240,180,41,.22);
+    --shadow:0 20px 60px -18px rgba(0,0,0,.7);
+    --shadow-sm:0 3px 12px -4px rgba(0,0,0,.6);
+  }
+}
+/* explicit toggle wins over media in BOTH directions */
+:root[data-theme="light"]{
+  --bg:#eef1f5;--surface:#ffffff;--surface-2:#f4f6f9;--surface-3:#e9edf2;--canvas:#f7f8fb;
+  --border:#dce1e8;--border-strong:#c6cfda;--text:#1a2028;--text-dim:#4f5a68;--muted:#8894a3;
+  --accent:#b0761a;--accent-2:#916013;--accent-ghost:rgba(176,118,26,.12);--accent-line:rgba(176,118,26,.55);
+  --ok:#1a7f37;--err:#cf222e;--c-green:#1a7f37;--c-red:#cf222e;--c-blue:#0969da;--c-magenta:#8250df;--c-cyan:#0b6e78;--c-yellow:#9a6700;
+  --sel:rgba(176,118,26,.18);--shadow:0 12px 40px -12px rgba(26,32,40,.28);--shadow-sm:0 2px 8px -3px rgba(26,32,40,.22);
+}
+:root[data-theme="dark"]{
+  --bg:#0e1116;--surface:#12161d;--surface-2:#171c25;--surface-3:#1e2530;--canvas:#0b0e13;
+  --border:#232b36;--border-strong:#333d4d;--text:#d8dee7;--text-dim:#98a3b2;--muted:#66717f;
+  --accent:#f0b429;--accent-2:#ffcf5c;--accent-ghost:rgba(240,180,41,.12);--accent-line:rgba(240,180,41,.6);
+  --ok:#7ee787;--err:#ff7b72;--c-green:#7ee787;--c-red:#ff7b72;--c-blue:#6cb6ff;--c-magenta:#d2a8ff;--c-cyan:#56d4dd;--c-yellow:#f0b429;
+  --sel:rgba(240,180,41,.22);--shadow:0 20px 60px -18px rgba(0,0,0,.7);--shadow-sm:0 3px 12px -4px rgba(0,0,0,.6);
+}
+
+*{box-sizing:border-box}
+html,body{height:100%}
+body{
+  margin:0;background:var(--bg);color:var(--text);
+  font-family:var(--sans);font-size:14px;line-height:1.5;
+  -webkit-font-smoothing:antialiased;overflow:hidden;
+}
+::selection{background:var(--sel)}
+button{font-family:inherit;color:inherit;cursor:pointer;border:none;background:none}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:4px}
+.tnum{font-variant-numeric:tabular-nums}
+
+/* ============================================================
+   APP SHELL
+   ============================================================ */
+.app{
+  display:grid;
+  grid-template-rows:auto 1fr auto;
+  height:100dvh;
+}
+
+/* ---- title bar ---- */
+.titlebar{
+  display:flex;align-items:center;gap:14px;
+  padding:0 14px;height:48px;
+  background:var(--surface);border-bottom:1px solid var(--border);
+}
+.brand{display:flex;align-items:center;gap:10px;min-width:0}
+.mark{
+  width:26px;height:26px;border-radius:7px;flex:none;
+  background:
+    radial-gradient(circle at 30% 25%, var(--accent-2), transparent 55%),
+    linear-gradient(150deg,var(--accent),var(--accent-2));
+  box-shadow:0 0 0 1px var(--accent-line) inset, 0 4px 12px -4px var(--accent);
+  position:relative;
+}
+.mark::after{
+  content:"›_";position:absolute;inset:0;display:grid;place-items:center;
+  font-family:var(--mono);font-size:11px;font-weight:700;color:#0b0e13;letter-spacing:-.5px;
+}
+.brand-name{font-weight:650;letter-spacing:-.01em;font-size:15px}
+.brand-tag{font-size:11px;color:var(--muted);font-weight:500;
+  padding:2px 7px;border:1px solid var(--border);border-radius:99px;margin-left:2px}
+.tb-spacer{flex:1}
+.tb-actions{display:flex;align-items:center;gap:6px}
+.tb-btn{
+  display:inline-flex;align-items:center;gap:7px;height:32px;padding:0 11px;
+  border-radius:8px;border:1px solid var(--border);background:var(--surface-2);
+  color:var(--text-dim);font-size:12.5px;font-weight:550;transition:.14s;
+}
+.tb-btn:hover{color:var(--text);border-color:var(--border-strong);background:var(--surface-3)}
+.tb-btn .kbd{color:var(--muted)}
+.tb-btn.accent{color:var(--accent);border-color:var(--accent-line);background:var(--accent-ghost)}
+.tb-btn.accent:hover{background:var(--accent-ghost);filter:brightness(1.08)}
+.tb-icon{width:34px;height:32px;padding:0;justify-content:center}
+.kbd{
+  font-family:var(--mono);font-size:10.5px;font-weight:600;
+  padding:1px 5px;border:1px solid var(--border);border-bottom-width:2px;
+  border-radius:5px;background:var(--surface);color:var(--text-dim);line-height:1.4;
+}
+
+/* ---- main split ---- */
+.main{display:grid;grid-template-columns:262px 1fr;min-height:0;overflow:hidden}
+.main.collapsed{grid-template-columns:0 1fr}
+
+/* ---- sidebar / library ---- */
+.sidebar{
+  background:var(--surface);border-right:1px solid var(--border);
+  display:flex;flex-direction:column;min-height:0;overflow:hidden;
+}
+.side-head{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:14px 14px 8px;
+}
+.side-title{font-size:11px;font-weight:700;letter-spacing:.09em;text-transform:uppercase;color:var(--muted)}
+.side-count{font-size:11px;color:var(--muted);font-family:var(--mono)}
+.side-sub{padding:0 14px 10px;font-size:11.5px;color:var(--muted);line-height:1.45}
+.side-list{flex:1;overflow-y:auto;padding:2px 8px 12px;display:flex;flex-direction:column;gap:3px}
+.side-list::-webkit-scrollbar{width:9px}
+.side-list::-webkit-scrollbar-thumb{background:var(--border-strong);border-radius:9px;border:2px solid var(--surface)}
+
+.lib-item{
+  position:relative;display:flex;flex-direction:column;gap:3px;
+  padding:9px 10px;border-radius:8px;border:1px solid transparent;
+  cursor:pointer;transition:.13s;
+}
+.lib-item:hover{background:var(--surface-2);border-color:var(--border)}
+.lib-item .row1{display:flex;align-items:center;gap:8px}
+.lib-dot{width:7px;height:7px;border-radius:99px;background:var(--accent);flex:none;box-shadow:0 0 0 3px var(--accent-ghost)}
+.lib-name{font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1}
+.lib-name[contenteditable]{outline:none;cursor:text}
+.lib-name[contenteditable]:focus{background:var(--accent-ghost);border-radius:4px;box-shadow:0 0 0 1px var(--accent-line)}
+.lib-meta{display:flex;align-items:center;gap:8px;font-size:11px;color:var(--muted);font-family:var(--mono);padding-left:15px}
+.lib-meta .cwd{color:var(--text-dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.lib-actions{
+  position:absolute;top:7px;right:7px;display:flex;gap:3px;opacity:0;transition:.13s;
+}
+.lib-item:hover .lib-actions{opacity:1}
+.lib-act{
+  width:24px;height:24px;display:grid;place-items:center;border-radius:6px;
+  background:var(--surface-3);color:var(--text-dim);border:1px solid var(--border);
+}
+.lib-act:hover{color:var(--text);border-color:var(--border-strong)}
+.lib-act.danger:hover{color:var(--err);border-color:var(--err)}
+.lib-empty{padding:26px 14px;text-align:center;color:var(--muted);font-size:12.5px;line-height:1.6}
+.lib-empty svg{opacity:.5;margin-bottom:8px}
+
+.side-foot{border-top:1px solid var(--border);padding:10px 12px;display:flex;flex-direction:column;gap:8px}
+.storage-note{display:flex;align-items:center;gap:7px;font-size:11px;color:var(--muted)}
+.storage-note .sdot{width:6px;height:6px;border-radius:99px;background:var(--ok);flex:none}
+.storage-note.off .sdot{background:var(--err)}
+
+/* ============================================================
+   TERMINAL AREA
+   ============================================================ */
+.term-area{display:flex;flex-direction:column;min-width:0;min-height:0;background:var(--canvas)}
+
+/* tab strip */
+.tabstrip{
+  display:flex;align-items:stretch;gap:0;
+  background:var(--surface);border-bottom:1px solid var(--border);
+  padding:0 8px;height:42px;overflow-x:auto;scrollbar-width:none;
+}
+.tabstrip::-webkit-scrollbar{display:none}
+.side-toggle{
+  flex:none;width:34px;display:grid;place-items:center;color:var(--muted);
+  border-right:1px solid var(--border);margin-right:6px;
+}
+.side-toggle:hover{color:var(--text)}
+.tabs{display:flex;align-items:stretch;gap:2px;min-width:0}
+.tab{
+  position:relative;display:flex;align-items:center;gap:8px;
+  padding:0 9px 0 12px;max-width:280px;min-width:0;
+  border-top:2px solid transparent;color:var(--text-dim);
+  font-size:12.5px;transition:.12s;cursor:pointer;align-self:center;height:32px;border-radius:7px;
+}
+.tab-model{
+  font-size:9.5px;color:var(--muted);border:1px solid var(--border);border-radius:5px;
+  padding:1px 5px;white-space:nowrap;flex:none;font-variant-numeric:tabular-nums;
+}
+.tab.active .tab-model{color:var(--accent);border-color:var(--accent-line)}
+.tab:hover{background:var(--surface-2);color:var(--text)}
+.tab.active{background:var(--canvas);color:var(--text);box-shadow:inset 0 0 0 1px var(--border)}
+.tab.active .tab-glyph{color:var(--accent)}
+.tab-glyph{font-family:var(--mono);font-size:11px;color:var(--muted);flex:none}
+.tab-name{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;min-width:0}
+.tab-close{
+  width:18px;height:18px;border-radius:5px;display:grid;place-items:center;
+  color:var(--muted);flex:none;opacity:0;transition:.12s;font-size:14px;line-height:1;
+}
+.tab:hover .tab-close,.tab.active .tab-close{opacity:1}
+.tab-close:hover{background:var(--surface-3);color:var(--err)}
+.tab-unsaved{width:7px;height:7px;border-radius:99px;background:var(--accent);flex:none}
+.tab-add{
+  flex:none;align-self:center;width:30px;height:30px;margin-left:4px;border-radius:7px;
+  display:grid;place-items:center;color:var(--muted);font-size:17px;
+}
+.tab-add:hover{background:var(--surface-2);color:var(--accent)}
+.tabstrip .spacer{flex:1;min-width:8px}
+.tab-tools{display:flex;align-items:center;gap:2px;padding-right:2px}
+.tt-btn{width:30px;height:30px;align-self:center;border-radius:7px;display:grid;place-items:center;color:var(--muted)}
+.tt-btn:hover{background:var(--surface-2);color:var(--text)}
+.tt-btn.save:hover{color:var(--accent)}
+.tt-model{
+  display:inline-flex;align-items:center;gap:6px;align-self:center;height:30px;padding:0 8px 0 10px;
+  border-radius:7px;border:1px solid var(--border);background:var(--surface-2);color:var(--text-dim);
+  font-size:12px;white-space:nowrap;transition:.13s;margin-right:2px;
+}
+.tt-model:hover{color:var(--text);border-color:var(--border-strong)}
+.tt-model .model-dot{width:6px;height:6px;border-radius:99px;background:var(--accent);flex:none}
+.tt-model svg{opacity:.55;transition:transform .16s}
+.tt-model[aria-expanded="true"] svg{transform:rotate(180deg)}
+.tt-model #tabModelName{max-width:118px;overflow:hidden;text-overflow:ellipsis}
+
+/* viewport */
+.viewport{
+  flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;
+  padding:16px 18px 4px;font-family:var(--mono);font-size:13px;line-height:1.65;
+  scroll-behavior:smooth;
+}
+.viewport::-webkit-scrollbar{width:11px}
+.viewport::-webkit-scrollbar-thumb{background:var(--border-strong);border-radius:11px;border:3px solid var(--canvas)}
+
+/* command block (Warp-style) */
+.block{
+  border:1px solid var(--border);border-left:3px solid var(--accent-line);
+  border-radius:9px;margin-bottom:11px;background:var(--surface);overflow:hidden;
+  animation:blockIn .22s ease both;
+}
+.block.err{border-left-color:var(--err)}
+.block.info{border-left-color:var(--c-blue)}
+@keyframes blockIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+.block-cmd{
+  display:flex;align-items:center;gap:8px;padding:8px 10px 8px 12px;
+  background:var(--surface-2);border-bottom:1px solid var(--border);
+}
+.block .cmd-text{color:var(--text);font-weight:550;white-space:pre-wrap;word-break:break-word;flex:1}
+.block-ts{font-size:10.5px;color:var(--muted);flex:none;opacity:0;transition:.13s}
+.block:hover .block-ts{opacity:1}
+.block-copy{
+  flex:none;font-size:10.5px;color:var(--muted);padding:3px 7px;border-radius:6px;
+  border:1px solid var(--border);background:var(--surface);opacity:0;transition:.13s;
+}
+.block:hover .block-copy{opacity:1}
+.block-copy:hover{color:var(--text);border-color:var(--border-strong)}
+.block-out{padding:9px 13px;white-space:pre-wrap;word-break:break-word;color:var(--text-dim)}
+.block-out:empty{display:none}
+.block-out .ascii{white-space:pre;overflow-x:auto;display:block;line-height:1.4}
+.block-out .ascii::-webkit-scrollbar{height:8px}
+.block-out .ascii::-webkit-scrollbar-thumb{background:var(--border-strong);border-radius:8px}
+
+/* prompt fragments */
+.p-user{color:var(--c-green)}
+.p-at,.p-sep{color:var(--muted)}
+.p-host{color:var(--c-magenta)}
+.p-path{color:var(--accent);font-weight:600}
+.p-dollar{color:var(--text-dim);font-weight:700}
+
+/* ansi-ish output helpers */
+.o-dir{color:var(--c-blue);font-weight:600}
+.o-exe{color:var(--c-green)}
+.o-file{color:var(--text)}
+.o-dim{color:var(--muted)}
+.o-key{color:var(--c-magenta)}
+.o-ok{color:var(--ok)}
+.o-err{color:var(--err)}
+.o-warn{color:var(--c-yellow)}
+.o-accent{color:var(--accent)}
+.o-cyan{color:var(--c-cyan)}
+.o-link{color:var(--c-blue);text-decoration:underline;text-underline-offset:2px}
+
+/* live input row */
+.inputrow{
+  display:flex;align-items:baseline;gap:8px;padding:10px 13px 22px;
+  font-family:var(--mono);font-size:13px;
+}
+.inputrow .prompt{flex:none;white-space:nowrap}
+.cmd-input{
+  flex:1;min-width:0;border:none;background:transparent;color:var(--text);
+  font-family:var(--mono);font-size:13px;line-height:1.65;caret-color:var(--accent);
+  padding:0;
+}
+.cmd-input:focus{outline:none}
+.cmd-input::placeholder{color:var(--muted)}
+.ghost{color:var(--muted);pointer-events:none;position:relative}
+
+/* ============================================================
+   STATUS BAR
+   ============================================================ */
+.statusbar{
+  display:flex;align-items:center;gap:0;height:30px;padding:0 4px;
+  background:var(--surface);border-top:1px solid var(--border);
+  font-size:11.5px;color:var(--text-dim);font-family:var(--mono);
+}
+.st-seg{display:flex;align-items:center;gap:6px;padding:0 11px;height:100%;white-space:nowrap}
+.st-seg.accent{color:var(--accent)}
+.st-seg .dot{width:6px;height:6px;border-radius:99px;background:var(--ok)}
+.st-seg .dot.pulse{animation:pulse 2s ease-in-out infinite}
+.st-seg.saving .dot{background:var(--accent);animation:pulse 1s ease-in-out infinite}
+.st-seg.off .dot{background:var(--muted);animation:none}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+.st-spacer{flex:1}
+.st-seg.btn{cursor:pointer}
+.st-seg.btn:hover{background:var(--surface-2);color:var(--text)}
+
+/* ============================================================
+   OVERLAYS (palette + agent)
+   ============================================================ */
+.scrim{
+  position:fixed;inset:0;background:rgba(6,8,12,.5);backdrop-filter:blur(2px);
+  z-index:40;opacity:0;pointer-events:none;transition:.16s;
+}
+.scrim.show{opacity:1;pointer-events:auto}
+
+/* command palette */
+.palette{
+  position:fixed;top:12vh;left:50%;transform:translateX(-50%) scale(.97);
+  width:min(560px,92vw);z-index:50;
+  background:var(--surface);border:1px solid var(--border-strong);border-radius:14px;
+  box-shadow:var(--shadow);overflow:hidden;opacity:0;pointer-events:none;transition:.16s;
+}
+.palette.show{opacity:1;pointer-events:auto;transform:translateX(-50%) scale(1)}
+.pal-input-wrap{display:flex;align-items:center;gap:10px;padding:14px 16px;border-bottom:1px solid var(--border)}
+.pal-input-wrap svg{color:var(--muted);flex:none}
+.pal-input{flex:1;border:none;background:none;color:var(--text);font-size:15px;font-family:var(--sans)}
+.pal-input:focus{outline:none}
+.pal-input::placeholder{color:var(--muted)}
+.pal-list{max-height:min(380px,52vh);overflow-y:auto;padding:6px}
+.pal-group{font-size:10px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);padding:10px 10px 5px}
+.pal-item{
+  display:flex;align-items:center;gap:11px;padding:9px 10px;border-radius:9px;cursor:pointer;
+}
+.pal-item.sel{background:var(--accent-ghost)}
+.pal-item .pi-ico{width:26px;height:26px;border-radius:7px;display:grid;place-items:center;flex:none;
+  background:var(--surface-3);color:var(--text-dim);font-family:var(--mono);font-size:13px}
+.pal-item.sel .pi-ico{color:var(--accent);background:var(--surface)}
+.pal-item .pi-body{flex:1;min-width:0}
+.pal-item .pi-title{font-size:13.5px;font-weight:550;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pal-item .pi-desc{font-size:11.5px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pal-item .pi-kbd{flex:none}
+.pal-empty{padding:26px;text-align:center;color:var(--muted);font-size:13px}
+
+/* agent slide-over */
+.agent{
+  position:fixed;top:0;right:0;bottom:0;width:min(400px,94vw);z-index:50;
+  background:var(--surface);border-left:1px solid var(--border-strong);
+  box-shadow:var(--shadow);display:flex;flex-direction:column;
+  transform:translateX(100%);transition:transform .22s cubic-bezier(.4,0,.2,1);
+}
+.agent.show{transform:none}
+.agent-head{display:flex;align-items:center;gap:10px;padding:16px 16px 14px;border-bottom:1px solid var(--border)}
+.agent-ava{
+  width:30px;height:30px;border-radius:8px;flex:none;display:grid;place-items:center;
+  background:linear-gradient(150deg,var(--accent),var(--accent-2));color:#0b0e13;font-weight:800;
+  box-shadow:0 4px 12px -4px var(--accent);
+}
+.agent-title{font-weight:650;font-size:14.5px}
+.agent-sub{font-size:11.5px;color:var(--muted)}
+.agent-close{margin-left:auto;width:30px;height:30px;border-radius:7px;display:grid;place-items:center;color:var(--muted)}
+.agent-close:hover{background:var(--surface-2);color:var(--text)}
+.agent-headmain{display:flex;flex-direction:column;gap:3px;align-items:flex-start;min-width:0}
+/* model selector */
+.model-btn{
+  display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--text-dim);
+  padding:3px 6px 3px 9px;border:1px solid var(--border);border-radius:99px;background:var(--surface-2);transition:.13s;
+  white-space:nowrap;max-width:100%;
+}
+.model-btn #modelBtnName{overflow:hidden;text-overflow:ellipsis}
+.model-btn:hover{border-color:var(--border-strong);color:var(--text)}
+.model-btn .model-dot{width:6px;height:6px;border-radius:99px;background:var(--accent);flex:none}
+.model-btn svg{opacity:.55;transition:transform .16s}
+.model-btn[aria-expanded="true"] svg{transform:rotate(180deg)}
+.model-menu{
+  position:fixed;z-index:70;width:320px;max-width:calc(100vw - 24px);
+  max-height:min(72vh,540px);overflow-y:auto;
+  background:var(--surface);border:1px solid var(--border-strong);border-radius:13px;
+  box-shadow:var(--shadow);padding:6px;
+  opacity:0;pointer-events:none;transform:translateY(-6px);transition:opacity .15s,transform .15s;
+}
+.model-menu.show{opacity:1;pointer-events:auto;transform:none}
+.model-menu::-webkit-scrollbar{width:9px}
+.model-menu::-webkit-scrollbar-thumb{background:var(--border-strong);border-radius:9px;border:2px solid var(--surface)}
+.model-menu-head{font-size:10px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);padding:8px 9px 4px}
+.model-group{font-size:10.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--accent);padding:11px 9px 5px;border-top:1px solid var(--border);margin-top:4px}
+.model-group:first-of-type{border-top:none;margin-top:0}
+.model-item{display:block;width:100%;text-align:left;padding:10px 11px;border-radius:10px;border:1px solid transparent;cursor:pointer;transition:.12s}
+.model-item:hover{background:var(--surface-2)}
+.model-item.active{background:var(--accent-ghost);border-color:var(--accent-line)}
+.mi-top{display:flex;align-items:center;gap:8px}
+.mi-name{font-size:13.5px;font-weight:600;color:var(--text)}
+.mi-badge{font-size:9px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--accent);border:1px solid var(--accent-line);border-radius:99px;padding:1px 6px}
+.mi-check{margin-left:auto;color:var(--accent);font-weight:700;font-size:13px}
+.mi-id{font-family:var(--mono);font-size:11px;color:var(--muted);margin-top:3px}
+.mi-desc{font-size:12px;color:var(--text-dim);margin-top:5px;line-height:1.45}
+.mi-meta{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+.mi-chip{font-size:10.5px;color:var(--muted);border:1px solid var(--border);border-radius:6px;padding:1px 7px;font-family:var(--mono);font-variant-numeric:tabular-nums}
+.agent-body{flex:1;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:12px}
+.agent-hi{font-size:13px;color:var(--text-dim);line-height:1.6}
+.agent-hi b{color:var(--text);font-weight:600}
+.agent-chips{display:flex;flex-wrap:wrap;gap:7px}
+.agent-chip{
+  font-size:12px;padding:6px 11px;border-radius:99px;border:1px solid var(--border);
+  background:var(--surface-2);color:var(--text-dim);transition:.13s;
+}
+.agent-chip:hover{border-color:var(--accent-line);color:var(--accent);background:var(--accent-ghost)}
+.sugg{border:1px solid var(--border);border-radius:11px;background:var(--surface-2);overflow:hidden;animation:blockIn .2s ease both}
+.sugg-q{padding:9px 13px;font-size:12px;color:var(--muted);border-bottom:1px solid var(--border);display:flex;gap:7px;align-items:center}
+.sugg-q b{color:var(--text-dim);font-weight:600}
+.sugg-model{margin-left:auto;display:inline-flex;align-items:center;gap:4px;font-size:10.5px;color:var(--accent);white-space:nowrap}
+.sugg-model::before{content:"✦"}
+.sugg-cmd{display:flex;align-items:center;gap:10px;padding:11px 13px}
+.sugg-cmd code{
+  flex:1;font-family:var(--mono);font-size:13px;color:var(--accent);
+  background:var(--canvas);border:1px solid var(--border);border-radius:7px;padding:6px 9px;
+  white-space:nowrap;overflow-x:auto;
+}
+.sugg-why{padding:0 13px 12px;font-size:12px;color:var(--text-dim);line-height:1.55}
+.sugg-run{
+  flex:none;padding:6px 12px;border-radius:7px;font-size:12px;font-weight:600;
+  background:var(--accent);color:#0b0e13;transition:.13s;
+}
+.sugg-run:hover{filter:brightness(1.08)}
+.sugg-ins{flex:none;padding:6px 10px;border-radius:7px;font-size:12px;color:var(--text-dim);border:1px solid var(--border)}
+.sugg-ins:hover{border-color:var(--border-strong);color:var(--text)}
+.agent-inputwrap{padding:12px 14px;border-top:1px solid var(--border);display:flex;gap:8px;align-items:flex-end}
+.agent-input{
+  flex:1;border:1px solid var(--border);border-radius:10px;background:var(--surface-2);
+  color:var(--text);font-family:var(--sans);font-size:13.5px;padding:10px 12px;resize:none;
+  line-height:1.4;max-height:110px;
+}
+.agent-input:focus{outline:none;border-color:var(--accent-line);box-shadow:0 0 0 3px var(--accent-ghost)}
+.agent-send{
+  flex:none;width:40px;height:40px;border-radius:10px;display:grid;place-items:center;
+  background:var(--accent);color:#0b0e13;transition:.13s;
+}
+.agent-send:hover{filter:brightness(1.08)}
+
+/* toast */
+.toast-wrap{position:fixed;bottom:44px;left:50%;transform:translateX(-50%);z-index:60;display:flex;flex-direction:column;gap:8px;align-items:center}
+.toast{
+  display:flex;align-items:center;gap:9px;padding:9px 15px;border-radius:10px;
+  background:var(--surface);border:1px solid var(--border-strong);box-shadow:var(--shadow-sm);
+  font-size:12.5px;color:var(--text);animation:toastIn .2s ease both;
+}
+.toast .tdot{width:7px;height:7px;border-radius:99px;background:var(--accent);flex:none}
+.toast.ok .tdot{background:var(--ok)}
+@keyframes toastIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+
+@media (max-width:820px){
+  .main{grid-template-columns:1fr}
+  .sidebar{position:absolute;left:0;top:48px;bottom:30px;width:262px;z-index:30;
+    box-shadow:var(--shadow);transform:translateX(-100%);transition:transform .2s ease}
+  .main.mobile-open .sidebar{transform:none}
+  .brand-tag,.tb-btn .label{display:none}
+  .st-seg.hide-sm{display:none}
+}
+@media (prefers-reduced-motion:reduce){
+  *{animation-duration:.001ms!important;transition-duration:.001ms!important;scroll-behavior:auto!important}
+}
+</style>
+
+<style>
+/* ============================================================
+   RELAY · v2 — Owned-History Terminal  (design showcase section)
+   Scoped to .otd / #otdToggle so it never collides with the prototype.
+   Deliberately single-theme dark — the subject is a terminal.
+   ============================================================ */
+#otdToggle{position:fixed;right:18px;bottom:18px;z-index:300;display:inline-flex;align-items:center;gap:8px;padding:11px 16px;border-radius:12px;border:1px solid #3a2f12;background:linear-gradient(180deg,#1b1710,#12161d);color:#f0b429;font:600 12.5px/1 system-ui,'Segoe UI',sans-serif;letter-spacing:.02em;cursor:pointer;box-shadow:0 10px 34px rgba(0,0,0,.5)}
+#otdToggle:hover{border-color:#f0b429;color:#ffd873}
+#otdToggle:focus-visible{outline:2px solid #f0b429;outline-offset:3px}
+.otd{position:fixed;inset:0;z-index:250;display:none;overflow:auto;background:radial-gradient(1100px 560px at 80% -12%,#17120a 0%,#0b0e13 44%);color:#d8dee7;font-family:system-ui,'Segoe UI',Roboto,sans-serif;-webkit-font-smoothing:antialiased}
+.otd.show{display:block}
+.otd *{box-sizing:border-box}
+.otd-wrap{max-width:1200px;margin:0 auto;padding:60px 28px 110px}
+.otd-mono{font-family:ui-monospace,'Cascadia Code','JetBrains Mono',Consolas,monospace}
+.otd-eyebrow{font:600 11px/1 ui-monospace,Consolas,monospace;letter-spacing:.3em;text-transform:uppercase;color:#f0b429;margin-bottom:16px}
+.otd-h1{font-size:clamp(30px,4.6vw,54px);line-height:1.02;font-weight:800;letter-spacing:-.022em;color:#f4f7fb;margin:0 0 18px;text-wrap:balance;max-width:17ch}
+.otd-lede{font-size:16.5px;line-height:1.62;color:#9aa4b0;max-width:66ch;margin:0 0 24px}
+.otd-lede b{color:#c9d1da;font-weight:600}
+.otd-chips{display:flex;flex-wrap:wrap;gap:8px}
+.otd-chip{font:600 11.5px/1 ui-monospace,Consolas,monospace;color:#c9d1da;background:#131922;border:1px solid #232a33;border-radius:999px;padding:8px 13px}
+.otd-why{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin:46px 0 8px}
+.otd-why-col{border-radius:14px;padding:18px 20px;border:1px solid #232a33;background:#0f141b}
+.otd-why-col p{margin:0;font-size:14px;line-height:1.62;color:#9aa4b0}
+.otd-why-h{font:700 11px/1 ui-monospace,monospace;letter-spacing:.16em;text-transform:uppercase;margin-bottom:10px}
+.otd-bad .otd-why-h{color:#ff7b72}
+.otd-good .otd-why-h{color:#7ee787}
+.otd-good{border-color:#1c3a24;background:linear-gradient(180deg,#0d1712,#0f141b)}
+.otd-sec{margin:56px 0 18px}
+.otd-sec-h{font:600 11px/1 ui-monospace,monospace;letter-spacing:.26em;text-transform:uppercase;color:#66717f;margin:0;display:flex;align-items:center;gap:12px}
+.otd-sec-h::after{content:"";flex:1;height:1px;background:#1b222b}
+.otd-demo{display:grid;grid-template-columns:210px minmax(0,1fr) 312px;border:1px solid #232a33;border-radius:16px;overflow:hidden;background:#0a0d12;box-shadow:0 28px 80px rgba(0,0,0,.55)}
+.otd-rail{border-right:1px solid #1b222b;padding:12px 10px;background:#0c1016;min-width:0}
+.otd-rail-h{font:600 10px/1 ui-monospace,monospace;letter-spacing:.18em;text-transform:uppercase;color:#66717f;padding:6px 8px 10px}
+.otd-rail-item{display:flex;align-items:center;gap:8px;padding:7px 8px;border-radius:7px;font:12px/1.2 ui-monospace,Consolas,monospace;color:#9aa4b0;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.otd-rail-item:hover{background:#121821;color:#d8dee7}
+.otd-rail-item.on{background:#14202b;color:#f4f7fb;box-shadow:inset 2px 0 0 #f0b429}
+.otd-dot{width:7px;height:7px;border-radius:50%;flex:none}
+.otd-dot.ok{background:#3fb950}.otd-dot.fail{background:#ff7b72}.otd-dot.int{background:#6cb6ff}.otd-dot.live{background:#f0b429;box-shadow:0 0 0 3px rgba(240,180,41,.18)}
+.otd-term{display:flex;flex-direction:column;min-width:0;background:#0a0d12}
+.otd-tbar{display:flex;align-items:center;gap:10px;padding:10px 12px;border-bottom:1px solid #1b222b}
+.otd-search{flex:1;display:flex;align-items:center;gap:8px;background:#0f151d;border:1px solid #232a33;border-radius:8px;padding:7px 10px;color:#66717f;font-size:12.5px;min-width:0}
+.otd-search input{all:unset;flex:1;color:#d8dee7;font-size:12.5px;min-width:0}
+.otd-filter{font:600 11px/1 system-ui,sans-serif;color:#9aa4b0;border:1px solid #232a33;border-radius:7px;padding:6px 9px;background:#0f151d;cursor:pointer;white-space:nowrap}
+.otd-filter.on{color:#0b0e13;background:#f0b429;border-color:#f0b429}
+.otd-blocks{padding:10px 11px 14px;display:flex;flex-direction:column;gap:9px}
+.otd-block{border:1px solid #1d242e;border-radius:11px;background:#0d1218;overflow:hidden}
+.otd-block.fail{border-color:#3a2226}
+.otd-bhead{display:flex;align-items:center;gap:10px;padding:10px 12px;cursor:pointer}
+.otd-prompt{color:#f0b429;font:13px/1 ui-monospace,Consolas,monospace;flex:none}
+.otd-cmd{font:13px/1.3 ui-monospace,Consolas,monospace;color:#e8edf3;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;flex:1}
+.otd-meta{display:flex;align-items:center;gap:9px;flex:none;font:11px/1 ui-monospace,monospace;color:#66717f}
+.otd-badge{display:inline-flex;align-items:center;gap:5px;font:600 11px/1 ui-monospace,monospace;padding:4px 8px;border-radius:999px;flex:none}
+.otd-badge.ok{color:#7ee787;background:rgba(63,185,80,.12)}
+.otd-badge.fail{color:#ff9d97;background:rgba(255,123,114,.13)}
+.otd-chev{color:#66717f;font-size:11px;transition:transform .15s;flex:none}
+.otd-block.collapsed .otd-chev{transform:rotate(-90deg)}
+.otd-bout{border-top:1px solid #161d26;padding:11px 13px;font:12.5px/1.6 ui-monospace,'Cascadia Code',Consolas,monospace;color:#b6c0cb;white-space:pre-wrap;overflow-x:auto}
+.otd-block.collapsed .otd-bout,.otd-block.collapsed .otd-bactions{display:none}
+.otd-out-ok{color:#7ee787}.otd-out-fail{color:#ff9d97}.otd-out-dim{color:#66717f}
+.otd-more{color:#6cb6ff;cursor:pointer}
+.otd-bactions{display:flex;flex-wrap:wrap;gap:6px;padding:0 12px 11px}
+.otd-act{font:600 11px/1 system-ui,sans-serif;color:#9aa4b0;border:1px solid #232a33;border-radius:7px;padding:6px 9px;background:#0f151d;cursor:pointer}
+.otd-act:hover{color:#f0b429;border-color:#3a2f12}
+.otd-int{display:flex;align-items:flex-start;gap:11px;padding:12px 13px;border:1px dashed #2a3542;border-radius:11px;background:#0c141c;color:#9aa4b0;font-size:12.5px;line-height:1.5}
+.otd-int b{color:#6cb6ff;font-weight:600}
+.otd-live{display:flex;align-items:center;gap:9px;padding:7px 4px 2px;font:13px/1 ui-monospace,Consolas,monospace;color:#e8edf3}
+.otd-caret{width:8px;height:15px;background:#f0b429;display:inline-block;animation:otd-blink 1.1s steps(1) infinite}
+@keyframes otd-blink{50%{opacity:0}}
+.otd-chat{border-left:1px solid #1b222b;background:#0c1016;display:flex;flex-direction:column;min-width:0}
+.otd-chat-h{display:flex;align-items:center;gap:8px;padding:11px 13px;border-bottom:1px solid #1b222b;font:600 12px/1 system-ui,sans-serif;color:#d8dee7}
+.otd-star{color:#f0b429}
+.otd-chat-b{padding:12px;display:flex;flex-direction:column;gap:11px}
+.otd-turn .who{font:600 10px/1 ui-monospace,monospace;letter-spacing:.14em;text-transform:uppercase;color:#66717f;margin-bottom:5px}
+.otd-turn .bubble{background:#0f151d;border:1px solid #232a33;border-radius:10px;padding:9px 11px;color:#c9d1da;font-size:12.5px;line-height:1.55}
+.otd-turn.user .bubble{background:#14202b;border-color:#22303c}
+.otd-runchip{margin-top:8px;display:inline-flex;align-items:center;gap:7px;font:600 11px/1 ui-monospace,monospace;color:#9aa4b0;background:#0d1218;border:1px solid #232a33;border-radius:8px;padding:6px 9px;cursor:pointer}
+.otd-runchip:hover{border-color:#3a2f12;color:#f0b429}
+.otd-runchip .ok{color:#7ee787}.otd-runchip .fail{color:#ff9d97}
+.otd-feat{display:grid;grid-template-columns:repeat(auto-fill,minmax(256px,1fr));gap:12px}
+.otd-card{border:1px solid #232a33;border-radius:14px;background:#0f141b;padding:16px 17px}
+.otd-card:hover{border-color:#2c3641}
+.otd-ic{width:30px;height:30px;border-radius:9px;display:grid;place-items:center;background:#17120a;border:1px solid #3a2f12;color:#f0b429;font:15px/1 ui-monospace,monospace;margin-bottom:11px}
+.otd-card h3{font-size:14px;font-weight:700;color:#f4f7fb;margin:0 0 6px}
+.otd-card p{font-size:13px;line-height:1.55;color:#9aa4b0;margin:0}
+.otd-card p .k{color:#c9d1da;font-family:ui-monospace,Consolas,monospace;font-size:12px}
+.otd-arch{display:grid;grid-template-columns:1fr auto 1.3fr auto 1fr;align-items:center;gap:12px;border:1px solid #232a33;border-radius:14px;background:#0f141b;padding:20px}
+.otd-node{text-align:center;padding:15px 13px;border-radius:11px;border:1px solid #232a33;background:#0b0e13;height:100%}
+.otd-node .t{font:600 13px/1.2 system-ui,sans-serif;color:#f4f7fb;margin-bottom:6px}
+.otd-node .s{font-size:11.5px;color:#66717f;line-height:1.45}
+.otd-node.mid{border-color:#3a2f12;background:linear-gradient(180deg,#151007,#0b0e13)}
+.otd-node.mid .t{color:#f0b429}
+.otd-arrow{color:#66717f;font-size:20px}
+.otd-foot{margin:34px 0 0;font-size:13px;line-height:1.65;color:#66717f;max-width:74ch;border-top:1px solid #1b222b;padding-top:18px}
+.otd-foot b{color:#9aa4b0;font-weight:600}
+@media (max-width:920px){
+  .otd-demo{grid-template-columns:1fr}
+  .otd-rail{display:none}
+  .otd-chat{border-left:0;border-top:1px solid #1b222b}
+  .otd-why{grid-template-columns:1fr}
+  .otd-arch{grid-template-columns:1fr}
+  .otd-arrow{transform:rotate(90deg)}
+}
+@media (prefers-reduced-motion:reduce){.otd-caret{animation:none}}
+/* --- Claude Code compatibility --- */
+.otd-cc{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.otd-cc-card{border:1px solid #232a33;border-radius:14px;background:#0f141b;padding:18px 18px 16px;display:flex;flex-direction:column;gap:12px}
+.otd-cc-h{display:flex;align-items:center;gap:10px;font-size:15px;font-weight:700;color:#f4f7fb}
+.otd-cc-ic{width:29px;height:29px;border-radius:8px;display:grid;place-items:center;background:#17120a;border:1px solid #3a2f12;color:#f0b429;font:12.5px/1 ui-monospace,monospace;flex:none}
+.otd-cc-card p{margin:0;font-size:13.5px;line-height:1.6;color:#9aa4b0}
+.otd-cc-card p b{color:#c9d1da;font-weight:600}
+.otd-ccterm{border:1px solid #1b222b;border-radius:11px;overflow:hidden;background:#0a0d12;margin-top:auto}
+.otd-cctabs{display:flex;align-items:center;gap:4px;padding:7px 8px;border-bottom:1px solid #1b222b;background:#0c1016}
+.otd-cctab{font:11px/1 ui-monospace,Consolas,monospace;color:#66717f;padding:4px 8px;border-radius:6px}
+.otd-cctab.cc{color:#f0b429;background:color-mix(in srgb,#f0b429 16%,transparent);box-shadow:inset 2px 0 0 #f0b429}
+.otd-ccplus{margin-left:auto;color:#66717f;font-size:14px;padding-right:4px}
+.otd-ccbody{padding:11px 13px;font:12px/1.65 ui-monospace,'Cascadia Code',Consolas,monospace;color:#b6c0cb;white-space:pre-wrap;overflow-x:auto}
+.otd-ccset{border:1px solid #1b222b;border-radius:11px;background:#0c1016;padding:13px;margin-top:auto}
+.otd-ccset-row{display:flex;align-items:center;gap:10px;margin-bottom:10px}
+.otd-ccset-row label{font-size:12.5px;color:#d8dee7;font-weight:600}
+.otd-ccpill{margin-left:auto;font:600 10.5px/1 ui-monospace,monospace;padding:5px 9px;border-radius:999px}
+.otd-ccpill.ok{color:#7ee787;background:rgba(63,185,80,.12)}
+.otd-ccfield{display:flex;align-items:center;gap:8px;background:#0f151d;border:1px dashed #2a3542;border-radius:8px;padding:9px 11px;font:12.5px/1 ui-monospace,Consolas,monospace;color:#66717f}
+.otd-ccopt{margin-left:auto;font:600 10px/1 system-ui,sans-serif;letter-spacing:.08em;text-transform:uppercase;color:#66717f}
+.otd-cchint{margin-top:10px;font-size:11.5px;line-height:1.5;color:#66717f}
+@media (max-width:920px){.otd-cc{grid-template-columns:1fr}}
+</style>
+
+<div class="app" id="app">
+  <!-- TITLE BAR -->
+  <header class="titlebar">
+    <div class="brand">
+      <div class="mark" aria-hidden="true"></div>
+      <span class="brand-name">Relay</span>
+      <span class="brand-tag">agent terminal</span>
+    </div>
+    <div class="tb-spacer"></div>
+    <div class="tb-actions">
+      <button class="tb-btn accent" id="btnAgent" title="Ask the agent (Ctrl/⌘ J)">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3 1.9 4.6L18.5 9.5 13.9 11.4 12 16l-1.9-4.6L5.5 9.5l4.6-1.9z"/><path d="M18 15v4M20 17h-4"/></svg>
+        <span class="label">Ask agent</span><span class="kbd">⌘J</span>
+      </button>
+      <button class="tb-btn" id="btnPalette" title="Command palette (Ctrl/⌘ K)">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+        <span class="kbd">⌘K</span>
+      </button>
+      <button class="tb-btn tb-icon" id="btnTheme" title="Toggle theme" aria-label="Toggle theme"></button>
+    </div>
+  </header>
+
+  <!-- MAIN -->
+  <div class="main" id="mainSplit">
+    <!-- SIDEBAR / LIBRARY -->
+    <aside class="sidebar">
+      <div class="side-head">
+        <span class="side-title">Library</span>
+        <span class="side-count" id="libCount">0</span>
+      </div>
+      <p class="side-sub">Every terminal auto-saves here as you work. Click one to re-open it with its working directory and scrollback restored.</p>
+      <div class="side-list" id="libList"></div>
+      <div class="side-foot">
+        <div class="storage-note" id="storageNote">
+          <span class="sdot"></span><span id="storageText">Sessions saved to this browser</span>
+        </div>
+      </div>
+    </aside>
+
+    <!-- TERMINAL -->
+    <section class="term-area">
+      <div class="tabstrip">
+        <button class="side-toggle" id="btnSidebar" title="Toggle library" aria-label="Toggle library">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/></svg>
+        </button>
+        <div class="tabs" id="tabs"></div>
+        <button class="tab-add" id="btnNewTab" title="New terminal (Ctrl/⌘ T)">+</button>
+        <div class="spacer"></div>
+        <div class="tab-tools">
+          <button class="tt-model" id="tabModelBtn" aria-expanded="false" aria-haspopup="listbox" title="Model for this terminal">
+            <span class="model-dot"></span><span id="tabModelName">Opus 5</span>
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+          </button>
+          <button class="tt-btn save" id="btnSave" title="Save now / rename this terminal (Ctrl/⌘ S)">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2Z"/><path d="M17 21v-8H7v8M7 3v5h8"/></svg>
+          </button>
+          <button class="tt-btn" id="btnClear" title="Clear terminal (Ctrl L)">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m2 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/></svg>
+          </button>
+        </div>
+      </div>
+      <div class="viewport" id="viewport" tabindex="-1"></div>
+    </section>
+  </div>
+
+  <!-- STATUS BAR -->
+  <footer class="statusbar">
+    <div class="st-seg accent"><span class="dot pulse"></span><span id="stSession">—</span></div>
+    <div class="st-seg hide-sm">bash</div>
+    <div class="st-seg" id="stCwd">~</div>
+    <div class="st-spacer"></div>
+    <div class="st-seg hide-sm" id="stLines">0 blocks</div>
+    <div class="st-seg btn" id="stAutosave" title="Toggle auto-save"><span class="dot"></span><span id="stAutosaveText">Auto-save on</span></div>
+    <div class="st-seg btn hide-sm" id="stAgent"><span class="dot"></span>agent ready</div>
+    <div class="st-seg tnum" id="stClock">--:--</div>
+  </footer>
+</div>
+
+<!-- OVERLAYS -->
+<div class="scrim" id="scrim"></div>
+
+<div class="palette" id="palette" role="dialog" aria-label="Command palette">
+  <div class="pal-input-wrap">
+    <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+    <input class="pal-input" id="palInput" placeholder="Type a command or search sessions…" spellcheck="false" autocomplete="off">
+  </div>
+  <div class="pal-list" id="palList"></div>
+</div>
+
+<aside class="agent" id="agentPanel" role="dialog" aria-label="Agent assist">
+  <div class="agent-head">
+    <div class="agent-ava">✦</div>
+    <div class="agent-headmain">
+      <div class="agent-title">Agent</div>
+      <button class="model-btn" id="modelBtn" aria-expanded="false" aria-haspopup="listbox" title="Choose the model powering the agent">
+        <span class="model-dot"></span><span id="modelBtnName">Opus 5</span>
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+      </button>
+    </div>
+    <button class="agent-close" id="btnAgentClose" aria-label="Close">
+      <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+    </button>
+  </div>
+  <div class="agent-body" id="agentBody">
+    <p class="agent-hi">Tell me what you want to do in plain English and I'll translate it into a shell command you can run in <b>one click</b>. Try one:</p>
+    <div class="agent-chips" id="agentChips"></div>
+  </div>
+  <div class="agent-inputwrap">
+    <textarea class="agent-input" id="agentInput" rows="1" placeholder="e.g. create a folder called builds" spellcheck="false"></textarea>
+    <button class="agent-send" id="agentSend" aria-label="Ask">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2 11 13M22 2l-7 20-4-9-9-4z"/></svg>
+    </button>
+  </div>
+</aside>
+
+<div class="model-menu" id="modelMenu" role="listbox" aria-label="Model"></div>
+
+<div class="toast-wrap" id="toastWrap"></div>
+
+<script>
+(function(){
+"use strict";
+const $=s=>document.querySelector(s), esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const USER="agent", HOST="relay", HOME="/home/agent";
+
+/* ---------- persistence (graceful fallback) ---------- */
+let STORAGE_OK=true;
+const store={
+  get(k,d){try{const v=localStorage.getItem(k);return v?JSON.parse(v):d;}catch(e){STORAGE_OK=false;return d;}},
+  set(k,v){try{localStorage.setItem(k,JSON.stringify(v));}catch(e){STORAGE_OK=false;}}
+};
+
+/* ---------- virtual filesystem (shared machine, resets on reload) ---------- */
+function dir(children){return {type:'dir',children:children||{}};}
+function file(content){return {type:'file',content:content};}
+const FS={type:'dir',children:{home:dir({agent:dir({
+  'README.md':file("# Relay\n\nA block-based agent terminal. Every command becomes a\nself-contained block you can copy, and every session can be\nsaved to the Library and re-opened later.\n\nRun `help` to see the commands, or press Ctrl/⌘ J to ask the agent."),
+  projects:dir({
+    relay:dir({
+      src:dir({'index.ts':file("export const version = '1.4.0';\n"),'shell.ts':file("// command dispatcher\n")}),
+      'package.json':file('{\n  "name": "relay",\n  "version": "1.4.0",\n  "bin": { "relay": "./bin/relay" }\n}\n'),
+      'README.md':file("Relay core.\n")
+    }),
+    api:dir({'server.ts':file("import http from 'node:http';\n"),'.env':file("PORT=8080\nLOG_LEVEL=info\n")})
+  }),
+  notes:dir({'todo.md':file("- [x] block-based rendering\n- [x] session library\n- [ ] pane splitting\n- [ ] ssh profiles\n")}),
+  '.config':dir({'relay.json':file('{ "theme": "auto", "shell": "bash" }\n')})
+})})}};
+
+function normalize(p){const st=[];for(const seg of p.split('/')){if(seg===''||seg==='.')continue;if(seg==='..'){st.pop();continue;}st.push(seg);}return '/'+st.join('/');}
+function resolvePath(cwd,arg){if(!arg)return cwd;if(arg==='~')arg=HOME;else if(arg.startsWith('~/'))arg=HOME+arg.slice(1);const base=arg.startsWith('/')?arg:(cwd==='/'?'':cwd)+'/'+arg;return normalize(base)||'/';}
+function getNode(p){if(p==='/'||p==='')return FS;let n=FS;for(const seg of p.split('/').filter(Boolean)){if(n.type!=='dir'||!n.children[seg])return null;n=n.children[seg];}return n;}
+function shortCwd(c){return c===HOME?'~':c.startsWith(HOME+'/')?'~'+c.slice(HOME.length):c;}
+function promptHTML(cwd){return `<span class="p-user">${USER}</span><span class="p-at">@</span><span class="p-host">${HOST}</span><span class="p-sep"> </span><span class="p-path">${esc(shortCwd(cwd))}</span><span class="p-dollar"> $</span>`;}
+
+/* ---------- state ---------- */
+let state={tabs:[],active:null,library:[],autosave:true,model:'claude-opus-5'};
+
+/* ---------- models (agent LLM selector) ----------
+   Claude IDs/pricing are authoritative; OpenAI & Google entries reflect
+   public information as of mid-2026 and may shift as vendors update. */
+const MODELS=[
+  // Anthropic
+  {id:'claude-opus-5',        name:'Claude Opus 5',        short:'Opus 5',        provider:'Anthropic',        desc:'Most capable all-rounder — deep reasoning, agentic and long-horizon coding.', ctx:'1M context', price:'$5 / $25', badge:'Recommended'},
+  {id:'claude-sonnet-5',      name:'Claude Sonnet 5',      short:'Sonnet 5',      provider:'Anthropic',        desc:'Balanced — near-Opus quality, faster and lower cost.', ctx:'1M context', price:'$3 / $15'},
+  {id:'claude-haiku-4-5',     name:'Claude Haiku 4.5',     short:'Haiku 4.5',     provider:'Anthropic',        desc:'Fastest Claude — quick, cost-effective everyday responses.', ctx:'200K context', price:'$1 / $5'},
+  {id:'claude-fable-5',       name:'Claude Fable 5',       short:'Fable 5',       provider:'Anthropic',        desc:'Frontier — the most demanding reasoning and long-horizon agentic work.', ctx:'1M context', price:'$10 / $50'},
+  // OpenAI
+  {id:'gpt-5.6-sol',          name:'GPT-5.6 Sol',          short:'GPT-5.6 Sol',   provider:'OpenAI',           desc:'OpenAI frontier — complex reasoning and coding.', ctx:'1.05M context', price:'$5 / $30'},
+  {id:'gpt-5.6-terra',        name:'GPT-5.6 Terra',        short:'GPT-5.6 Terra', provider:'OpenAI',           desc:'Balanced intelligence and cost for production workloads.', ctx:'1.05M context', price:'$2.50 / $15'},
+  {id:'gpt-5.6-luna',         name:'GPT-5.6 Luna',         short:'GPT-5.6 Luna',  provider:'OpenAI',           desc:'Cost-sensitive, high-volume workloads.', ctx:'1.05M context', price:'$1 / $6'},
+  // Google
+  {id:'gemini-3.1-pro',       name:'Gemini 3.1 Pro',       short:'Gemini 3.1 Pro', provider:'Google',          desc:'Google flagship — industry-leading 2M-token context.', ctx:'2M context', price:'$2 / $12'},
+  {id:'gemini-3.5-flash',     name:'Gemini 3.5 Flash',     short:'Gemini 3.5 Flash', provider:'Google',        desc:'Fast and capable for everyday tasks.', ctx:'1M context', price:'$1.50 / $9'},
+  {id:'gemini-3.1-flash-lite',name:'Gemini 3.1 Flash-Lite',short:'Gemini Flash-Lite', provider:'Google',       desc:'Cheapest current-gen — high-throughput, low latency.', ctx:'1M context', price:'$0.25 / $1.50'},
+];
+const modelById=id=>MODELS.find(m=>m.id===id)||MODELS.find(m=>m.id==='claude-opus-5');
+const currentModel=()=>{const t=activeTab();return modelById(t?t.model:state.model);};
+let uid=1; const nextId=p=>`${p}${uid++}_${state.tabs.length}${state.library.length}`;
+
+/* ---------- commands ---------- */
+function tokenize(str){const out=[];const re=/"([^"]*)"|'([^']*)'|(\S+)/g;let m;while((m=re.exec(str)))out.push(m[1]??m[2]??m[3]);return out;}
+
+const HELP=[
+  ['help','this help'],['ls [-la] [path]','list directory'],['cd [path]','change directory'],
+  ['pwd','print working directory'],['cat <file>','print a file'],['tree [path]','directory tree'],
+  ['mkdir <name>','create a directory'],['touch <name>','create a file'],['rm [-r] <path>','remove'],
+  ['echo <text>','print text'],['whoami','current user'],['date','current date/time'],
+  ['du -sh','disk usage'],['history','command history'],['about','about Relay'],
+  ['agent <text>','ask the agent inline'],['save [name]','save this session to the Library'],
+  ['theme','toggle light / dark'],['clear','clear the terminal']
+];
+
+const commands={
+  help(){return {out:'<span class="o-accent">Relay</span> — available commands\n\n'+HELP.map(([c,d])=>`  <span class="o-key">${esc(c.padEnd(18))}</span><span class="o-dim">${esc(d)}</span>`).join('\n')+'\n\n<span class="o-dim">Tip: press</span> <span class="o-accent">Tab</span> <span class="o-dim">to complete, ↑/↓ for history, Ctrl/⌘ J for the agent.</span>'};},
+  about(){const art=
+`   ___      _
+  | _ \\___ | |__ _ _  _
+  |   / -_)| / _\` | || |   `+`<span class="o-dim">relay</span> <span class="o-accent">v1.4.0</span>
+  |_|_\\___||_\\__,_|\\_, |   `+`<span class="o-dim">shell</span>  bash 5.2
+                   |__/    `+`<span class="o-dim">agent</span>  ready`;
+    return {out:`<span class="ascii o-accent">${art}</span>\n\nA block-based terminal with a built-in agent and a savable session Library.\nType <span class="o-key">help</span> for commands.`, cls:'info'};},
+  pwd(a,t){return {out:esc(t.cwd)};},
+  whoami(){return {out:USER};},
+  date(){return {out:esc(new Date().toString())};},
+  echo(a){return {out:esc(a.join(' '))};},
+  clear(a,t){t.blocks=[];renderViewport();persist();scheduleAutoSave(t);return null;},
+  theme(){toggleTheme();return {out:`theme → <span class="o-accent">${document.documentElement.getAttribute('data-theme')}</span>`};},
+  history(a,t){return {out:t.history.length?t.history.map((h,i)=>`  <span class="o-dim tnum">${String(i+1).padStart(3)}</span>  ${esc(h)}`).join('\n'):'<span class="o-dim">no history yet</span>'};},
+  ls(a,t){
+    const flags=a.filter(x=>x.startsWith('-')).join(''); const args=a.filter(x=>!x.startsWith('-'));
+    const p=resolvePath(t.cwd,args[0]); const n=getNode(p);
+    if(!n)return {out:`ls: <span class="o-err">${esc(args[0]||p)}: no such file or directory</span>`,err:true};
+    if(n.type==='file')return {out:esc(args[0]||p)};
+    let names=Object.keys(n.children); if(!flags.includes('a'))names=names.filter(x=>!x.startsWith('.'));
+    names.sort((x,y)=>x.localeCompare(y));
+    if(!names.length)return {out:'<span class="o-dim">(empty)</span>'};
+    if(flags.includes('l')){
+      const rows=names.map(nm=>{const c=n.children[nm];const isDir=c.type==='dir';
+        const size=isDir?'-':String((c.content||'').length);
+        const cls=isDir?'o-dir':(nm.includes('.')?'o-file':'o-exe');
+        return `  <span class="o-dim">${isDir?'d':'-'}rw-r--r--</span>  <span class="o-dim tnum">${size.padStart(5)}</span>  <span class="${cls}">${esc(nm)}${isDir?'/':''}</span>`;});
+      return {out:rows.join('\n')};
+    }
+    return {out:names.map(nm=>{const isDir=n.children[nm].type==='dir';const cls=isDir?'o-dir':(nm.includes('.')?'o-file':'o-exe');return `<span class="${cls}">${esc(nm)}${isDir?'/':''}</span>`;}).join('   ')};
+  },
+  cd(a,t){
+    const arg=a[0]||'~'; const p=resolvePath(t.cwd,arg); const n=getNode(p);
+    if(!n)return {out:`cd: <span class="o-err">${esc(arg)}: no such file or directory</span>`,err:true};
+    if(n.type!=='dir')return {out:`cd: <span class="o-err">${esc(arg)}: not a directory</span>`,err:true};
+    t.cwd=p; updateStatus(); return null;
+  },
+  cat(a,t){
+    if(!a[0])return {out:'cat: <span class="o-err">missing file operand</span>',err:true};
+    const p=resolvePath(t.cwd,a[0]); const n=getNode(p);
+    if(!n)return {out:`cat: <span class="o-err">${esc(a[0])}: no such file or directory</span>`,err:true};
+    if(n.type==='dir')return {out:`cat: <span class="o-err">${esc(a[0])}: is a directory</span>`,err:true};
+    return {out:esc(n.content).replace(/^(#.*)$/gm,'<span class="o-accent">$1</span>')};
+  },
+  mkdir(a,t){
+    if(!a[0])return {out:'mkdir: <span class="o-err">missing operand</span>',err:true};
+    const p=resolvePath(t.cwd,a[0]); const parent=getNode(p.split('/').slice(0,-1).join('/')||'/'); const name=p.split('/').pop();
+    if(!parent||parent.type!=='dir')return {out:`mkdir: <span class="o-err">cannot create ${esc(a[0])}</span>`,err:true};
+    if(parent.children[name])return {out:`mkdir: <span class="o-err">${esc(a[0])}: already exists</span>`,err:true};
+    parent.children[name]=dir(); return {out:`<span class="o-ok">created</span> ${esc(shortCwd(p))}/`};
+  },
+  touch(a,t){
+    if(!a[0])return {out:'touch: <span class="o-err">missing operand</span>',err:true};
+    const p=resolvePath(t.cwd,a[0]); const parent=getNode(p.split('/').slice(0,-1).join('/')||'/'); const name=p.split('/').pop();
+    if(!parent||parent.type!=='dir')return {out:`touch: <span class="o-err">cannot touch ${esc(a[0])}</span>`,err:true};
+    if(!parent.children[name])parent.children[name]=file('');
+    return {out:`<span class="o-ok">touched</span> ${esc(shortCwd(p))}`};
+  },
+  rm(a,t){
+    const rec=a.some(x=>x.startsWith('-')&&x.includes('r')); const target=a.find(x=>!x.startsWith('-'));
+    if(!target)return {out:'rm: <span class="o-err">missing operand</span>',err:true};
+    const p=resolvePath(t.cwd,target); const parent=getNode(p.split('/').slice(0,-1).join('/')||'/'); const name=p.split('/').pop();
+    if(!parent||!parent.children[name])return {out:`rm: <span class="o-err">${esc(target)}: no such file or directory</span>`,err:true};
+    if(parent.children[name].type==='dir'&&!rec)return {out:`rm: <span class="o-err">${esc(target)}: is a directory (use -r)</span>`,err:true};
+    delete parent.children[name]; return {out:`<span class="o-ok">removed</span> ${esc(shortCwd(p))}`};
+  },
+  tree(a,t){
+    const p=resolvePath(t.cwd,a[0]); const root=getNode(p);
+    if(!root||root.type!=='dir')return {out:`tree: <span class="o-err">${esc(a[0]||p)}: not a directory</span>`,err:true};
+    let count={d:0,f:0}; const lines=[`<span class="o-dir">${esc(shortCwd(p))}</span>`];
+    (function walk(node,prefix){const keys=Object.keys(node.children).filter(k=>!k.startsWith('.')).sort();
+      keys.forEach((k,i)=>{const last=i===keys.length-1;const c=node.children[k];const isDir=c.type==='dir';
+        isDir?count.d++:count.f++;
+        lines.push(prefix+`<span class="o-dim">${last?'└── ':'├── '}</span><span class="${isDir?'o-dir':'o-file'}">${esc(k)}${isDir?'/':''}</span>`);
+        if(isDir)walk(c,prefix+(last?'    ':'<span class="o-dim">│   </span>'));});})(root,'');
+    lines.push(`\n<span class="o-dim">${count.d} directories, ${count.f} files</span>`);
+    return {out:`<span class="ascii">${lines.join('\n')}</span>`};
+  },
+  du(){return {out:`<span class="o-accent">4.2M</span>\t.`};},
+  save(a,t){saveSession(t,a.join(' ').trim()||t.name);return {out:`<span class="o-ok">✓ saved</span> "<span class="o-accent">${esc(t.name)}</span>" to the Library`,cls:'info'};},
+  agent(a){
+    const q=a.join(' ').trim();
+    if(!q)return {out:'agent: <span class="o-dim">describe what you want, e.g.</span> <span class="o-accent">agent list files by size</span>'};
+    const s=agentSuggest(q);
+    const body=s.map(x=>`  <span class="o-accent">›</span> <span class="o-key">${esc(x.cmd)}</span>\n    <span class="o-dim">${esc(x.why)}</span>`).join('\n\n');
+    return {out:`<span class="o-accent">✦ agent</span> <span class="o-dim">· ${esc(currentModel().short)} — suggestion${s.length>1?'s':''}:</span>\n\n${body}\n\n<span class="o-dim">Open the agent panel (Ctrl/⌘ J) to switch models or run these with one click.</span>`,cls:'info'};
+  }
+};
+
+function runCommand(t,raw){
+  const line=raw.trim();
+  const block={id:nextId('b'),cmd:raw,ts:Date.now(),out:'',err:false,cls:null,cwd:t.cwd};
+  if(line){t.history.push(line);t.historyIdx=t.history.length;}
+  if(!line){t.blocks.push(block);afterRun(t,block);return;}
+  const argv=tokenize(line); const name=argv[0]; const args=argv.slice(1);
+  const fn=commands[name];
+  if(name==='clear'){commands.clear(args,t);return;}
+  if(!fn){block.out=`<span class="o-err">${esc(name)}: command not found</span> <span class="o-dim">— try</span> <span class="o-accent">help</span> <span class="o-dim">or ask the agent (Ctrl/⌘ J)</span>`;block.err=true;}
+  else{const r=fn(args,t);if(r===null){/* command handled its own render (cd/clear) */}else{block.out=r.out;block.err=!!r.err;block.cls=r.cls||(r.err?'err':null);}}
+  t.blocks.push(block); afterRun(t,block);
+}
+function afterRun(t,block){t.dirty=true;appendBlock(block);updateStatus();persist();markTabDirty();scheduleAutoSave(t);}
+
+/* ---------- agent NL → command ---------- */
+function extractName(q){const m=q.match(/(?:called|named)\s+["']?([\w.\-/]+)/i)||q.match(/(?:folder|directory|file|dir)\s+["']?([\w.\-/]+)/i);return m?m[1]:null;}
+const INTENTS=[
+  {re:/(list|show|see).*(file|content|what.?s? (here|in))|^ls\b|everything (here|in)/i,cmd:()=>'ls -la',why:'List everything in the current directory, including hidden files.'},
+  {re:/by size|largest|biggest|sort.*size/i,cmd:()=>'ls -l',why:'Long listing shows sizes so you can spot the largest files.'},
+  {re:/where am i|current (dir|directory|folder|path|location)|print.*working|what.?s? my path/i,cmd:()=>'pwd',why:'Print the absolute path of the current working directory.'},
+  {re:/(make|create|new|add).*(folder|directory|dir)/i,cmd:q=>`mkdir ${extractName(q)||'new-folder'}`,why:'Create a new directory in the current location.'},
+  {re:/(make|create|new|add|touch).*file/i,cmd:q=>`touch ${extractName(q)||'new-file.txt'}`,why:'Create an empty file (or update its timestamp).'},
+  {re:/(read|open|show|view|print|display|cat).*(file|contents?|readme|config)/i,cmd:q=>`cat ${extractName(q)||'README.md'}`,why:'Print the contents of a file to the terminal.'},
+  {re:/(delete|remove|rm|trash)/i,cmd:q=>`rm -r ${extractName(q)||'target'}`,why:'Remove a file or directory (add -r for directories).'},
+  {re:/(tree|structure|layout|hierarchy|nested)/i,cmd:()=>'tree',why:'Show the directory contents as a nested tree.'},
+  {re:/(clear|clean|wipe|reset).*(screen|terminal|scroll)/i,cmd:()=>'clear',why:'Clear all blocks from the current terminal.'},
+  {re:/who am i|current user|my (user|name)|username/i,cmd:()=>'whoami',why:'Print the current username.'},
+  {re:/(previous|past|earlier|what.*ran|history).*(command|run)?|command history/i,cmd:()=>'history',why:'List the commands you have run in this session.'},
+  {re:/(disk|space|size|how (big|large)|usage)/i,cmd:()=>'du -sh',why:'Summarize disk usage of the current directory.'},
+  {re:/(time|date|day|clock|what.?s? the date)/i,cmd:()=>'date',why:'Print the current date and time.'},
+  {re:/(save|bookmark|keep|store|remember).*(session|terminal|tab|this)/i,cmd:()=>'save',why:'Save this terminal to the Library so you can re-open it later.'},
+  {re:/(dark|light|theme|mode)/i,cmd:()=>'theme',why:'Toggle between the light and dark theme.'},
+  {re:/(help|what can|commands|how do i)/i,cmd:()=>'help',why:'List every command Relay understands.'},
+];
+function agentSuggest(q){
+  const hits=[];
+  for(const it of INTENTS){if(it.re.test(q)){hits.push({cmd:it.cmd(q),why:it.why});if(hits.length>=3)break;}}
+  if(hits.length)return hits;
+  if(commands[q.trim().split(/\s+/)[0]])return [{cmd:q.trim(),why:'That looks like a valid command — run it directly.'}];
+  return [
+    {cmd:'help',why:"I couldn't map that to a command. Start here to see everything available."},
+    {cmd:'ls -la',why:'Or list the current directory to get your bearings.'}
+  ];
+}
+
+/* ---------- rendering ---------- */
+const viewport=$('#viewport'), tabsEl=$('#tabs'), libEl=$('#libList');
+function activeTab(){return state.tabs.find(t=>t.id===state.active);}
+
+function blockHTML(b){
+  const cls=b.err?'err':(b.cls==='info'?'info':(b.cls==='err'?'err':''));
+  const t=new Date(b.ts); const hh=String(t.getHours()).padStart(2,'0'), mm=String(t.getMinutes()).padStart(2,'0'), ss=String(t.getSeconds()).padStart(2,'0');
+  const cmdLine=b.cmd?`<span class="cmd-text">${esc(b.cmd)}</span>`:`<span class="cmd-text o-dim">(empty)</span>`;
+  return `<div class="block ${cls}" data-id="${b.id}">
+    <div class="block-cmd">${promptHTML(b.cwd||activeTab().cwd)} ${cmdLine}
+      <span class="block-ts tnum">${hh}:${mm}:${ss}</span>
+      <button class="block-copy" data-copy="${esc(b.cmd)}">copy</button></div>
+    <div class="block-out">${b.out||''}</div>
+  </div>`;
+}
+function inputRowHTML(){
+  return `<div class="inputrow" id="inputRow">
+    <span class="prompt" id="livePrompt">${promptHTML(activeTab().cwd)}</span>
+    <input class="cmd-input" id="cmdInput" spellcheck="false" autocomplete="off" autocapitalize="off" placeholder="type a command — Tab completes, ↑ recalls">
+  </div>`;
+}
+function renderViewport(){
+  const t=activeTab(); if(!t){viewport.innerHTML='';return;}
+  viewport.innerHTML=t.blocks.map(blockHTML).join('')+inputRowHTML();
+  bindInput(); scrollBottom(); updateStatus();
+}
+function appendBlock(b){
+  const row=$('#inputRow');
+  const tmp=document.createElement('div'); tmp.innerHTML=blockHTML(b);
+  viewport.insertBefore(tmp.firstElementChild,row);
+  $('#livePrompt').innerHTML=promptHTML(activeTab().cwd);
+  scrollBottom();
+}
+function scrollBottom(){requestAnimationFrame(()=>{viewport.scrollTop=viewport.scrollHeight;});}
+
+function renderTabs(){
+  tabsEl.innerHTML=state.tabs.map(t=>`
+    <div class="tab ${t.id===state.active?'active':''}" data-tab="${t.id}" title="${esc(t.name)}">
+      <span class="tab-glyph">›_</span>
+      <span class="tab-name">${esc(t.name)}</span>
+      <span class="tab-model" title="Model for this terminal">${esc(modelById(t.model).short)}</span>
+      ${t.dirty?'<span class="tab-unsaved" title="unsaved changes"></span>':''}
+      <span class="tab-close" data-close="${t.id}" title="Close">×</span>
+    </div>`).join('');
+}
+function timeAgo(ts){const s=Math.floor((Date.now()-ts)/1000);if(s<60)return'just now';const m=Math.floor(s/60);if(m<60)return m+'m ago';const h=Math.floor(m/60);if(h<24)return h+'h ago';return Math.floor(h/24)+'d ago';}
+function renderLibrary(){
+  $('#libCount').textContent=state.library.length;
+  if(!state.library.length){
+    libEl.innerHTML=`<div class="lib-empty">
+      <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2Z"/><path d="M17 21v-8H7v8M7 3v5h8"/></svg>
+      <div>No saved terminals yet.<br>Press <b>Ctrl/⌘ S</b> to save this one.</div></div>`;
+    return;
+  }
+  libEl.innerHTML=state.library.map(s=>`
+    <div class="lib-item" data-open="${s.id}">
+      <div class="row1"><span class="lib-dot"></span>
+        <span class="lib-name" data-name="${s.id}">${esc(s.name)}</span></div>
+      <div class="lib-meta"><span class="cwd">${esc(shortCwd(s.cwd))}</span><span>·</span><span class="o-accent">${esc(modelById(s.model).short)}</span><span>·</span><span>${timeAgo(s.lastUsed)}</span></div>
+      <div class="lib-actions">
+        <button class="lib-act" data-rename="${s.id}" title="Rename">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg></button>
+        <button class="lib-act danger" data-del="${s.id}" title="Delete">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m2 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/></svg></button>
+      </div>
+    </div>`).join('');
+}
+function updateStatus(){
+  const t=activeTab();
+  $('#stSession').textContent=t?t.name:'—';
+  $('#stCwd').textContent=t?shortCwd(t.cwd):'~';
+  $('#stLines').textContent=t?`${t.blocks.length} block${t.blocks.length===1?'':'s'}`:'0 blocks';
+  reflectModel();
+}
+function markTabDirty(){renderTabs();}
+
+/* ---------- input binding ---------- */
+function bindInput(){
+  const inp=$('#cmdInput'); if(!inp)return;
+  inp.focus();
+  inp.onkeydown=e=>{
+    const t=activeTab();
+    if(e.key==='Enter'){e.preventDefault();const v=inp.value;inp.value='';runCommand(t,v);}
+    else if(e.key==='ArrowUp'){e.preventDefault();if(t.historyIdx>0){t.historyIdx--;inp.value=t.history[t.historyIdx]||'';moveCaretEnd(inp);}}
+    else if(e.key==='ArrowDown'){e.preventDefault();if(t.historyIdx<t.history.length){t.historyIdx++;inp.value=t.history[t.historyIdx]||'';moveCaretEnd(inp);}}
+    else if(e.key==='Tab'){e.preventDefault();complete(inp,t);}
+    else if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='l'){e.preventDefault();commands.clear([],t);}
+    else if(e.ctrlKey&&e.key.toLowerCase()==='d'){e.preventDefault();if(!inp.value)closeTab(t.id);}
+  };
+}
+function moveCaretEnd(inp){requestAnimationFrame(()=>{inp.selectionStart=inp.selectionEnd=inp.value.length;});}
+function complete(inp,t){
+  const val=inp.value; const parts=val.split(' '); const frag=parts[parts.length-1];
+  let options=[];
+  if(parts.length===1){options=Object.keys(commands).filter(c=>c.startsWith(frag));}
+  else{
+    const slash=frag.lastIndexOf('/'); const base=slash>=0?frag.slice(0,slash+1):''; const stub=slash>=0?frag.slice(slash+1):frag;
+    const d=getNode(resolvePath(t.cwd,base||'.'));
+    if(d&&d.type==='dir')options=Object.keys(d.children).filter(k=>k.startsWith(stub)).map(k=>base+k+(d.children[k].type==='dir'?'/':''));
+  }
+  if(options.length===1){parts[parts.length-1]=options[0];inp.value=parts.join(' ');}
+  else if(options.length>1){
+    const common=commonPrefix(options); if(common.length>frag.length){parts[parts.length-1]=common;inp.value=parts.join(' ');}
+    toast(options.map(o=>o.replace(/\/$/,'')).join('   '));
+  }
+  moveCaretEnd(inp);
+}
+function commonPrefix(arr){if(!arr.length)return'';let p=arr[0];for(const s of arr)while(!s.startsWith(p))p=p.slice(0,-1);return p;}
+
+/* ---------- tab / session ops ---------- */
+function newTab(seed){
+  const n=state.tabs.filter(t=>/^bash( \d+)?$/.test(t.name)).length;
+  const t=Object.assign({id:nextId('t'),name:seed?.name||(n?`bash ${n+1}`:'bash'),cwd:seed?.cwd||HOME,history:seed?.history?seed.history.slice():[],historyIdx:(seed?.history||[]).length,blocks:seed?.blocks?seed.blocks.map(b=>Object.assign({},b)):[],dirty:false,fromLib:seed?.id||null,model:seed?.model||state.model||'claude-opus-5'},{});
+  if(!seed){const b={id:nextId('b'),cmd:'',ts:Date.now(),out:commands.about().out,cls:'info',cwd:t.cwd};t.blocks.push(b);}
+  state.tabs.push(t); state.active=t.id; renderTabs(); renderViewport(); persist();
+  return t;
+}
+function switchTab(id){if(id===state.active)return;state.active=id;renderTabs();renderViewport();}
+function closeTab(id){
+  const i=state.tabs.findIndex(t=>t.id===id); if(i<0)return;
+  state.tabs.splice(i,1);
+  if(!state.tabs.length){newTab();return;}
+  if(state.active===id)state.active=state.tabs[Math.max(0,i-1)].id;
+  renderTabs();renderViewport();persist();
+}
+function saveSession(t,name,silent){
+  t.name=name||t.name; t.dirty=false;
+  const rec={id:t.fromLib||nextId('s'),name:t.name,cwd:t.cwd,model:t.model,history:t.history.slice(),blocks:t.blocks.map(b=>Object.assign({},b)),lastUsed:Date.now()};
+  const ex=state.library.findIndex(s=>s.id===rec.id);
+  if(ex>=0)state.library[ex]=rec; else state.library.unshift(rec);
+  t.fromLib=rec.id;
+  renderTabs();renderLibrary();persist();
+  if(silent)updateAutosaveIndicator(true); else toast(`Saved "${t.name}" to the Library`,'ok');
+}
+/* ---------- auto-save ---------- */
+let autosaveT,saveFlashT;
+function scheduleAutoSave(t){
+  if(!state.autosave||!t)return;
+  clearTimeout(autosaveT);
+  const el=$('#stAutosave'); if(el)el.classList.add('saving');
+  autosaveT=setTimeout(()=>{if(state.autosave)saveSession(t,t.name,true);},600);
+}
+function updateAutosaveIndicator(saved){
+  const el=$('#stAutosave'),txt=$('#stAutosaveText'); if(!el)return;
+  el.classList.remove('saving');
+  el.classList.toggle('off',!state.autosave);
+  if(!state.autosave){txt.textContent='Auto-save off';return;}
+  if(saved){
+    txt.textContent='Saved';el.classList.add('saving');
+    clearTimeout(saveFlashT);
+    saveFlashT=setTimeout(()=>{el.classList.remove('saving');txt.textContent='Auto-save on';},1400);
+  }else{txt.textContent='Auto-save on';}
+}
+function toggleAutosave(){
+  state.autosave=!state.autosave; store.set('relay.autosave',state.autosave);
+  updateAutosaveIndicator();
+  toast(state.autosave?'Auto-save enabled — every terminal is kept in the Library':'Auto-save disabled — save manually with ⌘/Ctrl S',state.autosave?'ok':'');
+  if(state.autosave){const t=activeTab();if(t)saveSession(t,t.name,true);}
+  renderTabs();
+}
+function openSession(id){
+  const s=state.library.find(x=>x.id===id); if(!s)return;
+  s.lastUsed=Date.now();
+  const existing=state.tabs.find(t=>t.fromLib===id);
+  if(existing){switchTab(existing.id);toast(`Switched to "${s.name}"`);return;}
+  newTab(s); renderLibrary(); persist(); toast(`Re-opened "${s.name}"`,'ok');
+}
+function deleteSession(id){const s=state.library.find(x=>x.id===id);state.library=state.library.filter(x=>x.id!==id);state.tabs.forEach(t=>{if(t.fromLib===id)t.fromLib=null;});renderLibrary();renderTabs();persist();toast(`Deleted "${s?s.name:''}"`);}
+
+/* ---------- persistence glue ---------- */
+function persist(){
+  store.set('relay.lib',state.library);
+  store.set('relay.ws',{active:state.active,tabs:state.tabs.map(t=>({id:t.id,name:t.name,cwd:t.cwd,model:t.model,history:t.history,blocks:t.blocks,dirty:t.dirty,fromLib:t.fromLib}))});
+}
+function loadState(){
+  state.library=store.get('relay.lib',null)||seedLibrary();
+  const ws=store.get('relay.ws',null);
+  if(ws&&ws.tabs&&ws.tabs.length){
+    state.tabs=ws.tabs.map(t=>Object.assign({historyIdx:(t.history||[]).length,model:state.model||'claude-opus-5'},t));
+    state.active=ws.active&&state.tabs.find(x=>x.id===ws.active)?ws.active:state.tabs[0].id;
+  }else{newTab();}
+}
+
+/* ---------- seed content (so the Library shows the feature immediately) ---------- */
+function mkBlock(cmd,out,cls){return {id:nextId('b'),cmd,ts:Date.now()-Math.floor(Math.random()*1),out,cls:cls||null,err:cls==='err'};}
+function seedLibrary(){
+  const dep={id:'seed_deploy',name:'deploy · production',cwd:'/home/agent/projects/relay',model:'claude-opus-5',history:['git status','npm run build','./deploy prod'],lastUsed:Date.now()-1000*60*42,blocks:[
+    {id:nextId('b'),cmd:'npm run build',ts:Date.now()-1000*60*44,out:'<span class="o-dim">> relay@1.4.0 build</span>\n<span class="o-ok">✓</span> compiled 128 modules in 3.2s\n<span class="o-ok">✓</span> bundle <span class="o-accent">dist/relay.js</span> <span class="o-dim">(214 kB)</span>',cls:'info'},
+    {id:nextId('b'),cmd:'./deploy prod',ts:Date.now()-1000*60*42,out:'<span class="o-cyan">→</span> uploading artifact…\n<span class="o-cyan">→</span> health check <span class="o-ok">200 OK</span>\n<span class="o-ok">✓ deployed</span> <span class="o-link">https://relay.app</span> <span class="o-dim">(rev a91c4f)</span>',cls:'info'}
+  ]};
+  const logs={id:'seed_logs',name:'tail · api logs',cwd:'/home/agent/projects/api',model:'gemini-3.1-pro',history:['tail -f server.log'],lastUsed:Date.now()-1000*60*60*5,blocks:[
+    {id:nextId('b'),cmd:'tail -f server.log',ts:Date.now()-1000*60*60*5,out:'<span class="o-dim">12:04:11</span> <span class="o-ok">INFO</span>  server listening :8080\n<span class="o-dim">12:04:19</span> <span class="o-ok">INFO</span>  GET /health <span class="o-ok">200</span> 3ms\n<span class="o-dim">12:05:02</span> <span class="o-warn">WARN</span>  slow query 812ms /reports\n<span class="o-dim">12:05:44</span> <span class="o-ok">INFO</span>  POST /login <span class="o-ok">200</span> 41ms'}
+  ]};
+  const db={id:'seed_db',name:'psql · analytics',cwd:'/home/agent/projects/api',model:'gpt-5.6-sol',history:['psql analytics','select count(*) from events;'],lastUsed:Date.now()-1000*60*60*26,blocks:[
+    {id:nextId('b'),cmd:'select count(*) from events;',ts:Date.now()-1000*60*60*26,out:'<span class="o-dim"> count </span>\n<span class="o-dim">-------</span>\n <span class="o-accent tnum">184203</span>\n<span class="o-dim">(1 row)</span>'}
+  ]};
+  return [dep,logs,db];
+}
+
+/* ---------- overlays: palette ---------- */
+const scrim=$('#scrim'),palette=$('#palette'),palInput=$('#palInput'),palList=$('#palList');
+let palSel=0,palItems=[];
+function paletteActions(){
+  const base=[
+    {g:'Terminal',t:'New terminal',d:'Open a fresh bash session',k:'⌘T',run:()=>newTab()},
+    {g:'Terminal',t:'Save this terminal',d:'Store it in the Library',k:'⌘S',run:()=>{const t=activeTab();saveSession(t,t.name);}},
+    {g:'Terminal',t:'Clear terminal',d:'Remove all blocks',k:'⌃L',run:()=>commands.clear([],activeTab())},
+    {g:'Terminal',t:'Close terminal',d:'Close the active tab',k:'⌃D',run:()=>closeTab(state.active)},
+    {g:'View',t:'Toggle theme',d:'Switch light / dark',k:'',run:toggleTheme},
+    {g:'View',t:'Toggle library',d:'Show or hide the sidebar',k:'',run:toggleSidebar},
+    {g:'View',t:'Ask the agent',d:'Natural-language → command',k:'⌘J',run:openAgent},
+  ];
+  const curId=currentModel().id;
+  const models=MODELS.map(m=>({g:'Model · this terminal',t:`${m.name}${m.id===curId?'  (current)':''}`,d:`${m.id} · ${m.ctx}`,k:'',run:()=>setModel(m.id)}));
+  const lib=state.library.map(s=>({g:'Open from Library',t:s.name,d:`${shortCwd(s.cwd)} · ${s.blocks.length} blocks · ${timeAgo(s.lastUsed)}`,k:'',run:()=>openSession(s.id)}));
+  return base.concat(models,lib);
+}
+function renderPalette(q){
+  const all=paletteActions();
+  const items=q?all.filter(a=>(a.t+' '+a.d+' '+a.g).toLowerCase().includes(q.toLowerCase())):all;
+  palItems=items; palSel=0;
+  if(!items.length){palList.innerHTML='<div class="pal-empty">No matching commands</div>';return;}
+  let html='',lastG=null;
+  items.forEach((a,i)=>{if(a.g!==lastG){html+=`<div class="pal-group">${esc(a.g)}</div>`;lastG=a.g;}
+    html+=`<div class="pal-item ${i===0?'sel':''}" data-i="${i}">
+      <span class="pi-ico">${a.g.startsWith('Open')?'›_':'⌘'}</span>
+      <span class="pi-body"><span class="pi-title">${esc(a.t)}</span><span class="pi-desc">${esc(a.d)}</span></span>
+      ${a.k?`<span class="pi-kbd kbd">${a.k}</span>`:''}</div>`;});
+  palList.innerHTML=html;
+}
+function openPalette(){renderPalette('');palInput.value='';scrim.classList.add('show');palette.classList.add('show');setTimeout(()=>palInput.focus(),20);}
+function closePalette(){palette.classList.remove('show');if(!agentPanel.classList.contains('show'))scrim.classList.remove('show');}
+function palMove(d){palSel=(palSel+d+palItems.length)%palItems.length;[...palList.querySelectorAll('.pal-item')].forEach((el,i)=>el.classList.toggle('sel',i===palSel));const sel=palList.querySelector('.pal-item.sel');if(sel)sel.scrollIntoView({block:'nearest'});}
+function palRun(){const a=palItems[palSel];if(a){closePalette();a.run();}}
+
+/* ---------- overlays: agent ---------- */
+const agentPanel=$('#agentPanel'),agentBody=$('#agentBody'),agentInput=$('#agentInput');
+const CHIPS=['list files by size','create a folder called builds','show the README','where am i','what did I run before','save this session'];
+function initChips(){$('#agentChips').innerHTML=CHIPS.map(c=>`<button class="agent-chip" data-chip="${esc(c)}">${esc(c)}</button>`).join('');}
+
+/* ---------- model selector ---------- */
+const modelBtn=$('#modelBtn'), modelMenu=$('#modelMenu'), tabModelBtn=$('#tabModelBtn');
+let modelMenuTrigger=null;
+function renderModelMenu(){
+  const cur=currentModel().id;
+  const label=activeTab()?activeTab().name:'terminal';
+  let html=`<div class="model-menu-head">Model for “${esc(label)}”</div>`, lastP=null;
+  for(const m of MODELS){
+    if(m.provider!==lastP){html+=`<div class="model-group">${esc(m.provider)}</div>`;lastP=m.provider;}
+    html+=`<button class="model-item ${m.id===cur?'active':''}" role="option" aria-selected="${m.id===cur}" data-model="${esc(m.id)}">
+      <div class="mi-top"><span class="mi-name">${esc(m.name)}</span>
+        ${m.badge?`<span class="mi-badge">${esc(m.badge)}</span>`:''}
+        ${m.id===cur?'<span class="mi-check">✓</span>':''}</div>
+      <div class="mi-id">${esc(m.id)}</div>
+      <div class="mi-desc">${esc(m.desc)}</div>
+      <div class="mi-meta"><span class="mi-chip">${esc(m.ctx)}</span><span class="mi-chip">${esc(m.price)} · Mtok</span></div>
+    </button>`;
+  }
+  modelMenu.innerHTML=html;
+}
+function openModelMenu(trigger){
+  trigger=trigger||modelBtn;
+  renderModelMenu();
+  const r=trigger.getBoundingClientRect(), w=320, pad=12;
+  let left=Math.max(pad,Math.min(r.left,window.innerWidth-w-pad));
+  modelMenu.style.left=left+'px'; modelMenu.style.top=(r.bottom+6)+'px';
+  modelMenu.classList.add('show');
+  modelMenuTrigger=trigger; trigger.setAttribute('aria-expanded','true');
+}
+function closeModelMenu(){
+  modelMenu.classList.remove('show');
+  if(modelMenuTrigger){modelMenuTrigger.setAttribute('aria-expanded','false');modelMenuTrigger=null;}
+}
+function toggleModelMenu(trigger){modelMenu.classList.contains('show')?closeModelMenu():openModelMenu(trigger);}
+function setModel(id){
+  if(!MODELS.some(m=>m.id===id))return;
+  const t=activeTab(); if(t){t.model=id;t.dirty=true;}
+  state.model=id; store.set('relay.model',id);   // remembered as the default for new terminals
+  reflectModel(); renderTabs(); closeModelMenu(); persist();
+  if(t)scheduleAutoSave(t);
+  toast(`${t?t.name:'Terminal'} → ${modelById(id).short}`,'ok');
+}
+function reflectModel(){
+  const m=currentModel();
+  const b=$('#modelBtnName'); if(b)b.textContent=m.short;
+  const tb=$('#tabModelName'); if(tb)tb.textContent=m.short;
+  const st=$('#stAgent'); if(st)st.innerHTML=`<span class="dot"></span>agent · ${esc(m.short)}`;
+  if(modelMenu.classList.contains('show'))renderModelMenu();
+}
+function openAgent(){scrim.classList.add('show');agentPanel.classList.add('show');setTimeout(()=>agentInput.focus(),120);}
+function closeAgent(){closeModelMenu();agentPanel.classList.remove('show');if(!palette.classList.contains('show'))scrim.classList.remove('show');}
+function askAgent(q){
+  q=q.trim(); if(!q)return;
+  const s=agentSuggest(q);
+  const card=document.createElement('div'); card.className='sugg';
+  card.innerHTML=`<div class="sugg-q"><b>You:</b> ${esc(q)}<span class="sugg-model">${esc(currentModel().short)}</span></div>`+
+    s.map(x=>`<div class="sugg-cmd"><code>${esc(x.cmd)}</code>
+      <button class="sugg-run" data-run="${esc(x.cmd)}">Run</button>
+      <button class="sugg-ins" data-ins="${esc(x.cmd)}">Insert</button></div>
+      <div class="sugg-why">${esc(x.why)}</div>`).join('');
+  agentBody.appendChild(card); agentBody.scrollTop=agentBody.scrollHeight;
+  agentInput.value=''; agentInput.style.height='auto';
+}
+
+/* ---------- theme ---------- */
+function applyThemeIcon(){const dark=document.documentElement.getAttribute('data-theme')==='dark';
+  $('#btnTheme').innerHTML=dark
+    ?'<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>'
+    :'<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>';
+}
+function currentTheme(){return document.documentElement.getAttribute('data-theme')||(matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light');}
+function toggleTheme(){const next=currentTheme()==='dark'?'light':'dark';document.documentElement.setAttribute('data-theme',next);store.set('relay.theme',next);applyThemeIcon();}
+
+/* ---------- toast ---------- */
+let toastT;
+function toast(msg,kind){const w=$('#toastWrap');w.innerHTML=`<div class="toast ${kind||''}"><span class="tdot"></span>${esc(msg)}</div>`;clearTimeout(toastT);toastT=setTimeout(()=>{w.innerHTML='';},2600);}
+
+/* ---------- misc ui ---------- */
+function toggleSidebar(){const m=$('#mainSplit');if(window.innerWidth<=820)m.classList.toggle('mobile-open');else m.classList.toggle('collapsed');}
+
+/* ---------- events ---------- */
+tabsEl.addEventListener('click',e=>{const cl=e.target.closest('[data-close]');if(cl){e.stopPropagation();closeTab(cl.dataset.close);return;}const tb=e.target.closest('[data-tab]');if(tb)switchTab(tb.dataset.tab);});
+$('#btnNewTab').onclick=()=>newTab();
+$('#btnSave').onclick=()=>{const t=activeTab();saveSession(t,t.name);};
+$('#btnClear').onclick=()=>commands.clear([],activeTab());
+$('#btnSidebar').onclick=toggleSidebar;
+$('#btnTheme').onclick=toggleTheme;
+$('#btnPalette').onclick=openPalette;
+$('#btnAgent').onclick=openAgent;
+$('#btnAgentClose').onclick=closeAgent;
+scrim.onclick=()=>{closePalette();closeAgent();};
+
+// model selector — shared floating popover, opened from the agent panel or the tab strip
+modelBtn.onclick=e=>{e.stopPropagation();toggleModelMenu(modelBtn);};
+tabModelBtn.onclick=e=>{e.stopPropagation();toggleModelMenu(tabModelBtn);};
+modelMenu.addEventListener('click',e=>{const it=e.target.closest('[data-model]');if(it)setModel(it.dataset.model);});
+document.addEventListener('click',e=>{if(modelMenu.classList.contains('show')&&!e.target.closest('#modelMenu')&&!e.target.closest('#modelBtn')&&!e.target.closest('#tabModelBtn'))closeModelMenu();});
+window.addEventListener('resize',closeModelMenu);
+
+viewport.addEventListener('click',e=>{
+  const cp=e.target.closest('[data-copy]');
+  if(cp){navigator.clipboard&&navigator.clipboard.writeText(cp.dataset.copy).then(()=>toast('Copied command','ok'),()=>toast('Copy blocked by browser'));return;}
+  if(!e.target.closest('button')){const inp=$('#cmdInput');if(inp&&!window.getSelection().toString())inp.focus();}
+});
+
+libEl.addEventListener('click',e=>{
+  const del=e.target.closest('[data-del]');if(del){e.stopPropagation();deleteSession(del.dataset.del);return;}
+  const rn=e.target.closest('[data-rename]');if(rn){e.stopPropagation();const nm=libEl.querySelector(`[data-name="${rn.dataset.rename}"]`);if(nm){nm.setAttribute('contenteditable','true');nm.focus();document.execCommand&&document.getSelection().selectAllChildren(nm);}return;}
+  const op=e.target.closest('[data-open]');if(op&&!e.target.isContentEditable)openSession(op.dataset.open);
+});
+libEl.addEventListener('keydown',e=>{if(e.target.matches('[data-name]')&&e.key==='Enter'){e.preventDefault();e.target.blur();}});
+libEl.addEventListener('blur',e=>{if(e.target.matches('[data-name]')){e.target.removeAttribute('contenteditable');const id=e.target.dataset.name;const s=state.library.find(x=>x.id===id);const v=e.target.textContent.trim();if(s&&v){s.name=v;state.tabs.forEach(t=>{if(t.fromLib===id)t.name=v;});renderTabs();persist();}renderLibrary();}},true);
+
+// palette input
+palInput.addEventListener('input',()=>renderPalette(palInput.value));
+palInput.addEventListener('keydown',e=>{if(e.key==='ArrowDown'){e.preventDefault();palMove(1);}else if(e.key==='ArrowUp'){e.preventDefault();palMove(-1);}else if(e.key==='Enter'){e.preventDefault();palRun();}else if(e.key==='Escape'){closePalette();}});
+palList.addEventListener('click',e=>{const it=e.target.closest('[data-i]');if(it){palSel=+it.dataset.i;palRun();}});
+
+// agent input + suggestions
+$('#agentChips').addEventListener('click',e=>{const c=e.target.closest('[data-chip]');if(c)askAgent(c.dataset.chip);});
+$('#agentSend').onclick=()=>askAgent(agentInput.value);
+agentInput.addEventListener('input',()=>{agentInput.style.height='auto';agentInput.style.height=Math.min(agentInput.scrollHeight,110)+'px';});
+agentInput.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();askAgent(agentInput.value);}else if(e.key==='Escape'){closeAgent();}});
+agentBody.addEventListener('click',e=>{
+  const r=e.target.closest('[data-run]');if(r){closeAgent();const t=activeTab();runCommand(t,r.dataset.run);const inp=$('#cmdInput');if(inp)inp.focus();return;}
+  const ins=e.target.closest('[data-ins]');if(ins){closeAgent();const inp=$('#cmdInput');if(inp){inp.value=ins.dataset.ins;inp.focus();moveCaretEnd(inp);}}
+});
+
+// global shortcuts
+document.addEventListener('keydown',e=>{
+  const mod=e.ctrlKey||e.metaKey;
+  if(mod&&e.key.toLowerCase()==='k'){e.preventDefault();palette.classList.contains('show')?closePalette():openPalette();}
+  else if(mod&&e.key.toLowerCase()==='j'){e.preventDefault();agentPanel.classList.contains('show')?closeAgent():openAgent();}
+  else if(mod&&e.key.toLowerCase()==='t'){e.preventDefault();newTab();}
+  else if(mod&&e.key.toLowerCase()==='s'){e.preventDefault();const t=activeTab();saveSession(t,t.name);}
+  else if(e.key==='Escape'){if(modelMenu.classList.contains('show'))closeModelMenu();else{closePalette();closeAgent();}}
+});
+
+// clock
+function tick(){const d=new Date();$('#stClock').textContent=String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0');}
+
+/* ---------- boot ---------- */
+function boot(){
+  const savedTheme=store.get('relay.theme',null);
+  if(savedTheme)document.documentElement.setAttribute('data-theme',savedTheme);
+  applyThemeIcon();
+  state.autosave=store.get('relay.autosave',true);
+  state.model=store.get('relay.model','claude-opus-5');
+  if(!MODELS.some(m=>m.id===state.model))state.model='claude-opus-5';
+  if(!STORAGE_OK){$('#storageNote').classList.add('off');$('#storageText').textContent='In-memory only (storage blocked)';}
+  loadState();
+  renderTabs(); renderLibrary(); renderViewport(); updateStatus(); initChips();
+  reflectModel();
+  updateAutosaveIndicator();
+  tick(); setInterval(tick,15000);
+  $('#stAgent').onclick=openAgent;
+  $('#stAutosave').onclick=toggleAutosave;
+}
+boot();
+})();
+</script>
+
+<!-- ============================================================
+     v2 DESIGN SECTION — Owned-History Terminal
+     ============================================================ -->
+<button id="otdToggle" aria-controls="otd" aria-expanded="false">◈&nbsp;&nbsp;v2 · Owned-History Terminal&nbsp;&nbsp;→</button>
+
+<section id="otd" class="otd" aria-label="Owned-History Terminal — v2 design">
+  <div class="otd-wrap">
+    <div class="otd-eyebrow">Relay · v2 design</div>
+    <h1 class="otd-h1">The terminal owns its history — not the shell.</h1>
+    <p class="otd-lede">A real, fully interactive shell — <span class="otd-mono">vim</span>, <span class="otd-mono">top</span>, REPLs and all — wrapped so Relay records every command as a structured, replayable <b>block</b>. Perfect save/restore, searchable history, and an agent chat that persists with the session — because the app is the source of truth, not the terminal's screen.</p>
+    <div class="otd-chips"><span class="otd-chip">Real PTY · vim · top · REPLs</span><span class="otd-chip">Command blocks</span><span class="otd-chip">Lossless restore</span><span class="otd-chip">Full-text search</span><span class="otd-chip">Persisted agent chat</span><span class="otd-chip">Runs real Claude Code</span></div>
+
+    <div class="otd-why">
+      <div class="otd-why-col otd-bad"><div class="otd-why-h">The problem today</div><p>On Windows the OS pseudo-terminal (ConPTY) owns the screen and clears it whenever it repaints. Relay only mirrors that byte stream — so saved history flashes, clears, or restores imperfectly. We're always fighting the terminal for control.</p></div>
+      <div class="otd-why-col otd-good"><div class="otd-why-h">What v2 does</div><p>Relay records the transcript itself and renders it. The shell stays fully interactive, but the history becomes data the app owns — so it can be saved, searched, exported, and restored exactly, with no flashing and nothing lost.</p></div>
+    </div>
+
+    <div class="otd-sec"><h2 class="otd-sec-h">The terminal, as blocks</h2></div>
+    <div class="otd-demo">
+      <aside class="otd-rail">
+        <div class="otd-rail-h">Session outline</div>
+        <div class="otd-rail-item"><span class="otd-dot ok"></span>npm run test:unit</div>
+        <div class="otd-rail-item"><span class="otd-dot ok"></span>git status</div>
+        <div class="otd-rail-item on"><span class="otd-dot fail"></span>tsc --noEmit</div>
+        <div class="otd-rail-item"><span class="otd-dot int"></span>vim src/pty.ts</div>
+        <div class="otd-rail-item"><span class="otd-dot live"></span>current</div>
+      </aside>
+
+      <div class="otd-term">
+        <div class="otd-tbar">
+          <div class="otd-search"><span class="otd-mono">⌕</span><input value="error" spellcheck="false" aria-label="Search session"><span class="otd-mono">3 matches</span></div>
+          <button class="otd-filter">All</button>
+          <button class="otd-filter on">Failures</button>
+        </div>
+        <div class="otd-blocks">
+          <div class="otd-block collapsed">
+            <div class="otd-bhead"><span class="otd-prompt">❯</span><span class="otd-cmd">npm run test:unit</span><span class="otd-meta"><span>~/relay</span><span>4.2s</span></span><span class="otd-badge ok">✓ 0</span><span class="otd-chev">▾</span></div>
+            <div class="otd-bout"><span class="otd-out-ok">PASS</span>  src/pty.test.ts  ·  18 tests
+<span class="otd-out-dim">Test Suites: 3 passed, 3 total
+Tests:       42 passed, 42 total</span>
+<span class="otd-more">+ 118 lines — expand</span></div>
+            <div class="otd-bactions"><button class="otd-act">Copy output</button><button class="otd-act">Re-run</button><button class="otd-act">Pin</button></div>
+          </div>
+
+          <div class="otd-block collapsed">
+            <div class="otd-bhead"><span class="otd-prompt">❯</span><span class="otd-cmd">git status</span><span class="otd-meta"><span>~/relay</span><span>0.1s</span></span><span class="otd-badge ok">✓ 0</span><span class="otd-chev">▾</span></div>
+            <div class="otd-bout">On branch <span class="otd-out-ok">v2-owned-history</span>
+nothing to commit, working tree clean</div>
+            <div class="otd-bactions"><button class="otd-act">Copy output</button><button class="otd-act">Re-run</button><button class="otd-act">Pin</button></div>
+          </div>
+
+          <div class="otd-block fail">
+            <div class="otd-bhead"><span class="otd-prompt">❯</span><span class="otd-cmd">tsc --noEmit</span><span class="otd-meta"><span>~/relay</span><span>3.1s</span><span>11:24:07</span></span><span class="otd-badge fail">✗ 2</span><span class="otd-chev">▾</span></div>
+            <div class="otd-bout"><span class="otd-out-fail">src/pty.ts:53:7 - error TS2532:</span> Object is possibly 'undefined'.
+
+  53   term.buf += data;
+       <span class="otd-out-dim">~~~~~~~~</span>
+
+Found <span class="otd-out-fail">1 error</span> in src/pty.ts:53</div>
+            <div class="otd-bactions"><button class="otd-act">Copy command</button><button class="otd-act">Copy output</button><button class="otd-act">Re-run</button><button class="otd-act">Ask agent to fix</button></div>
+          </div>
+
+          <div class="otd-int"><span class="otd-mono" style="color:#6cb6ff;font-size:15px">◧</span><div>Interactive session · <b>vim src/pty.ts</b> · 2m 14s · exited 0<div style="color:#66717f;font-size:11.5px;margin-top:3px">Full-screen programs run live. Relay logs that they ran — a dead process can't be replayed.</div></div></div>
+
+          <div class="otd-live"><span class="otd-prompt">PS ~/relay ❯</span><span class="otd-caret"></span></div>
+        </div>
+      </div>
+
+      <aside class="otd-chat">
+        <div class="otd-chat-h"><span class="otd-star">✦</span> Agent · Opus 5 <span style="margin-left:auto;font:600 9.5px/1 ui-monospace,monospace;color:#66717f;letter-spacing:.14em">SAVED</span></div>
+        <div class="otd-chat-b">
+          <div class="otd-turn user"><div class="who">You</div><div class="bubble">the type-check is failing — can you look?</div></div>
+          <div class="otd-turn"><div class="who">Agent</div><div class="bubble">Ran the compiler — one error in <span class="otd-mono">pty.ts</span>: <span class="otd-mono">term.buf</span> can be undefined.<div class="otd-runchip"><span class="otd-mono">❯ tsc --noEmit</span> <span class="fail">✗ 2</span> · jump ↑</div></div></div>
+          <div class="otd-turn user"><div class="who">You</div><div class="bubble">fix it and re-run the tests</div></div>
+          <div class="otd-turn"><div class="who">Agent</div><div class="bubble">Guarded the buffer and re-ran your suite — all green.<div class="otd-runchip"><span class="otd-mono">❯ npm run test:unit</span> <span class="ok">✓ 0</span> · jump ↑</div></div></div>
+        </div>
+      </aside>
+    </div>
+
+    <div class="otd-sec"><h2 class="otd-sec-h">Everything it does</h2></div>
+    <div class="otd-feat">
+      <div class="otd-card"><div class="otd-ic">❯</div><h3>Real interactive shell</h3><p>A true PTY (PowerShell / bash / zsh). <span class="k">vim</span>, <span class="k">top</span>, <span class="k">less</span>, <span class="k">ssh</span> and node/python REPLs all work normally.</p></div>
+      <div class="otd-card"><div class="otd-ic">▦</div><h3>Command blocks</h3><p>Every command captured as a block: the command, its output, <span class="k">exit code</span>, working dir, start time and duration.</p></div>
+      <div class="otd-card"><div class="otd-ic">⌄</div><h3>Collapse &amp; navigate</h3><p>Fold long output; jump between commands from the outline rail; the current command stays pinned while its output scrolls.</p></div>
+      <div class="otd-card"><div class="otd-ic">⌕</div><h3>Search &amp; filter</h3><p>Full-text search across the whole session — commands and output — with match highlighting. Filter to failures only, or by command.</p></div>
+      <div class="otd-card"><div class="otd-ic">⧉</div><h3>Per-block actions</h3><p>Copy the command, the output, or both. <span class="k">Re-run</span>, pin/bookmark, or share any single block.</p></div>
+      <div class="otd-card"><div class="otd-ic">⤓</div><h3>Lossless persistence</h3><p>Exact save/restore across restarts and reboots — no flashing, nothing lost, because the transcript is data we own.</p></div>
+      <div class="otd-card"><div class="otd-ic">⇪</div><h3>Export</h3><p>Export a whole session — or a single block — to <span class="k">Markdown</span>, <span class="k">JSON</span>, plain text, or HTML.</p></div>
+      <div class="otd-card"><div class="otd-ic">✦</div><h3>Persisted agent chat</h3><p>Each terminal's AI chat is saved and restored, with agent-run commands linked to the blocks they produced.</p></div>
+      <div class="otd-card"><div class="otd-ic">⧗</div><h3>Shell integration</h3><p>Auto-injects <span class="k">OSC 133</span> prompt markers (PowerShell / bash / zsh) to delimit blocks and capture exit codes. Toggle in settings.</p></div>
+      <div class="otd-card"><div class="otd-ic">◧</div><h3>Interactive-app markers</h3><p>Full-screen sessions run live and are logged as markers you can see in the history — a dead process can't be resumed.</p></div>
+    </div>
+
+    <div class="otd-sec"><h2 class="otd-sec-h">How it works</h2></div>
+    <div class="otd-arch">
+      <div class="otd-node"><div class="t">Shell · PTY</div><div class="s">Real PowerShell / bash / zsh. Fully interactive.</div></div>
+      <div class="otd-arrow">→</div>
+      <div class="otd-node mid"><div class="t">Transcript store</div><div class="s">Owned by Relay — blocks, exit codes, timings &amp; agent chat. The single source of truth.</div></div>
+      <div class="otd-arrow">→</div>
+      <div class="otd-node"><div class="t">Renderer</div><div class="s">xterm.js draws live output; the block UI renders the owned history.</div></div>
+    </div>
+
+    <div class="otd-sec"><h2 class="otd-sec-h">Works with Claude Code</h2></div>
+    <p class="otd-lede" style="margin:-4px 0 18px">Relay's own agent is Claude‑Code‑<em style="font-style:normal;color:#c9d1da">style</em> — and it also runs the real thing, and signs in the way you already do.</p>
+    <div class="otd-cc">
+      <div class="otd-cc-card">
+        <div class="otd-cc-h"><span class="otd-cc-ic">›_</span>Launch Claude Code in one click</div>
+        <p>A <b>Claude Code</b> button in the tab bar — plus a <span class="otd-mono">⌘⇧C</span> command — opens a new terminal in the current project running the real <span class="otd-mono">claude</span> CLI. Relay's terminals are true shells, so it's the actual Claude Code, not a clone. Not installed? Relay offers the one‑line install.</p>
+        <div class="otd-ccterm">
+          <div class="otd-cctabs"><span class="otd-cctab">terminal</span><span class="otd-cctab cc">›_ Claude Code</span><span class="otd-ccplus">+</span></div>
+          <div class="otd-ccbody"><span class="otd-out-dim">✻ Welcome to Claude Code — /login if needed</span>
+<span class="otd-out-dim">  cwd  D:\projects\relay</span>
+
+<span style="color:#f0b429">&gt;</span> <span style="color:#e8edf3">refactor the pty module and run the unit tests</span>
+<span class="otd-out-dim">● Read src/pty.ts</span>
+<span class="otd-out-dim">● Edit src/pty.ts · 2 hunks</span>
+<span class="otd-out-ok">● Bash: npm test — 42 passed</span></div>
+        </div>
+      </div>
+      <div class="otd-cc-card">
+        <div class="otd-cc-h"><span class="otd-cc-ic"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="7.5" cy="15.5" r="4.5"/><path d="M10.7 12.3 21 2"/><path d="M17 6l3 3"/><path d="M15 8l2 2"/></svg></span>Sign in with your Claude login</div>
+        <p>No pasted API key required. Leave the Anthropic key blank and Relay's ✦ Agent uses your existing <b>Claude subscription / Claude Code login</b> — the same credential <span class="otd-mono">claude</span> uses (an ambient key, token, or <span class="otd-mono">claude login</span>). Paste a key only to override it.</p>
+        <div class="otd-ccset">
+          <div class="otd-ccset-row"><label>Anthropic · Claude</label><span class="otd-ccpill ok">● Using Claude Code login</span></div>
+          <div class="otd-ccfield">sk-ant-…<span class="otd-ccopt">optional</span></div>
+          <div class="otd-cchint">Leave blank to use your Claude Code login. GPT and Gemini still use their own keys.</div>
+        </div>
+      </div>
+    </div>
+
+    <p class="otd-foot"><b>Status —</b> this is the v2 design, not built yet. It keeps every existing Relay feature (per-terminal model, folder, colors, Library save/restore, multi-provider agent) and adds the owned-history layer on top. <b>Interactive full-screen apps</b> stay live-only: Relay records that they ran, but a dead process can't be resumed — true of any terminal.</p>
+  </div>
+</section>
+
+<script>
+(function(){
+  var t=document.getElementById('otdToggle'),s=document.getElementById('otd');
+  if(!t||!s)return;
+  t.addEventListener('click',function(){
+    var open=s.classList.toggle('show');
+    t.setAttribute('aria-expanded',open?'true':'false');
+    t.innerHTML=open?'←  Back to prototype':'◈  v2 · Owned-History Terminal  →';
+    if(open)s.scrollTop=0;
+  });
+  s.addEventListener('click',function(e){
+    var h=e.target.closest('.otd-bhead'); if(h){h.parentElement.classList.toggle('collapsed');}
+  });
+})();
+</script>
