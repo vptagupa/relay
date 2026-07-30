@@ -84,6 +84,7 @@ const api = {
   winMinimize: () => ipcRenderer.send('win:minimize'),
   winMaximize: () => ipcRenderer.send('win:maximize'),
   winClose: () => ipcRenderer.send('win:close'),
+  winFocus: () => ipcRenderer.send('win:focus'),
   onWinState: (cb: (maximized: boolean) => void) => {
     const h = (_: unknown, max: boolean) => cb(max);
     ipcRenderer.on('win:state', h);

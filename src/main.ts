@@ -88,6 +88,7 @@ function createWindow(): void {
 ipcMain.on('win:minimize', () => win?.minimize());
 ipcMain.on('win:maximize', () => { if (win) win.isMaximized() ? win.unmaximize() : win.maximize(); });
 ipcMain.on('win:close', () => win?.close());
+ipcMain.on('win:focus', () => { if (win) { if (win.isMinimized()) win.restore(); win.show(); win.focus(); } });
 
 // Only boot the real app when this isn't a Squirrel maintenance run (see isSquirrel above).
 if (!isSquirrel) {

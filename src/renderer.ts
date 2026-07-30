@@ -10,11 +10,16 @@ const $ = <T extends HTMLElement = HTMLElement>(s: string) => document.querySele
 const uid = () => (crypto as any).randomUUID();
 const esc = (s: string) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]!));
 
-interface Tab { id: string; name: string; model: string; cwd: string; libId?: string; term: Terminal; fit: FitAddon; ser: SerializeAddon; el: HTMLElement; lastCols?: number; lastRows?: number; tabBg?: string; tabFg?: string; bodyBg?: string; bodyFg?: string; chat: ChatTurn[]; blocks: Block[]; bkNonce: string; cmdHistory: string[]; histIdx: number; liveInteractive: boolean; }
+interface Tab { id: string; name: string; model: string; cwd: string; libId?: string; term: Terminal; fit: FitAddon; ser: SerializeAddon; el: HTMLElement; lastCols?: number; lastRows?: number; tabBg?: string; tabFg?: string; bodyBg?: string; bodyFg?: string; chat: ChatTurn[]; blocks: Block[]; bkNonce: string; cmdHistory: string[]; histIdx: number; liveInteractive: boolean; group: 0 | 1; }
 
 const state = {
   tabs: [] as Tab[],
   active: '' as string,
+  gv: ['', ''] as [string, string],      // visible tab id per group (group 1 empty = not split)
+  focus: 0 as 0 | 1,                     // which group has focus
+  splitDir: 'row' as 'row' | 'col',      // 'row' = split right (columns), 'col' = split down (rows)
+  splitRatio: 0.5,                       // size of the left/top pane (0.15–0.85)
+  maxG: null as null | 0 | 1,            // a group temporarily maximized (fills the pane grid)
   settings: { workspace: null, defaultModel: DEFAULT_MODEL, autoApprove: false, autoSave: true, theme: 'dark', sidebarCollapsed: false, toolbarShown: false, librarySort: 'recent', librarySplit: 0.4, sidebarWidth: 260, hasKey: {} } as Settings,
   library: [] as SavedSession[],
   history: [] as ChatTurn[],
@@ -22,6 +27,9 @@ const state = {
   browse: null as null | { path: string; parent: string; entries: { name: string; isDir: boolean }[] },
 };
 const activeTab = () => state.tabs.find((t) => t.id === state.active);
+const splitOn = () => state.gv[1] !== '';                                  // is a 2nd group open?
+const gTab = (g: 0 | 1) => state.tabs.find((t) => t.id === state.gv[g]);    // visible tab of group g
+const groupTabs = (g: 0 | 1) => state.tabs.filter((t) => t.group === g);    // all tabs in group g
 
 /* ----------------------------- layout ----------------------------- */
 $('#app').innerHTML = `
@@ -66,28 +74,38 @@ $('#app').innerHTML = `
       <section class="term-area">
         <div class="tabstrip">
           <button class="side-toggle" id="btnSidebar" title="Toggle library">▤</button>
-          <div class="tabs" id="tabs"></div>
           <button class="tab-add" id="btnNewTab" title="New terminal (⌘T)">+</button>
           <button class="tab-add" id="btnAddFolder" title="Open folder in new terminal (⌘⇧O)"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h5l2 2h9a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1z"/><line x1="12" y1="11" x2="12" y2="16"/><line x1="9.5" y1="13.5" x2="14.5" y2="13.5"/></svg></button>
           <button class="tab-add cc" id="btnClaude" title="Launch Claude Code (⌘⇧C)">✳</button>
           <div class="tt-spacer"></div>
           <button class="tt-model" id="tabModelBtn" title="Model for this terminal"><span class="dot"></span><span id="tabModelName">Opus 5</span> ▾</button>
           <button class="tt-icon blocks-toggle on" id="btnBlocks" title="Blocks view / Classic terminal (⌘⇧B)">⊞</button>
+          <button class="tt-icon" id="btnSplitRight" title="Split right — clone this terminal into a pane on the right (⌘⇧E)">◨</button>
+          <button class="tt-icon" id="btnSplitDown" title="Split down — clone this terminal into a pane below">⬓</button>
           <button class="tt-icon" id="btnBookmarks" title="Bookmarks — highlight a command to save one (⌘⇧K)">★</button>
           <button class="tt-icon" id="btnSave" title="Save to Library (⌘S)">⤓</button>
           <button class="tt-icon" id="btnClear" title="Clear terminal (⌃L)">⌫</button>
         </div>
         <div class="term-stack">
-          <div class="term-host" id="termHost">
-            <div class="term-empty" id="termEmpty">No terminal yet.<br>Press + to open one.</div>
-          </div>
-          <div class="blocks-view" id="blocksView">
-            <div class="bv-scroll" id="bvScroll"></div>
-            <div class="bv-input">
-              <span class="bv-prompt" id="bvPrompt">❯</span>
-              <textarea class="bv-cmd" id="bvCmd" rows="1" placeholder="type a command — Enter runs · Shift+Enter new line · ↑ recalls" spellcheck="false" autocomplete="off"></textarea>
+         <div class="pane-grid" id="paneGrid">
+          <div class="pane primary" id="primaryPane" data-g="0">
+            <div class="pane-tabs"><div class="tabs" id="tabs"></div><button class="pane-add" data-g="0" title="New terminal in this pane">+</button><button class="pane-max" data-g="0" title="Maximize / restore pane">⛶</button></div>
+            <div class="pane-body">
+              <div class="term-host" id="termHost"><div class="term-empty" id="termEmpty">No terminal yet.<br>Press + to open one.</div></div>
+              <div class="blocks-view" id="blocksView"><div class="bv-scroll" id="bvScroll"></div><div class="bv-input"><span class="bv-prompt" id="bvPrompt">❯</span><textarea class="bv-cmd" id="bvCmd" rows="1" placeholder="type a command — Enter runs · Shift+Enter new line · ↑ recalls" spellcheck="false" autocomplete="off"></textarea></div></div>
+              <div class="dz dz-right" data-dz="row" title="Drop to split right"></div>
+              <div class="dz dz-down" data-dz="col" title="Drop to split down"></div>
             </div>
           </div>
+          <div class="pane-divider" id="paneDivider" style="display:none" title="Drag to resize"></div>
+          <div class="pane tile" id="tilePane" data-g="1" style="display:none">
+            <div class="pane-tabs"><div class="tabs" id="tabs1"></div><button class="pane-add" data-g="1" title="New terminal in this pane">+</button><button class="pane-max" data-g="1" title="Maximize / restore pane">⛶</button><button class="pane-x" id="tileClose" title="Close this pane">✕</button></div>
+            <div class="pane-body">
+              <div class="term-host" id="tileHost"></div>
+              <div class="blocks-view" id="blocksView2"><div class="bv-scroll" id="bvScroll2"></div><div class="bv-input"><span class="bv-prompt" id="bvPrompt2">❯</span><textarea class="bv-cmd" id="bvCmd2" rows="1" placeholder="type a command — Enter runs · Shift+Enter new line" spellcheck="false" autocomplete="off"></textarea></div></div>
+            </div>
+          </div>
+         </div>
         </div>
       </section>
     </div>
@@ -147,6 +165,7 @@ $('#app').innerHTML = `
       <label class="chk"><input type="checkbox" id="autoApprove"> Auto-approve agent file writes & commands (skip the confirm step)</label>
       <label class="chk"><input type="checkbox" id="shellIntegration"> Command blocks — capture each command as a block in History (shell integration; applies to new terminals)</label>
       <label class="chk"><input type="checkbox" id="blocksViewSet"> Blocks view — show commands as blocks in the main terminal (full-screen apps drop to the live terminal automatically)</label>
+      <label class="chk"><input type="checkbox" id="notifySet"> Notify me when a long command finishes while Relay isn't focused</label>
     </div>
     <div class="modal-foot"><button class="btn primary" id="settingsClose">Done</button></div>
   </div>
@@ -240,7 +259,8 @@ async function newTab(seed?: Partial<OpenTab> & { libId?: string }, activate = t
   $('#termHost').appendChild(el);
   term.open(el);
   const cwd = seed?.cwd || state.settings.workspace || '';
-  const tab: Tab = { id, name: seed?.name || (n > 1 ? `terminal ${n}` : 'terminal'), model: seed?.model || state.settings.defaultModel, cwd, libId: seed?.libId, term, fit, ser, el, tabBg: seed?.tabBg, tabFg: seed?.tabFg, bodyBg: seed?.bodyBg, bodyFg: seed?.bodyFg, chat: seed?.chat ? [...seed.chat] : [], blocks: seed?.blocks ? [...seed.blocks] : [], bkNonce: uid(), cmdHistory: [], histIdx: 0, liveInteractive: false };
+  const group = (((seed as { group?: number })?.group ?? state.focus) === 1 ? 1 : 0) as 0 | 1;
+  const tab: Tab = { id, name: seed?.name || (n > 1 ? `terminal ${n}` : 'terminal'), model: seed?.model || state.settings.defaultModel, cwd, libId: seed?.libId, term, fit, ser, el, tabBg: seed?.tabBg, tabFg: seed?.tabFg, bodyBg: seed?.bodyBg, bodyFg: seed?.bodyFg, chat: seed?.chat ? [...seed.chat] : [], blocks: seed?.blocks ? [...seed.blocks] : [], bkNonce: uid(), cmdHistory: [], histIdx: 0, liveInteractive: false, group };
   state.tabs.push(tab);
   applyTermColors(tab); // honor any restored per-terminal body/text colors
   term.onData((d) => relay.ptyWrite(id, d));
@@ -250,9 +270,12 @@ async function newTab(seed?: Partial<OpenTab> & { libId?: string }, activate = t
   if (activate) {
     // Reveal only this tab and size it BEFORE the shell starts, so the pty is created at
     // the right size and doesn't repaint (flash) from a follow-up resize.
-    state.active = id;
+    state.gv[group] = id; state.focus = group; state.active = id;
     $('#termEmpty').style.display = 'none';
-    for (const x of state.tabs) x.el.classList.toggle('hidden', x.id !== id);
+    const host = group === 1 ? $('#tileHost') : $('#termHost');
+    if (el.parentElement !== host) host.appendChild(el);
+    if (group === 1) $('#tilePane').style.display = '';
+    for (const x of state.tabs) x.el.classList.toggle('hidden', x.id !== state.gv[0] && x.id !== state.gv[1]);
     fit.fit(); tab.lastCols = term.cols; tab.lastRows = term.rows;
   }
   renderTabs();
@@ -280,17 +303,116 @@ function applyResize(t: Tab) {
   const c = t.term.cols, r = t.term.rows;
   if (c > 0 && r > 0 && (c !== t.lastCols || r !== t.lastRows)) { t.lastCols = c; t.lastRows = r; relay.ptyResize(t.id, c, r); }
 }
+// Focus a tab — make it the visible tab of its group and give that group focus.
 function switchTab(id: string) {
-  state.active = id;
+  const t = state.tabs.find((x) => x.id === id); if (!t) return;
+  state.gv[t.group] = id; state.focus = t.group; state.active = id;
+  paneAftermath();
+}
+// Shared work after the active tab / layout changes.
+function paneAftermath() {
   $('#termEmpty').style.display = state.tabs.length ? 'none' : 'grid';
-  for (const t of state.tabs) t.el.classList.toggle('hidden', t.id !== id);
   const t = activeTab();
-  if (t) applyResize(t);
+  reconcilePanes();
   renderTabs(); updateStatus(); reflectModel(); persistWorkspace();
   state.browsePath = t?.cwd || state.settings.workspace || ''; renderFiles(); // Files follows the active terminal
-  if ($('#agentPanel').classList.contains('show')) renderChat();      // chat follows the active terminal
-  if ($('#historyPanel').classList.contains('show')) renderHistory(); // history follows the active terminal
-  updateMainView(); // show Blocks or Classic for this terminal (and focus the right surface)
+  if ($('#agentPanel').classList.contains('show')) renderChat();
+  if ($('#historyPanel').classList.contains('show')) renderHistory();
+  updateMainView();
+}
+
+/* ----------------------------- editor-group split ----------------------------- */
+// Place each group's visible tab into its pane's host; hide the rest. Renders the layout.
+function reconcilePanes() {
+  const t0 = gTab(0), t1 = gTab(1);
+  const termHost = $('#termHost'), tileHost = $('#tileHost');
+  if (t0 && t0.el.parentElement !== termHost) termHost.appendChild(t0.el);
+  if (t1 && t1.el.parentElement !== tileHost) tileHost.appendChild(t1.el);
+  for (const t of state.tabs) {
+    const host = t.group === 1 ? tileHost : termHost;
+    if (t !== t0 && t !== t1 && t.el.parentElement !== host) host.appendChild(t.el);
+    t.el.classList.toggle('hidden', t.id !== state.gv[0] && t.id !== state.gv[1]);
+  }
+  const split = splitOn();
+  if (!split) state.maxG = null;
+  const maxed = split && state.maxG !== null;
+  $('#paneGrid').classList.toggle('col', state.splitDir === 'col');
+  $('#paneGrid').classList.toggle('split', split);
+  $('#primaryPane').style.display = (!maxed || state.maxG === 0) ? '' : 'none';
+  $('#tilePane').style.display = (split && (!maxed || state.maxG === 1)) ? '' : 'none';
+  $('#paneDivider').style.display = (split && !maxed) ? '' : 'none';
+  if (maxed) { const mp = state.maxG === 0 ? '#primaryPane' : '#tilePane'; ($(mp) as HTMLElement).style.flex = '1'; }
+  else if (split) { $('#primaryPane').style.flex = String(state.splitRatio); $('#tilePane').style.flex = String(1 - state.splitRatio); }
+  else { $('#primaryPane').style.flex = ''; $('#tilePane').style.flex = ''; }
+  $('#btnSplitRight').classList.toggle('on', split && state.splitDir === 'row');
+  $('#btnSplitDown').classList.toggle('on', split && state.splitDir === 'col');
+  $('#primaryPane').classList.toggle('focused', split && state.focus === 0);
+  $('#tilePane').classList.toggle('focused', split && state.focus === 1);
+  if (t0) applyResize(t0);
+  if (t1) { try { t1.fit.fit(); if (t1.term.cols > 0) relay.ptyResize(t1.id, t1.term.cols, t1.term.rows); } catch { /* pane may be gone */ } }
+}
+// Split: clone the current terminal (fresh shell, same folder) into a 2nd group (pane).
+// 'row' = right (columns), 'col' = down (rows). Same direction again collapses the split.
+async function splitClone(dir: 'row' | 'col') {
+  const cur = activeTab(); if (!cur) { toast('Open a terminal first'); return; }
+  if (splitOn()) {                                   // already split
+    if (state.splitDir === dir) { collapseSplit(); return; }
+    state.splitDir = dir; reconcilePanes(); return;  // just change orientation
+  }
+  const nt = await newTab({ cwd: cur.cwd, name: cur.name, model: cur.model }, false); // don't steal focus
+  nt.group = 1; state.gv[1] = nt.id; state.focus = 1; state.active = nt.id; state.splitDir = dir;
+  setTimeout(() => ($('#bvCmd2') as HTMLElement)?.focus(), 0);
+  paneAftermath();
+}
+// Close the 2nd group entirely (its tabs return to group 0 so no history is lost).
+function collapseSplit() {
+  for (const t of groupTabs(1)) t.group = 0;         // adopt its tabs into group 0
+  state.gv[1] = ''; state.focus = 0;
+  const still0 = groupTabs(0);
+  if (!still0.some((t) => t.id === state.gv[0])) state.gv[0] = still0[0]?.id || '';
+  state.active = state.gv[0];
+  paneAftermath();
+}
+function closeSplitTab() { collapseSplit(); }
+function fitPanes() {
+  const t0 = gTab(0); if (t0) applyResize(t0);
+  const t1 = gTab(1); if (t1) { try { t1.fit.fit(); if (t1.term.cols > 0) relay.ptyResize(t1.id, t1.term.cols, t1.term.rows); } catch { /* ignore */ } }
+}
+// Focus a split group by index (Ctrl+1 / Ctrl+2).
+function focusGroup(g: 0 | 1) {
+  if (g === 1 && !splitOn()) return;
+  const t = gTab(g); if (!t) return;
+  state.focus = g; state.active = t.id;
+  $('#primaryPane').classList.toggle('focused', splitOn() && g === 0);
+  $('#tilePane').classList.toggle('focused', splitOn() && g === 1);
+  reflectModel(); updateStatus();
+  if (blocksMode(t)) ($(g === 0 ? '#bvCmd' : '#bvCmd2') as HTMLElement)?.focus(); else t.term.focus();
+}
+// Move the focused tab to the other group (Ctrl+Alt+←/→). Creates the split if needed.
+function moveActiveToGroup(g: 0 | 1) {
+  const t = activeTab(); if (!t || t.group === g) return;
+  if (g === 1 && !splitOn() && groupTabs(0).length < 2) { toast('Open another tab to split'); return; }
+  if (g === 1 && !splitOn()) state.splitDir = 'row';
+  const src = (g === 0 ? 1 : 0) as 0 | 1;
+  t.group = g;
+  if (state.gv[src] === t.id) state.gv[src] = groupTabs(src)[0]?.id || '';
+  state.gv[g] = t.id; state.focus = g; state.active = t.id;
+  if (groupTabs(1).length === 0) { state.gv[1] = ''; state.focus = 0; state.active = state.gv[0]; }
+  paneAftermath();
+}
+// Maximize a group (fills the pane grid, hides the other) / restore.
+function toggleMaxGroup(g: 0 | 1) {
+  if (!splitOn()) return;
+  state.maxG = state.maxG === g ? null : g;
+  if (state.maxG !== null) { state.focus = state.maxG; state.active = state.gv[state.maxG]; }
+  reconcilePanes(); fitPanes();
+}
+// Ctrl+PageUp/Down: next/prev tab within the focused group.
+function cycleTab(dir: number) {
+  const tabs = groupTabs(state.focus); if (tabs.length < 2) return;
+  const i = tabs.findIndex((t) => t.id === state.gv[state.focus]);
+  const nt = tabs[(i + dir + tabs.length) % tabs.length];
+  if (nt) switchTab(nt.id);
 }
 // A small centered confirm dialog. Resolves true (confirmed) / false (cancelled).
 let confirmResolve: ((v: boolean) => void) | null = null;
@@ -322,23 +444,32 @@ async function closeTab(id: string, skipConfirm = false) {
   const [t] = state.tabs.splice(i, 1);
   flushTabToLibrary(t); // keep its Library entry current so reopening restores the latest history
   relay.ptyDetach(id); t.term.dispose(); t.el.remove(); // keep the shell alive so it can be resumed
-  if (state.active === id) state.active = state.tabs[Math.max(0, i - 1)]?.id || '';
-  if (!state.tabs.length) { $('#termEmpty').style.display = 'grid'; renderTabs(); updateStatus(); updateMainView(); }
-  else switchTab(state.active);
+  // replace the visible tab of each group if we just closed it
+  if (state.gv[0] === id) state.gv[0] = groupTabs(0)[0]?.id || '';
+  if (state.gv[1] === id) state.gv[1] = groupTabs(1)[0]?.id || '';
+  // if a group emptied, fold the split (group 1's tabs, if any, move into group 0)
+  if (groupTabs(0).length === 0 && groupTabs(1).length > 0) { for (const x of groupTabs(1)) x.group = 0; state.gv[0] = state.gv[1]; state.gv[1] = ''; }
+  else if (groupTabs(1).length === 0) state.gv[1] = '';
+  if (state.focus === 1 && !state.gv[1]) state.focus = 0;
+  state.active = state.gv[state.focus] || state.gv[0] || '';
+  if (!state.tabs.length) { $('#termEmpty').style.display = 'grid'; state.gv = ['', '']; state.focus = 0; state.active = ''; renderTabs(); reconcilePanes(); updateStatus(); updateMainView(); }
+  else paneAftermath();
   persistWorkspace();
 }
-function renderTabs() {
-  $('#tabs').innerHTML = state.tabs.map((t) => {
-    // Custom tab background/text colors override the default tab styling.
-    const style = (t.tabBg || t.tabFg) ? ` style="${t.tabBg ? `background:${t.tabBg};` : ''}${t.tabFg ? `color:${t.tabFg};` : ''}"` : '';
-    const fgStyle = t.tabFg ? ` style="color:${t.tabFg}"` : '';
-    return `
-    <div class="tab ${t.id === state.active ? 'active' : ''}${(t.tabBg || t.tabFg) ? ' colored' : ''}" draggable="true" data-tab="${t.id}" title="${esc(t.name)}"${style}>
+function tabHtml(t: Tab): string {
+  // Custom tab background/text colors override the default tab styling.
+  const style = (t.tabBg || t.tabFg) ? ` style="${t.tabBg ? `background:${t.tabBg};` : ''}${t.tabFg ? `color:${t.tabFg};` : ''}"` : '';
+  const fgStyle = t.tabFg ? ` style="color:${t.tabFg}"` : '';
+  const activeInGroup = t.id === state.gv[t.group]; // the visible tab of its own group
+  return `<div class="tab ${activeInGroup ? 'active' : ''}${(t.tabBg || t.tabFg) ? ' colored' : ''}" draggable="true" data-tab="${t.id}" title="${esc(t.name)}"${style}>
       <span class="tab-glyph"${fgStyle}>›_</span><span class="tab-name" data-rename="${t.id}">${esc(t.name)}</span>
       <span class="tab-model"${fgStyle}>${esc(modelById(t.model).short)}</span>
       <span class="tab-close" data-close="${t.id}">✕</span>
     </div>`;
-  }).join('');
+}
+function renderTabs() {
+  $('#tabs').innerHTML = groupTabs(0).map(tabHtml).join('');
+  $('#tabs1').innerHTML = groupTabs(1).map(tabHtml).join('');
 }
 function clearActive() { activeTab()?.term.clear(); }
 // Apply a terminal's per-tab body/text colors by overriding its xterm theme (background,
@@ -446,7 +577,7 @@ function slimBlocks(blocks: Block[]): Block[] {
   return blocks.slice(-120).map((b) => ({ ...b, output: b.output.length > 4000 ? '…' + b.output.slice(-4000) : b.output }));
 }
 function snapshotTabs(): OpenTab[] {
-  return state.tabs.map((t) => ({ id: t.id, name: t.name, model: t.model, libId: t.libId, cwd: t.cwd, scrollback: t.ser.serialize({ scrollback: 800 }), tabBg: t.tabBg, tabFg: t.tabFg, bodyBg: t.bodyBg, bodyFg: t.bodyFg, chat: t.chat.slice(-100), blocks: slimBlocks(t.blocks) }));
+  return state.tabs.map((t) => ({ id: t.id, name: t.name, model: t.model, libId: t.libId, cwd: t.cwd, group: t.group, scrollback: t.ser.serialize({ scrollback: 800 }), tabBg: t.tabBg, tabFg: t.tabFg, bodyBg: t.bodyBg, bodyFg: t.bodyFg, chat: t.chat.slice(-100), blocks: slimBlocks(t.blocks) }));
 }
 // Persist the open tabs + their scrollback. Coalescing throttle: the first trigger
 // schedules a save ~800ms out and any triggers within that window are folded in — so a
@@ -455,7 +586,7 @@ function snapshotTabs(): OpenTab[] {
 // flush on window close.
 function persistWorkspace(immediate = false) {
   if (!state.settings.autoSave) return;
-  const run = () => { wsT = null; relay.setWorkspace({ active: state.active, tabs: snapshotTabs() }); flashSaved(); };
+  const run = () => { wsT = null; relay.setWorkspace({ active: state.active, tabs: snapshotTabs(), gv: state.gv, focus: state.focus, splitDir: state.splitDir, splitRatio: state.splitRatio }); flashSaved(); };
   if (immediate) { if (wsT) clearTimeout(wsT); run(); return; }
   if (wsT) return;              // a save is already scheduled — coalesce into it
   wsT = setTimeout(run, 800);
@@ -716,11 +847,25 @@ relay.onPtyBlock((id: string, ev: { type: 'start' | 'update' | 'end'; block: Blo
   if (t.blocks.length > 500) t.blocks.splice(0, t.blocks.length - 500);
   // A full-screen app entered alt-screen → drop the Blocks view to the live terminal so
   // vim/top run interactively; when its block ends (app exited), return to the Blocks view.
-  if (blk.interactive && !t.liveInteractive) { t.liveInteractive = true; if (t.id === state.active) updateMainView(); }
-  if (ev.type === 'end' && t.liveInteractive) { t.liveInteractive = false; if (t.id === state.active) updateMainView(); }
-  if (t.id === state.active) refreshBlockViews();
-  if (ev.type === 'end') persistWorkspace();
+  const visible = t.id === state.gv[0] || t.id === state.gv[1];
+  if (blk.interactive && !t.liveInteractive) { t.liveInteractive = true; if (visible) updateMainView(); }
+  if (ev.type === 'end' && t.liveInteractive) { t.liveInteractive = false; if (visible) updateMainView(); }
+  if (visible) refreshBlockViews();
+  if (ev.type === 'end') { maybeNotify(t, blk); persistWorkspace(); }
 });
+// Desktop notification when a long-running command finishes while Relay is unfocused.
+const NOTIFY_MIN_MS = 8000;
+function maybeNotify(t: Tab, b: Block) {
+  if (!state.settings.notifications || b.interactive || b.running || b.exitCode == null) return;
+  if (document.hasFocus()) return; // only when the window isn't focused
+  const dur = (b.endedAt || 0) - (b.startedAt || 0);
+  if (dur < NOTIFY_MIN_MS) return;
+  const cmd = cmdText(b) || 'command'; const ok = b.exitCode === 0;
+  try {
+    const n = new Notification(`${ok ? '✓' : '✗'} ${cmd.slice(0, 64)}`, { body: `${t.name} · ${ok ? 'done' : 'exit ' + b.exitCode} · ${fmtDur(dur)}` });
+    n.onclick = () => { relay.winFocus?.(); switchTab(t.id); };
+  } catch { /* notifications unavailable */ }
+}
 function blockHtml(b: Block, color = false): string {
   const badge = b.running ? '<span class="hb-badge run">running…</span>'
     : b.exitCode === 0 ? '<span class="hb-badge ok">✓ 0</span>'
@@ -910,48 +1055,67 @@ function refreshPill(mx?: number, my?: number) {
 // The live xterm is always mounted underneath; the Blocks view overlays it and becomes the
 // primary surface. Full-screen apps (alt-screen) and Classic mode reveal the xterm.
 function blocksMode(t: Tab | undefined): boolean { return !!t && state.settings.blocksView && !t.liveInteractive; }
+type Pane = 'main' | 'tile';
+const paneTab = (p: Pane) => p === 'main' ? gTab(0) : gTab(1);
+const paneSel = (p: Pane) => p === 'main' ? { view: '#blocksView', scroll: '#bvScroll', cmd: '#bvCmd', prompt: '#bvPrompt' } : { view: '#blocksView2', scroll: '#bvScroll2', cmd: '#bvCmd2', prompt: '#bvPrompt2' };
+// Show Blocks or the live terminal for BOTH panes (each pane is a full terminal).
 function updateMainView() {
-  const t = activeTab(); const on = blocksMode(t);
-  $('#blocksView').classList.toggle('show', on);
   $('#btnBlocks').classList.toggle('on', !!state.settings.blocksView);
   $('#btnBlocks').textContent = state.settings.blocksView ? '⊞' : '▭';
-  if (on) { renderBlocksView(); setTimeout(() => ($('#bvCmd') as HTMLElement)?.focus(), 0); }
+  updatePaneView('main');
+  updatePaneView('tile');
+}
+function updatePaneView(p: Pane) {
+  const t = paneTab(p); const s = paneSel(p);
+  if (p === 'tile' && !t) { $(s.view).classList.remove('show'); return; }
+  const on = blocksMode(t);
+  $(s.view).classList.toggle('show', on);
+  if (on) { renderPaneBlocks(p); if (p === 'main' && !$('#tilePane').contains(document.activeElement)) setTimeout(() => ($(s.cmd) as HTMLElement)?.focus(), 0); }
   else if (t) {
-    // Reveal the live terminal, then fit AFTER the layout settles and FORCE a resize, so a
-    // full-screen app (Claude Code, vim, top) redraws to the exact visible size — otherwise it
-    // can keep a stale (too-tall) row count and its bottom line renders under the status bar.
+    // Reveal the live terminal, fit after layout settles, FORCE a resize so a full-screen app
+    // (Claude Code, vim, top) redraws to the exact size (its bottom line isn't clipped).
     requestAnimationFrame(() => {
       t.fit.fit();
       if (t.term.cols > 0) { t.lastCols = t.term.cols; t.lastRows = t.term.rows; relay.ptyResize(t.id, t.term.cols, t.term.rows); }
-      t.term.focus(); t.term.scrollToBottom();
+      if (p === 'main') { t.term.focus(); t.term.scrollToBottom(); }
     });
   }
 }
 function refreshBlockViews() {
   if ($('#historyPanel').classList.contains('show')) renderHistory();
-  if ($('#blocksView').classList.contains('show')) renderBlocksView();
+  renderBlocksView();
 }
 let _bvRAF = 0;
-function renderBlocksView() { if (_bvRAF) return; _bvRAF = requestAnimationFrame(() => { _bvRAF = 0; renderBlocksViewNow(); }); }
-function renderBlocksViewNow() {
-  const wrap = $('#bvScroll'); const t = activeTab();
+function renderBlocksView() { if (_bvRAF) return; _bvRAF = requestAnimationFrame(() => { _bvRAF = 0; if ($('#blocksView').classList.contains('show')) renderPaneBlocks('main'); if (splitOn() && $('#blocksView2').classList.contains('show')) renderPaneBlocks('tile'); }); }
+function renderPaneBlocks(p: Pane) {
+  const t = paneTab(p); const s = paneSel(p); const wrap = $(s.scroll);
   if (!t) { wrap.innerHTML = '<div class="bv-empty">No terminal open.</div>'; return; }
-  ($('#bvPrompt') as HTMLElement).textContent = '❯'; // minimal prompt (folder shown in the status bar / block tooltips)
+  ($(s.prompt) as HTMLElement).textContent = '❯'; // minimal prompt (folder shown in the status bar / block tooltips)
   const blocks = t.blocks.filter(realBlock);
   const atBottom = wrap.scrollTop + wrap.clientHeight >= wrap.scrollHeight - 80;
   if (!blocks.length) wrap.innerHTML = `<div class="bv-empty">Commands you run appear here as blocks.<br><span class="dim">Type below to run one · ⊞/▭ toggles Classic terminal.</span></div>`;
   else wrap.innerHTML = blocks.map(bvBlockHtml).join('');
   if (atBottom) wrap.scrollTop = wrap.scrollHeight;
 }
-// Send the composed line to the shell. PSReadLine's Enter handler turns it into a block.
+// Send the composed line to the pane's shell. PSReadLine's Enter handler turns it into a block.
 function bvGrow(inp: HTMLTextAreaElement) { inp.style.height = 'auto'; inp.style.height = Math.min(inp.scrollHeight, 160) + 'px'; }
-function bvSend() {
-  const t = activeTab(); if (!t) return;
-  const inp = $('#bvCmd') as HTMLTextAreaElement; const cmd = inp.value;
+function paneSend(p: Pane) {
+  const t = paneTab(p); if (!t) return;
+  const inp = $(paneSel(p).cmd) as HTMLTextAreaElement; const cmd = inp.value;
   sendCommand(t.id, cmd);
   if (cmd.trim()) { t.cmdHistory.push(cmd); if (t.cmdHistory.length > 200) t.cmdHistory.shift(); }
   t.histIdx = t.cmdHistory.length;
   inp.value = ''; bvGrow(inp);
+}
+// Shared keydown for both panes' command inputs.
+function bvKeydown(p: Pane, ev: KeyboardEvent) {
+  const t = paneTab(p); const inp = ev.target as HTMLTextAreaElement;
+  if (ev.key === 'Enter' && !ev.shiftKey) { ev.preventDefault(); paneSend(p); }
+  else if (ev.key === 'Enter') { requestAnimationFrame(() => bvGrow(inp)); }
+  else if (ev.key === 'ArrowUp' && !inp.value.includes('\n')) { if (t && t.cmdHistory.length) { ev.preventDefault(); t.histIdx = Math.max(0, t.histIdx - 1); inp.value = t.cmdHistory[t.histIdx] || ''; requestAnimationFrame(() => inp.setSelectionRange(inp.value.length, inp.value.length)); bvGrow(inp); } }
+  else if (ev.key === 'ArrowDown' && !inp.value.includes('\n')) { if (t && t.cmdHistory.length) { ev.preventDefault(); t.histIdx = Math.min(t.cmdHistory.length, t.histIdx + 1); inp.value = t.cmdHistory[t.histIdx] || ''; bvGrow(inp); } }
+  else if (ev.ctrlKey && ev.key.toLowerCase() === 'c') { if (t) { relay.ptyWrite(t.id, '\x03'); inp.value = ''; bvGrow(inp); } }
+  else if (ev.key === 'Tab') ev.preventDefault();
 }
 type ExFmt = 'md' | 'json' | 'txt' | 'html';
 function outText(b: Block): string { return b.interactive ? '(interactive session)' : stripAnsi(b.output).replace(/\r/g, '').trimEnd(); }
@@ -1060,6 +1224,8 @@ function paletteActions(): PalAction[] {
     { g: 'View', t: 'Bookmarks', run: openBookmarks },
     { g: 'View', t: 'Bookmark highlighted text', run: bookmarkSelection },
     { g: 'View', t: 'Toggle Blocks / Classic terminal', run: toggleBlocksView },
+    { g: 'View', t: 'Split right (clone terminal)', run: () => splitClone('row') },
+    { g: 'View', t: 'Split down (clone terminal)', run: () => splitClone('col') },
     { g: 'Terminal', t: 'Launch Claude Code', run: newClaudeTab },
     { g: 'App', t: 'Open folder in new terminal…', run: addFolderTab },
     { g: 'App', t: 'Export session (Markdown)', run: () => doExport('md') },
@@ -1094,6 +1260,7 @@ function reflectSettings() {
   ($('#autoApprove') as HTMLInputElement).checked = state.settings.autoApprove;
   ($('#shellIntegration') as HTMLInputElement).checked = state.settings.shellIntegration;
   ($('#blocksViewSet') as HTMLInputElement).checked = state.settings.blocksView;
+  ($('#notifySet') as HTMLInputElement).checked = state.settings.notifications;
   for (const p of ['anthropic', 'openai', 'google']) {
     const on = (state.settings.hasKey as any)[p];
     const s = $('#state' + p[0].toUpperCase() + p.slice(1));
@@ -1223,7 +1390,8 @@ $('#histFilter').onclick = () => { histFilterFail = !histFilterFail; $('#histFil
 function onBlockAreaClick(e: Event) {
   const el = e.target as HTMLElement;
   const card = el.closest('.hb, .bvb') as HTMLElement | null; if (!card) return;
-  const t = activeTab(); const b = t?.blocks.find((x) => x.id === card.dataset.bid); if (!t || !b) return;
+  const t = el.closest('#bvScroll2') ? gTab(1) : gTab(0); // resolve which pane's tab
+  const b = t?.blocks.find((x) => x.id === card.dataset.bid); if (!t || !b) return;
   const act = (el.closest('[data-act]') as HTMLElement | null)?.dataset.act;
   if (!act) return; // clicking the block body does nothing — only the ▾ arrow collapses (so you can read/select output)
   if (act === 'collapse') { const bid = card.dataset.bid!; if (collapsedBlocks.has(bid)) collapsedBlocks.delete(bid); else collapsedBlocks.add(bid); card.classList.toggle('collapsed'); }
@@ -1236,20 +1404,36 @@ function onBlockAreaClick(e: Event) {
 }
 $('#histList').addEventListener('click', onBlockAreaClick);
 $('#bvScroll').addEventListener('click', onBlockAreaClick);
+$('#bvScroll2').addEventListener('click', onBlockAreaClick);
 $('#shellIntegration').addEventListener('change', async (e) => { state.settings = await relay.patchSettings({ shellIntegration: (e.target as HTMLInputElement).checked }); toast('Applies to new terminals'); });
 async function toggleBlocksView() { state.settings = await relay.patchSettings({ blocksView: !state.settings.blocksView }); updateMainView(); }
 $('#btnBlocks').onclick = toggleBlocksView;
+$('#btnSplitRight').onclick = () => splitClone('row');
+$('#btnSplitDown').onclick = () => splitClone('col');
+$('#tileClose').onclick = closeSplitTab;
+// Drag the divider to resize the two panes.
+(() => {
+  const div = $('#paneDivider'); let dragging = false; let raf = 0;
+  div.addEventListener('mousedown', (e) => { (e as MouseEvent).preventDefault(); dragging = true; div.classList.add('dragging'); document.body.style.userSelect = 'none'; });
+  div.addEventListener('dblclick', () => toggleMaxGroup(state.focus)); // double-click = maximize/restore
+  window.addEventListener('mousemove', (e) => {
+    if (!dragging) return;
+    const g = $('#paneGrid').getBoundingClientRect();
+    let r = state.splitDir === 'col' ? ((e as MouseEvent).clientY - g.top) / g.height : ((e as MouseEvent).clientX - g.left) / g.width;
+    r = Math.min(0.85, Math.max(0.15, r));
+    state.splitRatio = r; $('#primaryPane').style.flex = String(r); $('#tilePane').style.flex = String(1 - r);
+    if (!raf) raf = requestAnimationFrame(() => { raf = 0; fitPanes(); });
+  });
+  window.addEventListener('mouseup', () => { if (!dragging) return; dragging = false; div.classList.remove('dragging'); document.body.style.userSelect = ''; fitPanes(); persistWorkspace(); });
+})();
+$('#tilePane').addEventListener('mousedown', (e) => { const el = e.target as HTMLElement; if (el.closest('#tileClose') || el.closest('.pane-tabs')) return; const tt = gTab(1); if (!tt || state.focus === 1) return; state.focus = 1; state.active = tt.id; $('#primaryPane').classList.remove('focused'); $('#tilePane').classList.add('focused'); if (blocksMode(tt)) ($('#bvCmd2') as HTMLElement).focus(); else tt.term.focus(); });
+$('#primaryPane').addEventListener('mousedown', (e) => { if ((e.target as HTMLElement).closest('.pane-tabs')) return; const t0 = gTab(0); if (!t0 || state.focus === 0) return; state.focus = 0; state.active = t0.id; $('#tilePane').classList.remove('focused'); $('#primaryPane').classList.add('focused'); });
 $('#blocksViewSet').addEventListener('change', async (e) => { state.settings = await relay.patchSettings({ blocksView: (e.target as HTMLInputElement).checked }); updateMainView(); });
-$('#bvCmd').addEventListener('keydown', (e) => {
-  const ev = e as KeyboardEvent; const t = activeTab(); const inp = ev.target as HTMLTextAreaElement;
-  if (ev.key === 'Enter' && !ev.shiftKey) { ev.preventDefault(); bvSend(); }                    // Enter runs
-  else if (ev.key === 'Enter') { requestAnimationFrame(() => bvGrow(inp)); }                     // Shift+Enter: insert a newline, then grow
-  else if (ev.key === 'ArrowUp' && !inp.value.includes('\n')) { if (t && t.cmdHistory.length) { ev.preventDefault(); t.histIdx = Math.max(0, t.histIdx - 1); inp.value = t.cmdHistory[t.histIdx] || ''; bvGrow(inp); requestAnimationFrame(() => inp.setSelectionRange(inp.value.length, inp.value.length)); } }
-  else if (ev.key === 'ArrowDown' && !inp.value.includes('\n')) { if (t && t.cmdHistory.length) { ev.preventDefault(); t.histIdx = Math.min(t.cmdHistory.length, t.histIdx + 1); inp.value = t.cmdHistory[t.histIdx] || ''; bvGrow(inp); } }
-  else if (ev.ctrlKey && ev.key.toLowerCase() === 'c') { if (t) { relay.ptyWrite(t.id, '\x03'); inp.value = ''; bvGrow(inp); } }
-  else if (ev.key === 'Tab') ev.preventDefault(); // no shell completion in Blocks mode — use Classic
-});
+$('#notifySet').addEventListener('change', async (e) => { state.settings = await relay.patchSettings({ notifications: (e.target as HTMLInputElement).checked }); });
+$('#bvCmd').addEventListener('keydown', (e) => bvKeydown('main', e as KeyboardEvent));
 $('#bvCmd').addEventListener('input', (e) => bvGrow(e.target as HTMLTextAreaElement));
+$('#bvCmd2').addEventListener('keydown', (e) => bvKeydown('tile', e as KeyboardEvent));
+$('#bvCmd2').addEventListener('input', (e) => bvGrow(e.target as HTMLTextAreaElement));
 $('#btnSave').onclick = saveActive;
 $('#btnClear').onclick = clearActive;
 $('#btnSidebar').onclick = toggleSidebar;
@@ -1259,20 +1443,8 @@ $('#btnOpen').onclick = addFolderTab;
 $('#stAutosave').onclick = toggleAutosave;
 $('#libSort').addEventListener('change', async (e) => { state.settings = await relay.patchSettings({ librarySort: (e.target as HTMLSelectElement).value as any }); renderLibrary(); });
 
-$('#tabs').addEventListener('click', (e) => {
-  const c = (e.target as HTMLElement).closest('[data-close]') as HTMLElement | null;
-  if (c) { e.stopPropagation(); return closeTab(c.dataset.close!); }
-  const t = (e.target as HTMLElement).closest('[data-tab]') as HTMLElement | null;
-  if (t) switchTab(t.dataset.tab!);
-});
-$('#tabs').addEventListener('dblclick', (e) => {
-  const nm = (e.target as HTMLElement).closest('[data-rename]') as HTMLElement | null;
-  if (nm) makeEditable(nm, (v) => renameTab(nm.dataset.rename!, v));
-});
-$('#tabs').addEventListener('contextmenu', (e) => {
-  const el = (e.target as HTMLElement).closest('[data-tab]') as HTMLElement | null; if (!el) return;
-  e.preventDefault(); openTabMenu(el.dataset.tab!, (e as MouseEvent).clientX, (e as MouseEvent).clientY);
-});
+document.querySelectorAll('.pane-add').forEach((b) => b.addEventListener('click', () => { const g = (+(b as HTMLElement).dataset.g! === 1 ? 1 : 0) as 0 | 1; newTab({ group: g }); }));
+document.querySelectorAll('.pane-max').forEach((b) => b.addEventListener('click', () => { const g = (+(b as HTMLElement).dataset.g! === 1 ? 1 : 0) as 0 | 1; toggleMaxGroup(g); }));
 $('#tabMenu').addEventListener('click', (e) => {
   const b = (e.target as HTMLElement).closest('[data-i]') as HTMLElement | null;
   if (!b || b.hasAttribute('disabled')) return;
@@ -1304,14 +1476,61 @@ $('#winMax').onclick = () => relay.winMaximize();
 $('#winClose').onclick = () => relay.winClose();
 relay.onWinState((max: boolean) => { $('#winMax').innerHTML = max ? RESTORE_ICON : MAX_ICON; });
 
-// drag-to-reorder: tabs (horizontal)
+// Per-pane tab strips: click to focus, dbl-click to rename, right-click menu, drag to reorder
+// (and drag between panes to move a tab into the other group).
 let dragTab: string | null = null;
-const clearTabDrop = () => document.querySelectorAll('#tabs .drop-left,#tabs .drop-right').forEach((x) => x.classList.remove('drop-left', 'drop-right'));
-const endTabDrag = () => { dragTab = null; clearTabDrop(); document.querySelectorAll('#tabs .dragging').forEach((x) => x.classList.remove('dragging')); };
-$('#tabs').addEventListener('dragstart', (e) => { const el = (e.target as HTMLElement).closest('[data-tab]') as HTMLElement | null; if (!el) return; dragTab = el.dataset.tab!; el.classList.add('dragging'); (e as DragEvent).dataTransfer!.effectAllowed = 'move'; });
-$('#tabs').addEventListener('dragover', (e) => { if (!dragTab) return; e.preventDefault(); const el = (e.target as HTMLElement).closest('[data-tab]') as HTMLElement | null; clearTabDrop(); if (el && el.dataset.tab !== dragTab) { const r = el.getBoundingClientRect(); el.classList.add((e as DragEvent).clientX < r.left + r.width / 2 ? 'drop-left' : 'drop-right'); } });
-$('#tabs').addEventListener('drop', (e) => { if (!dragTab) return; e.preventDefault(); const el = (e.target as HTMLElement).closest('[data-tab]') as HTMLElement | null; if (el && el.dataset.tab !== dragTab) { const r = el.getBoundingClientRect(); reorderById(state.tabs, (t) => t.id, dragTab, el.dataset.tab!, (e as DragEvent).clientX < r.left + r.width / 2); renderTabs(); persistWorkspace(); } endTabDrag(); });
-$('#tabs').addEventListener('dragend', endTabDrag);
+const clearTabDrop = () => document.querySelectorAll('.tabs .drop-left,.tabs .drop-right').forEach((x) => x.classList.remove('drop-left', 'drop-right'));
+const endTabDrag = () => { dragTab = null; clearTabDrop(); document.body.classList.remove('tabdrag'); document.querySelectorAll('.dz.over').forEach((x) => x.classList.remove('over')); document.querySelectorAll('.tabs .dragging').forEach((x) => x.classList.remove('dragging')); };
+function wireTabStrip(sel: string, group: 0 | 1) {
+  const strip = $(sel);
+  strip.addEventListener('click', (e) => {
+    const c = (e.target as HTMLElement).closest('[data-close]') as HTMLElement | null;
+    if (c) { e.stopPropagation(); return void closeTab(c.dataset.close!); }
+    const t = (e.target as HTMLElement).closest('[data-tab]') as HTMLElement | null;
+    if (t) switchTab(t.dataset.tab!);
+  });
+  strip.addEventListener('dblclick', (e) => {
+    const nm = (e.target as HTMLElement).closest('[data-rename]') as HTMLElement | null;
+    if (nm) makeEditable(nm, (v) => renameTab(nm.dataset.rename!, v));
+  });
+  strip.addEventListener('contextmenu', (e) => {
+    const el = (e.target as HTMLElement).closest('[data-tab]') as HTMLElement | null; if (!el) return;
+    e.preventDefault(); openTabMenu(el.dataset.tab!, (e as MouseEvent).clientX, (e as MouseEvent).clientY);
+  });
+  strip.addEventListener('dragstart', (e) => { const el = (e.target as HTMLElement).closest('[data-tab]') as HTMLElement | null; if (!el || el.getAttribute('draggable') === 'false') return; dragTab = el.dataset.tab!; el.classList.add('dragging'); document.body.classList.add('tabdrag'); (e as DragEvent).dataTransfer!.effectAllowed = 'move'; });
+  strip.addEventListener('dragover', (e) => { if (!dragTab) return; e.preventDefault(); const el = (e.target as HTMLElement).closest('[data-tab]') as HTMLElement | null; clearTabDrop(); if (el && el.dataset.tab !== dragTab) { const r = el.getBoundingClientRect(); el.classList.add((e as DragEvent).clientX < r.left + r.width / 2 ? 'drop-left' : 'drop-right'); } });
+  strip.addEventListener('drop', (e) => {
+    if (!dragTab) return; e.preventDefault();
+    const dt = state.tabs.find((t) => t.id === dragTab); if (!dt) { endTabDrag(); return; }
+    const el = (e.target as HTMLElement).closest('[data-tab]') as HTMLElement | null;
+    const changed = dt.group !== group; dt.group = group; // dropping into this strip moves the tab here
+    if (el && el.dataset.tab !== dragTab) { const r = el.getBoundingClientRect(); reorderById(state.tabs, (t) => t.id, dragTab, el.dataset.tab!, (e as DragEvent).clientX < r.left + r.width / 2); }
+    if (changed) { state.gv[group] = dragTab; state.active = dragTab; state.focus = group; }
+    if (groupTabs(1).length === 0) { state.gv[1] = ''; if (state.focus === 1) { state.focus = 0; state.active = state.gv[0]; } }
+    endTabDrag(); paneAftermath();
+  });
+  strip.addEventListener('dragend', endTabDrag);
+}
+wireTabStrip('#tabs', 0);
+wireTabStrip('#tabs1', 1);
+// Drop a dragged tab onto the right/bottom edge of the terminal area to split there.
+document.querySelectorAll('.dz').forEach((z) => {
+  z.addEventListener('dragover', (e) => { if (!dragTab) return; (e as DragEvent).preventDefault(); document.querySelectorAll('.dz.over').forEach((x) => x.classList.remove('over')); z.classList.add('over'); });
+  z.addEventListener('dragleave', () => z.classList.remove('over'));
+  z.addEventListener('drop', (e) => {
+    if (!dragTab) return; (e as DragEvent).preventDefault();
+    const dir = (z as HTMLElement).dataset.dz as 'row' | 'col';
+    const dt = state.tabs.find((t) => t.id === dragTab);
+    if (dt) {
+      if (!splitOn() && groupTabs(0).length < 2) { toast('Open another tab to split'); endTabDrag(); return; }
+      state.splitDir = dir; dt.group = 1;
+      if (state.gv[0] === dt.id) state.gv[0] = groupTabs(0)[0]?.id || '';
+      state.gv[1] = dt.id; state.focus = 1; state.active = dt.id; state.maxG = null;
+      paneAftermath();
+    }
+    endTabDrag();
+  });
+});
 
 // drag-to-reorder: library (vertical) — switches sort to Custom and persists the order
 let dragLib: string | null = null;
@@ -1427,6 +1646,14 @@ document.addEventListener('keydown', (e) => {
   else if (mod && e.shiftKey && e.key.toLowerCase() === 'c') { e.preventDefault(); newClaudeTab(); }
   else if (mod && e.shiftKey && e.key.toLowerCase() === 'h') { e.preventDefault(); $('#historyPanel').classList.contains('show') ? closeHistory() : openHistory(); }
   else if (mod && e.shiftKey && e.key.toLowerCase() === 'b') { e.preventDefault(); toggleBlocksView(); }
+  else if (mod && e.shiftKey && e.key.toLowerCase() === 'e') { e.preventDefault(); splitClone('row'); }
+  else if (mod && e.key === '\\') { e.preventDefault(); splitClone('row'); }                                    // VS Code: split
+  else if (mod && e.altKey && e.key === 'ArrowRight') { e.preventDefault(); moveActiveToGroup(1); }              // move tab to right group
+  else if (mod && e.altKey && e.key === 'ArrowLeft') { e.preventDefault(); moveActiveToGroup(0); }               // move tab to left group
+  else if (mod && e.key === '1') { e.preventDefault(); focusGroup(0); }                                          // focus group 1
+  else if (mod && e.key === '2') { e.preventDefault(); focusGroup(1); }                                          // focus group 2
+  else if (mod && e.key === 'PageDown') { e.preventDefault(); cycleTab(1); }                                     // next tab in focused pane
+  else if (mod && e.key === 'PageUp') { e.preventDefault(); cycleTab(-1); }                                       // prev tab in focused pane
   else if (mod && e.key.toLowerCase() === 't') { e.preventDefault(); newTab(); }
   else if (mod && e.key.toLowerCase() === 'j') { e.preventDefault(); $('#agentPanel').classList.contains('show') ? closeAgent() : openAgent(); }
   else if (mod && e.key.toLowerCase() === 's') { e.preventDefault(); saveActive(); }
@@ -1439,12 +1666,12 @@ relay.onPtyData((id: string, data: string) => { state.tabs.find((t) => t.id === 
 // Final flush on close — synchronous so the latest scrollback reaches disk before teardown.
 // Wrapped so a failed flush can never throw mid-unload (which would abort a clean close).
 window.addEventListener('beforeunload', () => {
-  try { if (state.settings.autoSave) relay.flushWorkspace({ active: state.active, tabs: snapshotTabs() }); } catch { /* ignore */ }
+  try { if (state.settings.autoSave) relay.flushWorkspace({ active: state.active, tabs: snapshotTabs(), gv: state.gv, focus: state.focus, splitDir: state.splitDir, splitRatio: state.splitRatio }); } catch { /* ignore */ }
 });
 relay.onPtyExit((id: string) => { state.tabs.find((x) => x.id === id)?.term.write('\r\n\x1b[90m[process exited]\x1b[0m\r\n'); });
 relay.onApproval((req: ApprovalRequest) => showApproval(req));
 let _roT: any;
-new ResizeObserver(() => { clearTimeout(_roT); _roT = setTimeout(() => { const t = activeTab(); if (t) applyResize(t); }, 80); }).observe($('#termHost'));
+new ResizeObserver(() => { clearTimeout(_roT); _roT = setTimeout(() => { const t0 = gTab(0); if (t0) applyResize(t0); const t1 = gTab(1); if (t1) { try { t1.fit.fit(); if (t1.term.cols > 0) relay.ptyResize(t1.id, t1.term.cols, t1.term.rows); } catch { /* ignore */ } } }, 80); }).observe($('#termHost'));
 
 /* ----------------------------- boot ----------------------------- */
 (async function boot() {
@@ -1457,11 +1684,20 @@ new ResizeObserver(() => { clearTimeout(_roT); _roT = setTimeout(() => { const t
 
   const ws = await relay.getWorkspace();
   if (state.settings.autoSave && ws.tabs.length) {
-    // Restore each saved tab. Create the ACTIVE one activated so it's fitted to its real
-    // size BEFORE its shell spawns — a post-spawn resize makes ConPTY repaint (and clear)
-    // the screen on Windows, wiping the just-restored history.
+    // Restore each saved tab into its group. Create the ACTIVE one activated so it's fitted to
+    // its real size BEFORE its shell spawns (a post-spawn resize makes ConPTY repaint on Windows).
     const activeId = ws.tabs.some((t: OpenTab) => t.id === ws.active) ? ws.active : ws.tabs[0].id;
     for (const t of ws.tabs) await newTab(t, t.id === activeId);
+    // Restore the split layout (which tab is visible in each pane, direction, focus).
+    if (ws.gv && ws.gv[1] && state.tabs.some((t) => t.id === ws.gv![1])) {
+      state.splitDir = ws.splitDir || 'row';
+      if (typeof ws.splitRatio === 'number') state.splitRatio = Math.min(0.85, Math.max(0.15, ws.splitRatio));
+      state.gv[0] = state.tabs.some((t) => t.id === ws.gv![0]) ? ws.gv[0] : (groupTabs(0)[0]?.id || '');
+      state.gv[1] = ws.gv[1];
+      state.focus = ws.focus === 1 ? 1 : 0;
+      state.active = state.gv[state.focus] || activeId;
+      reconcilePanes(); updateMainView();
+    }
   } else if (state.settings.workspace) {
     newTab();
   } else {

@@ -18,7 +18,7 @@ interface DB {
 const defaults = (): DB => ({
   sessions: [],
   workspace: { active: '', tabs: [] },
-  settings: { workspace: null, defaultModel: DEFAULT_MODEL, autoApprove: false, autoSave: true, theme: 'dark', sidebarCollapsed: false, toolbarShown: false, librarySort: 'recent', librarySplit: 0.4, sidebarWidth: 260, shellIntegration: true, blocksView: true, bookmarks: [], bookmarkGroups: [], hasKey: {} },
+  settings: { workspace: null, defaultModel: DEFAULT_MODEL, autoApprove: false, autoSave: true, theme: 'dark', sidebarCollapsed: false, toolbarShown: false, librarySort: 'recent', librarySplit: 0.4, sidebarWidth: 260, shellIntegration: true, blocksView: true, notifications: true, bookmarks: [], bookmarkGroups: [], hasKey: {} },
 });
 
 let cache: DB | null = null;

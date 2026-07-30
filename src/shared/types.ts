@@ -47,11 +47,16 @@ export interface OpenTab extends TermColors {
   scrollback?: string;
   blocks?: Block[];                 // command history as structured blocks
   chat?: ChatTurn[];                // this terminal's agent conversation
+  group?: 0 | 1;                    // which split group (pane) this tab belongs to
 }
 
 export interface Workspace {
   active: string;
   tabs: OpenTab[];
+  gv?: [string, string];            // visible tab id per group (split-layout restore)
+  focus?: 0 | 1;
+  splitDir?: 'row' | 'col';
+  splitRatio?: number;              // left/top pane size fraction
 }
 
 // A saved command snippet — created by highlighting text in a block and bookmarking it.
@@ -81,6 +86,7 @@ export interface Settings {
   sidebarWidth: number;             // sidebar width in px
   shellIntegration: boolean;        // inject command-block markers into new shells
   blocksView: boolean;              // Warp-style blocks as the main view (vs classic xterm)
+  notifications: boolean;           // desktop notification when a long command finishes unfocused
   bookmarks: Bookmark[];            // saved command snippets
   bookmarkGroups: BookmarkGroup[];  // groups for organizing bookmarks (display order = array order)
   hasKey: Record<string, boolean>;  // provider -> whether a key is stored (never the key itself)
