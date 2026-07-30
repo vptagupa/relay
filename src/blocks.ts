@@ -37,16 +37,36 @@ export type BlockEvent =
 const ESC = '\x1b';
 const BEL = '\x07';
 
-export function createShellParser(emit: (e: BlockEvent) => void): { feed(chunk: string): string } {
+export function createShellParser(emit: (e: BlockEvent) => void): { feed(chunk: string): string; close(): void } {
   let pending = '';                 // incomplete trailing escape sequence, carried to next feed()
   let n = 0;
   let lastCwd = '';
   let cur: TermBlock | null = null; // the block currently being built
   let mode: 'idle' | 'output' = 'idle';
+  const OUTPUT_CAP = 256 * 1024;    // bound a single block's captured output (memory + IPC volume)
+  let updateTimer: ReturnType<typeof setTimeout> | null = null;
 
   function startBlock(command: string): void {
     cur = { id: `b${++n}`, command, output: '', cwd: lastCwd, exitCode: null, startedAt: Date.now(), endedAt: null, running: true };
     emit({ type: 'start', block: cur });
+  }
+  // Append to the current block's output — only while capturing a non-alt-screen command — capped
+  // to a rolling tail. Returns whether anything was captured.
+  function appendOut(text: string): boolean {
+    if (mode !== 'output' || !cur || cur.interactive) return false;
+    cur.output += text;
+    if (cur.output.length > OUTPUT_CAP) cur.output = cur.output.slice(cur.output.length - OUTPUT_CAP);
+    return true;
+  }
+  // Coalesce 'update' emits to ~12/s. Emitting the whole (growing) block per PTY chunk is O(n^2)
+  // over IPC and pins the main + renderer on large output like `npm install`.
+  function scheduleUpdate(): void {
+    if (updateTimer || !cur) return;
+    updateTimer = setTimeout(() => { updateTimer = null; if (cur) emit({ type: 'update', block: cur }); }, 80);
+  }
+  function endBlock(code: number | null): void {
+    if (updateTimer) { clearTimeout(updateTimer); updateTimer = null; }
+    if (cur) { cur.exitCode = code; cur.running = false; cur.endedAt = Date.now(); emit({ type: 'end', block: cur }); cur = null; }
   }
 
   // Handle a recognized marker body (the text between "ESC]" and the terminator).
@@ -57,7 +77,7 @@ export function createShellParser(emit: (e: BlockEvent) => void): { feed(chunk: 
       else if (rest === 'C') { if (!cur) startBlock(''); mode = 'output'; }
       else if (rest[0] === 'D') {
         const code = parseInt(rest.slice(2), 10);
-        if (cur) { cur.exitCode = Number.isNaN(code) ? null : code; cur.running = false; cur.endedAt = Date.now(); emit({ type: 'end', block: cur }); cur = null; }
+        endBlock(Number.isNaN(code) ? null : code);
         mode = 'idle';
       }
     } else if (body.startsWith('633;P;Cwd=')) {
@@ -97,8 +117,8 @@ export function createShellParser(emit: (e: BlockEvent) => void): { feed(chunk: 
           }
           if (term === -1) {
             const tail = s.slice(i);
-            if (tail.length > 512) { // too long to be one of our markers — flush as text
-              if (mode === 'output' && cur) { cur.output += tail; dirty = true; }
+            if (tail.length > 8192) { // too long to be one of our markers — flush as text (handles big pasted commands)
+              if (appendOut(tail)) dirty = true;
               out += tail; i = s.length;
             } else { pending = tail; i = s.length; }
             break;
@@ -108,7 +128,7 @@ export function createShellParser(emit: (e: BlockEvent) => void): { feed(chunk: 
             handleMarker(body); // strip (don't append to out)
           } else {
             const seq = s.slice(i, term + termLen); // pass unrecognized OSC through untouched
-            if (mode === 'output' && cur) { cur.output += seq; dirty = true; }
+            if (appendOut(seq)) dirty = true;
             out += seq;
           }
           i = term + termLen;
@@ -116,15 +136,18 @@ export function createShellParser(emit: (e: BlockEvent) => void): { feed(chunk: 
         }
       }
       // ordinary byte (incl. CSI sequences, which we never treat as markers)
-      if (mode === 'output' && cur && !cur.interactive) { cur.output += ch; dirty = true; }
+      if (appendOut(ch)) dirty = true;
       out += ch;
       i++;
     }
-    if (dirty && cur) emit({ type: 'update', block: cur });
+    if (dirty && cur) scheduleUpdate();
     return out;
   }
 
-  return { feed };
+  // Finalize any still-open block (e.g. the shell exited mid-command) so it isn't left running forever.
+  function close(): void { endBlock(null); }
+
+  return { feed, close };
 }
 
 // One-line snippet to send to the PTY once the shell is ready, enabling the markers above.

@@ -39,6 +39,20 @@ function firstLeaf(n: LNode): number { return isLeaf(n) ? n.g : firstLeaf(n.a); 
 function replaceLeaf(n: LNode, g: number, repl: LNode): LNode { return isLeaf(n) ? (n.g === g ? repl : n) : { ...n, a: replaceLeaf(n.a, g, repl), b: replaceLeaf(n.b, g, repl) }; }
 function removeLeaf(n: LNode, g: number): LNode { if (isLeaf(n)) return n; if (isLeaf(n.a) && n.a.g === g) return n.b; if (isLeaf(n.b) && n.b.g === g) return n.a; return { ...n, a: removeLeaf(n.a, g), b: removeLeaf(n.b, g) }; }
 function siblingLeaf(n: LNode, g: number): number | null { if (isLeaf(n)) return null; if (isLeaf(n.a) && n.a.g === g) return firstLeaf(n.b); if (isLeaf(n.b) && n.b.g === g) return firstLeaf(n.a); return siblingLeaf(n.a, g) ?? siblingLeaf(n.b, g); }
+// Validate an untrusted (persisted / hand-edited) layout tree: well-formed nodes, leaf groups in
+// range 0..3, unique, and each present in `allowed` (groups that actually have restored tabs).
+function isValidLayout(n: unknown, allowed: Set<number>): n is LNode {
+  const seen = new Set<number>();
+  const walk = (x: any): boolean => {
+    if (x && typeof x === 'object' && typeof x.g === 'number') {
+      if (!Number.isInteger(x.g) || x.g < 0 || x.g >= 4 || seen.has(x.g) || !allowed.has(x.g)) return false;
+      seen.add(x.g); return true;
+    }
+    if (x && typeof x === 'object' && (x.d === 'row' || x.d === 'col') && typeof x.r === 'number') return walk(x.a) && walk(x.b);
+    return false;
+  };
+  return walk(n);
+}
 const splitOn = () => state.groups > 1;                                    // more than one pane?
 const gTab = (g: number) => state.tabs.find((t) => t.id === state.gv[g]);   // visible tab of group g
 const groupTabs = (g: number) => state.tabs.filter((t) => t.group === g);   // all tabs in group g
@@ -102,7 +116,7 @@ $('#app').innerHTML = `
           <button class="side-toggle" id="btnSidebar" title="Toggle library">▤</button>
           <button class="tab-add" id="btnNewTab" title="New terminal (⌘T)">+</button>
           <button class="tab-add" id="btnAddFolder" title="Open folder in new terminal (⌘⇧O)"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h5l2 2h9a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1z"/><line x1="12" y1="11" x2="12" y2="16"/><line x1="9.5" y1="13.5" x2="14.5" y2="13.5"/></svg></button>
-          <button class="tab-add cc" id="btnClaude" title="Launch Claude Code (⌘⇧C)">✳</button>
+          <button class="tab-add cc" id="btnClaude" title="Launch Claude Code (⌘⇧L)">✳</button>
           <div class="tt-spacer"></div>
           <button class="tt-model" id="tabModelBtn" title="Model for this terminal"><span class="dot"></span><span id="tabModelName">Opus 5</span> ▾</button>
           <button class="tt-icon blocks-toggle on" id="btnBlocks" title="Blocks view / Classic terminal (⌘⇧B)">⊞</button>
@@ -119,8 +133,6 @@ $('#app').innerHTML = `
             <div class="pane-body">
               <div class="term-host" id="termHost"><div class="term-empty" id="termEmpty">No terminal yet.<br>Press + to open one.</div></div>
               <div class="blocks-view" id="blocksView"><div class="bv-scroll" id="bvScroll"></div><div class="bv-input"><span class="bv-prompt" id="bvPrompt">❯</span><textarea class="bv-cmd" id="bvCmd" rows="1" placeholder="type a command — Enter runs · Shift+Enter new line · ↑ recalls" spellcheck="false" autocomplete="off"></textarea></div></div>
-              <div class="dz dz-right" data-dz="row" title="Drop to split right"></div>
-              <div class="dz dz-down" data-dz="col" title="Drop to split down"></div>
             </div>
           </div>
           <div class="pane-divider" id="divider0" style="display:none" title="Drag to resize"></div>
@@ -236,7 +248,7 @@ $('#app').innerHTML = `
   <div class="toast-wrap" id="toastWrap"></div>
 `;
 // Prime the per-pane element cache now, while every pane is still attached to the grid.
-for (const s of [...PANE, ...P_TABS, ...P_HOST, ...P_VIEW, ...P_SCROLL, ...P_CMD, ...P_PROMPT]) E(s);
+for (const s of ['#termEmpty', ...PANE, ...P_TABS, ...P_HOST, ...P_VIEW, ...P_SCROLL, ...P_CMD, ...P_PROMPT]) E(s);
 
 /* ----------------------------- helpers ----------------------------- */
 const XTERM_THEME = {
@@ -247,10 +259,12 @@ const XTERM_THEME = {
   brightRed: '#ffa198', brightGreen: '#a2f2b0', brightYellow: '#f7c744', brightBlue: '#89bdff',
   brightMagenta: '#e0bbff', brightCyan: '#7ee0e8', brightWhite: '#ffffff',
 };
+let toastT: ReturnType<typeof setTimeout> | null = null;
 function toast(msg: string, ok = false) {
   const w = $('#toastWrap');
   w.innerHTML = `<div class="toast ${ok ? 'ok' : ''}"><span class="tdot"></span>${esc(msg)}</div>`;
-  setTimeout(() => (w.innerHTML = ''), 2600);
+  if (toastT) clearTimeout(toastT); // don't let a prior toast's timer clear this newer one early
+  toastT = setTimeout(() => { w.innerHTML = ''; toastT = null; }, 2600);
 }
 // Move the item identified by dragId to before/after targetId within arr.
 function reorderById<T>(arr: T[], getId: (x: T) => string, dragId: string, targetId: string, before: boolean) {
@@ -264,16 +278,24 @@ function reorderById<T>(arr: T[], getId: (x: T) => string, dragId: string, targe
 function makeEditable(el: HTMLElement, commit: (v: string) => void) {
   const dragAnc = el.closest('[draggable="true"]') as HTMLElement | null; // don't drag while renaming
   if (dragAnc) dragAnc.draggable = false;
+  const original = el.textContent || '';
   el.setAttribute('contenteditable', 'true');
   el.focus();
   const sel = window.getSelection(); const r = document.createRange();
   r.selectNodeContents(el); sel?.removeAllRanges(); sel?.addRange(r);
+  let finished = false;
   const done = (save: boolean) => {
+    if (finished) return; finished = true;
+    el.onblur = null; el.onkeydown = null; // detach BEFORE blur so cancel can't re-commit via onblur
     el.removeAttribute('contenteditable');
     if (dragAnc) dragAnc.draggable = true;
-    if (save) commit(el.textContent?.trim() || '');
+    if (save) commit(el.textContent?.trim() || ''); else el.textContent = original; // Escape restores the old text
+    el.blur();
   };
-  el.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); (el as HTMLElement).blur(); } else if (e.key === 'Escape') { done(false); } };
+  el.onkeydown = (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); done(true); }
+    else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); done(false); } // don't let Escape also close the panel
+  };
   el.onblur = () => done(true);
 }
 function shortCwd(c: string) { const h = state.settings.workspace; return c && h && c.startsWith(h) ? '…' + (c.slice(h.length) || '/') : (c || '~'); }
@@ -311,14 +333,14 @@ async function newTab(seed?: Partial<OpenTab> & { libId?: string }, activate = t
   state.tabs.push(tab);
   applyTermColors(tab); // honor any restored per-terminal body/text colors
   term.onData((d) => relay.ptyWrite(id, d));
-  term.onSelectionChange(() => { if (state.active === id) refreshPill(); }); // show the ★ pill for terminal selections
+  term.onSelectionChange(() => { if (state.active === id) refreshPill(undefined, undefined, true); }); // show the ★ pill for terminal selections
   let saveT: any;
   term.onData(() => { clearTimeout(saveT); saveT = setTimeout(persistWorkspace, 1500); }); // keep the persisted snapshot fresh
   if (activate) {
     // Reveal only this tab and size it BEFORE the shell starts, so the pty is created at
     // the right size and doesn't repaint (flash) from a follow-up resize.
     state.gv[group] = id; state.focus = group; state.active = id;
-    $('#termEmpty').style.display = 'none';
+    E('#termEmpty').style.display = 'none';
     const host = E(P_HOST[group]);
     if (el.parentElement !== host) host.appendChild(el);
     if (group > 0) (E(PANE[group]) as HTMLElement).style.display = '';
@@ -353,12 +375,13 @@ function applyResize(t: Tab) {
 // Focus a tab — make it the visible tab of its group and give that group focus.
 function switchTab(id: string) {
   const t = state.tabs.find((x) => x.id === id); if (!t) return;
+  if (state.maxG !== null && state.maxG !== t.group) state.maxG = null; // switching to another pane restores the grid
   state.gv[t.group] = id; state.focus = t.group; state.active = id;
   paneAftermath();
 }
 // Shared work after the active tab / layout changes.
 function paneAftermath() {
-  $('#termEmpty').style.display = state.tabs.length ? 'none' : 'grid';
+  E('#termEmpty').style.display = state.tabs.length ? 'none' : 'grid';
   const t = activeTab();
   reconcilePanes();
   renderTabs(); updateStatus(); reflectModel(); persistWorkspace();
@@ -422,7 +445,7 @@ function reconcilePanes() {
   fitPanes(); requestAnimationFrame(updateTabOverflow);
 }
 function fitPanes() {
-  for (const g of leaves(state.layout)) { const t = gTab(g); if (!t) continue; try { t.fit.fit(); if (t.term.cols > 0) relay.ptyResize(t.id, t.term.cols, t.term.rows); } catch { /* ignore */ } }
+  for (const g of leaves(state.layout)) { const t = gTab(g); if (!t) continue; try { applyResize(t); } catch { /* ignore */ } } // dedup no-op resizes (avoids ConPTY repaint flashing)
 }
 // Split: clone the focused terminal into a NEW pane, nested at the focused leaf in the given
 // direction — so "split down" then "split right" nests correctly (2×2 layouts are possible).
@@ -455,6 +478,7 @@ function focusGroupN(n: number) { const g = leaves(state.layout)[n]; if (g !== u
 function focusGroup(g: number) {
   const t = gTab(g); if (!t) return;
   state.focus = g; state.active = t.id;
+  if (state.maxG !== null && state.maxG !== g) { state.maxG = null; reconcilePanes(); } // leaving a maximized pane restores the grid
   for (let i = 0; i < 4; i++) (E(PANE[i]) as HTMLElement).classList.toggle('focused', state.groups > 1 && i === g);
   reflectModel(); updateStatus();
   if (blocksMode(t)) (E(P_CMD[g]) as HTMLElement)?.focus(); else t.term.focus();
@@ -480,7 +504,7 @@ function toggleMaxGroup(g: number) {
 // Ctrl+PageUp/Down: next/prev tab within the focused pane.
 function cycleTab(dir: number) {
   const tabs = groupTabs(state.focus); if (tabs.length < 2) return;
-  const i = tabs.findIndex((t) => t.id === state.gv[state.focus]);
+  const i = Math.max(0, tabs.findIndex((t) => t.id === state.gv[state.focus])); // -1 (stale gv) → start from 0
   const nt = tabs[(i + dir + tabs.length) % tabs.length];
   if (nt) switchTab(nt.id);
 }
@@ -513,17 +537,23 @@ async function closeTab(id: string, skipConfirm = false) {
   const i = state.tabs.findIndex((x) => x.id === id); if (i < 0) return; // re-find (state may have changed during confirm)
   const [t] = state.tabs.splice(i, 1);
   flushTabToLibrary(t); // keep its Library entry current so reopening restores the latest history
-  relay.ptyDetach(id); t.term.dispose(); t.el.remove(); // keep the shell alive so it can be resumed
-  // replace the visible tab of each group if we just closed it
-  if (state.gv[0] === id) state.gv[0] = groupTabs(0)[0]?.id || '';
-  if (state.gv[1] === id) state.gv[1] = groupTabs(1)[0]?.id || '';
-  // if a group emptied, fold the split (group 1's tabs, if any, move into group 0)
-  if (groupTabs(0).length === 0 && groupTabs(1).length > 0) { for (const x of groupTabs(1)) x.group = 0; state.gv[0] = state.gv[1]; state.gv[1] = ''; }
-  else if (groupTabs(1).length === 0) state.gv[1] = '';
-  if (state.focus === 1 && !state.gv[1]) state.focus = 0;
-  state.active = state.gv[state.focus] || state.gv[0] || '';
-  if (!state.tabs.length) { $('#termEmpty').style.display = 'grid'; state.gv = ['', '']; state.focus = 0; state.active = ''; renderTabs(); reconcilePanes(); updateStatus(); updateMainView(); }
-  else paneAftermath();
+  // Keep a SAVED terminal's shell alive so it can be resumed from the Library; kill an unsaved
+  // one's shell outright — nothing can reattach to it, so leaving it running just leaks processes.
+  const resumable = t.libId || state.library.some((s) => s.termId === t.id);
+  if (resumable) relay.ptyDetach(id); else relay.ptyKill(id);
+  t.term.dispose(); t.el.remove();
+  // Replace the visible tab of any pane that was showing the closed tab, then drop the pane if it emptied.
+  for (const g of leaves(state.layout)) if (state.gv[g] === id) state.gv[g] = groupTabs(g)[0]?.id || '';
+  collapseIfEmpty(t.group);
+  if (!state.tabs.length) {
+    // Nothing left — reset to a single empty pane.
+    state.layout = { g: 0 }; state.gv = ['', '', '', '']; state.focus = 0; state.active = ''; state.maxG = null;
+    E('#termEmpty').style.display = 'grid'; renderTabs(); reconcilePanes(); updateStatus(); updateMainView();
+  } else {
+    if (!leaves(state.layout).includes(state.focus)) state.focus = leaves(state.layout)[0];
+    state.active = state.gv[state.focus] || groupTabs(state.focus)[0]?.id || '';
+    paneAftermath();
+  }
   persistWorkspace();
 }
 function tabHtml(t: Tab): string {
@@ -588,19 +618,22 @@ async function closeTabs(ids: string[]) {
   if (!(await confirmDialog(`Close ${ids.length} terminals?`, `${ids.length} terminals will close. Saved ones stay in your Library; unsaved ones lose their history.`, `Close ${ids.length}`))) return;
   for (const id of [...ids]) await closeTab(id, true);
 }
-function closeOthers(id: string) { closeTabs(state.tabs.filter((t) => t.id !== id).map((t) => t.id)); }
-function closeRight(id: string) { const i = state.tabs.findIndex((t) => t.id === id); if (i >= 0) closeTabs(state.tabs.slice(i + 1).map((t) => t.id)); }
-function closeLeft(id: string) { const i = state.tabs.findIndex((t) => t.id === id); if (i >= 0) closeTabs(state.tabs.slice(0, i).map((t) => t.id)); }
+// "Close others / to the right / to the left" operate WITHIN the tab's own pane (like VS Code
+// editor groups), so they never touch tabs living in another split pane.
+const paneTabsOf = (id: string) => { const t = state.tabs.find((x) => x.id === id); return t ? groupTabs(t.group) : []; };
+function closeOthers(id: string) { closeTabs(paneTabsOf(id).filter((t) => t.id !== id).map((t) => t.id)); }
+function closeRight(id: string) { const g = paneTabsOf(id); const i = g.findIndex((t) => t.id === id); if (i >= 0) closeTabs(g.slice(i + 1).map((t) => t.id)); }
+function closeLeft(id: string) { const g = paneTabsOf(id); const i = g.findIndex((t) => t.id === id); if (i >= 0) closeTabs(g.slice(0, i).map((t) => t.id)); }
 function closeAll() { closeTabs(state.tabs.map((t) => t.id)); }
 
 let tabMenuItems: { label: string; dis?: boolean; run: () => void }[] = [];
 function openTabMenu(id: string, x: number, y: number) {
-  const i = state.tabs.findIndex((t) => t.id === id);
+  const g = paneTabsOf(id); const i = g.findIndex((t) => t.id === id);
   tabMenuItems = [
     { label: 'Colors…', run: () => openColorPop(id) },
     { label: 'Close', run: () => closeTab(id) },
-    { label: 'Close Others', dis: state.tabs.length <= 1, run: () => closeOthers(id) },
-    { label: 'Close to the Right', dis: i >= state.tabs.length - 1, run: () => closeRight(id) },
+    { label: 'Close Others', dis: g.length <= 1, run: () => closeOthers(id) },
+    { label: 'Close to the Right', dis: i >= g.length - 1, run: () => closeRight(id) },
     { label: 'Close to the Left', dis: i <= 0, run: () => closeLeft(id) },
     { label: 'Close All', run: () => closeAll() },
   ];
@@ -680,8 +713,9 @@ function snapshotTabs(): OpenTab[] {
 // session spent only WATCHING output (no keystrokes) still saves steadily, instead of
 // persisting nothing past the opening prompt. `immediate` bypasses it for the final
 // flush on window close.
+let booting = true; // suppress autosave until the workspace has finished restoring (else a mid-restore save corrupts relay.json)
 function persistWorkspace(immediate = false) {
-  if (!state.settings.autoSave) return;
+  if (!state.settings.autoSave || booting) return;
   const run = () => { wsT = null; relay.setWorkspace({ active: state.active, tabs: snapshotTabs(), gv: state.gv, focus: state.focus, layout: state.layout }); flashSaved(); };
   if (immediate) { if (wsT) clearTimeout(wsT); run(); return; }
   if (wsT) return;              // a save is already scheduled — coalesce into it
@@ -734,7 +768,10 @@ async function saveActive() {
   state.library = await relay.upsertSession(rec);
   renderLibrary(); persistWorkspace(); toast(prev ? `Updated "${t.name}"` : `Saved "${t.name}"`, true);
 }
-async function deleteLib(id: string) { state.library = await relay.deleteSession(id); renderLibrary(); toast('Deleted'); }
+async function deleteLib(id: string) {
+  for (const t of state.tabs) if (t.libId === id) t.libId = undefined; // else closing the tab would re-create the entry
+  state.library = await relay.deleteSession(id); renderLibrary(); toast('Deleted');
+}
 // When a saved terminal is closed, push its CURRENT blocks/scrollback/chat into its Library
 // entry so reopening restores the latest history — not just whatever was there at the last
 // manual Save. Updates state.library in memory immediately so an instant reopen sees it too.
@@ -757,10 +794,12 @@ async function renderFiles() {
   if (res.error) { el.innerHTML = `<div class="lib-empty">${esc(res.error)}</div>`; return; }
   state.browse = res; state.browsePath = res.path;
   $('#filesPath').textContent = res.path || '—'; $('#filesPath').title = res.path;
-  el.innerHTML = res.entries.map((e: { name: string; isDir: boolean }) => `
+  const rows = res.entries.map((e: { name: string; isDir: boolean }) => `
     <div class="file-item" data-fpath="${esc(res.path + '/' + e.name)}" data-dir="${e.isDir}">
       <span class="file-ic">${e.isDir ? '📁' : '📄'}</span><span class="file-name">${esc(e.name)}</span>
-    </div>`).join('') || '<div class="lib-empty">(empty folder)</div>';
+    </div>`).join('');
+  const note = res.truncated ? `<div class="lib-empty">Showing first ${res.entries.length.toLocaleString()} items — folder is larger.</div>` : '';
+  el.innerHTML = (rows || '<div class="lib-empty">(empty folder)</div>') + note;
 }
 function openSession(s: SavedSession) {
   // If this Library entry is already open in a tab, just focus it — don't duplicate.
@@ -869,17 +908,23 @@ async function sendAgent() {
   input.value = ''; input.style.height = 'auto';
   $('#agentBody').querySelector('.agent-hi')?.remove();
   const model = (activeTab()?.model) || state.settings.defaultModel;
-  addMsg('user', text); chat().push({ role: 'user', content: text });
+  // Bind this conversation to the tab it was sent from, so switching tabs mid-response doesn't
+  // append the reply to another tab's chat or a detached DOM node.
+  const targetTab = activeTab();
+  const targetChat = (): ChatTurn[] => (targetTab ? targetTab.chat : state.history);
+  const showing = () => activeTab() === targetTab && $('#agentPanel').classList.contains('show');
+  addMsg('user', text); targetChat().push({ role: 'user', content: text });
   agentBusy = true;
   let assistantEl: HTMLElement | null = null; let assistantText = '';
   const off = relay.onAgentEvent((e: AgentEvent) => {
-    if (e.type === 'text') { assistantText += e.text; if (!assistantEl) assistantEl = addMsg('assistant', ''); (assistantEl.querySelector('.body') as HTMLElement).textContent = assistantText; $('#agentBody').scrollTop = 1e9; }
-    else if (e.type === 'tool_start') addTool(e.name, true, typeof e.input === 'object' ? JSON.stringify(e.input).slice(0, 120) : '');
-    else if (e.type === 'tool_result') { if (!e.ok) addTool('error', false, e.preview); }
-    else if (e.type === 'error') addTool('error', false, e.message);
-    else if (e.type === 'done') { if (assistantText) { chat().push({ role: 'assistant', content: assistantText }); persistWorkspace(); } }
+    const live = showing();
+    if (e.type === 'text') { assistantText += e.text; if (live) { if (!assistantEl) assistantEl = addMsg('assistant', ''); (assistantEl.querySelector('.body') as HTMLElement).textContent = assistantText; $('#agentBody').scrollTop = 1e9; } }
+    else if (e.type === 'tool_start') { if (live) addTool(e.name, true, typeof e.input === 'object' ? JSON.stringify(e.input).slice(0, 120) : ''); }
+    else if (e.type === 'tool_result') { if (live && !e.ok) addTool('error', false, e.preview); }
+    else if (e.type === 'error') { if (live) addTool('error', false, e.message); }
+    else if (e.type === 'done') { if (assistantText) { targetChat().push({ role: 'assistant', content: assistantText }); persistWorkspace(); } if (showing()) renderChat(); }
   });
-  try { await relay.agentSend({ model, history: chat().slice(0, -1), userMessage: text }); }
+  try { await relay.agentSend({ model, history: targetChat().slice(0, -1), userMessage: text }); }
   finally { off(); agentBusy = false; }
 }
 
@@ -891,6 +936,11 @@ let histQuery = '';
 const collapsedBlocks = new Set<string>();
 function stripAnsi(s: string): string {
   return s.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '').replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '').replace(/\x1b[=>()][0-9A-Za-z]?/g, '');
+}
+// Collapse carriage-return overwrites (progress bars: "10%\r20%\r30%") to the last write per line,
+// so they don't concatenate into one giant line. Normalize CRLF first so real line endings survive.
+function collapseCR(s: string): string {
+  return s.replace(/\r\n/g, '\n').split('\n').map((line) => { const i = line.lastIndexOf('\r'); return i >= 0 ? line.slice(i + 1) : line; }).join('\n');
 }
 function fmtDur(ms: number): string { return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(ms < 10000 ? 1 : 0)}s`; }
 // Map an xterm 256-color index to a hex string (16 base + 6×6×6 cube + 24 greys).
@@ -943,7 +993,7 @@ relay.onPtyBlock((id: string, ev: { type: 'start' | 'update' | 'end'; block: Blo
   if (t.blocks.length > 500) t.blocks.splice(0, t.blocks.length - 500);
   // A full-screen app entered alt-screen → drop the Blocks view to the live terminal so
   // vim/top run interactively; when its block ends (app exited), return to the Blocks view.
-  const visible = t.id === state.gv[0] || t.id === state.gv[1];
+  const visible = leaves(state.layout).some((g) => state.gv[g] === t.id);
   if (blk.interactive && !t.liveInteractive) { t.liveInteractive = true; if (visible) updateMainView(); }
   if (ev.type === 'end' && t.liveInteractive) { t.liveInteractive = false; if (visible) updateMainView(); }
   if (visible) refreshBlockViews();
@@ -976,8 +1026,8 @@ function blockHtml(b: Block, color = false): string {
       <div class="hb-actions"><button data-act="copycmd">Copy cmd</button><button data-act="rerun">Re-run</button><button data-act="pin">${b.pinned ? '★ Pinned' : '☆ Pin'}</button><button data-act="share">Share</button></div>
     </div>`;
   }
-  const plain = stripAnsi(b.output).replace(/\r/g, '').trim();
-  const out = color ? ansiToHtml(b.output) : esc(plain);
+  const plain = collapseCR(stripAnsi(b.output)).trim();
+  const out = color ? ansiToHtml(collapseCR(b.output)) : esc(plain);
   const failed = b.exitCode != null && b.exitCode !== 0;
   return `<div class="hb${collapsedBlocks.has(b.id) ? ' collapsed' : ''}${b.pinned ? ' pin' : ''}" data-bid="${b.id}">
     <div class="hb-head"><span class="hb-p">❯</span><span class="hb-cmd">${cmd ? esc(cmd) : '<span class="dim">prompt</span>'}</span><span class="hb-meta">${dur ? `<span>${dur}</span>` : ''}<span>${clock}</span></span>${badge}<span class="hb-chev" data-act="collapse" title="Collapse / expand">▾</span></div>
@@ -1000,7 +1050,7 @@ function bvBlockHtml(b: Block): string {
   const failed = b.exitCode != null && b.exitCode !== 0;
   const cls = b.running ? 'run' : failed ? 'fail' : 'info';
   const badge = b.running ? '<span class="bvb-badge run">running…</span>' : failed ? `<span class="bvb-badge fail">exit ${b.exitCode}</span>` : '';
-  const out = ansiToHtml(b.output);
+  const out = ansiToHtml(collapseCR(b.output));
   return `<div class="bvb ${cls}" data-bid="${b.id}" title="ran in ${esc(promptCwd(cwd))}">
     <div class="bvb-cmd"><span class="bvb-line"><span class="bvb-p">❯</span> <span class="bvb-text">${cmd ? esc(cmd) : ''}</span></span>${badge}<span class="bvb-ts">${dur ? esc(dur) + ' · ' : ''}${clock}</span>
       <span class="bvb-actions"><button data-act="copyout" title="Copy output">copy</button><button data-act="rerun" title="Re-run">re-run</button><button data-act="pin" title="Pin">${b.pinned ? '★' : 'pin'}</button><button data-act="share" title="Export block">share</button>${failed ? '<button data-act="fix" title="Ask the agent to fix">ask agent</button>' : ''}</span>
@@ -1025,9 +1075,10 @@ function renderHistory() {
     const label = stripAnsi(b.command).replace(/[\r\n]+/g, ' ').trim() || (b.interactive ? '(interactive)' : 'prompt');
     return `<div class="hr-item" data-jump="${b.id}" title="${esc(label)}"><span class="hr-dot ${dot}"></span><span class="hr-t">${esc(label)}</span></div>`;
   }).join('');
+  const prevTop = list.scrollTop;
   const atBottom = list.scrollTop + list.clientHeight >= list.scrollHeight - 40;
   list.innerHTML = blocks.map((b) => blockHtml(b)).join('');
-  if (atBottom && !q) list.scrollTop = list.scrollHeight;
+  list.scrollTop = (atBottom && !q) ? list.scrollHeight : prevTop; // preserve scroll while reading back
 }
 function openHistory() { closeAgent(); closeBookmarks(); $('#historyPanel').classList.add('show'); renderHistory(); }
 function closeHistory() { $('#historyPanel').classList.remove('show'); }
@@ -1099,7 +1150,7 @@ function renderBookmarks() {
   if (!list.length && !groups.length) { el.innerHTML = '<div class="hist-empty">No bookmarks yet.<br><span class="dim">Highlight a command in a block and click ★ Bookmark. Use ＋ Group to organize them.</span></div>'; return; }
   const itemHtml = (b: Bookmark) => `<div class="bkm-item" data-bid="${b.id}" draggable="true">
     <span class="bkm-grip" title="Drag to reorder or move to a group">⠿</span>
-    <div class="bkm-text" data-run="${b.id}">${esc(b.text)}</div>
+    <div class="bkm-text" title="Use Run to execute in the active terminal">${esc(b.text)}</div>
     <div class="bkm-actions"><button data-bact="run">Run</button><button data-bact="copy">Copy</button><button data-bact="del" title="Delete">✕</button></div>
   </div>`;
   const count = (gid: string | undefined) => list.filter((b) => groupOf(b) === gid).length;
@@ -1134,7 +1185,7 @@ function showBkmPopAt(cx: number, top: number) {
 // live terminal's (xterm) selection. NEVER auto-hides on an empty selection (a TUI like Claude
 // Code redraws and clears the terminal selection); dismissal is click-away / Escape / after save.
 let lastMouse = { x: 0, y: 0 };
-function refreshPill(mx?: number, my?: number) {
+function refreshPill(mx?: number, my?: number, allowXterm = false) {
   const sel = window.getSelection(); const dom = (sel?.toString() || '').trim();
   const anchor = sel && sel.anchorNode ? (sel.anchorNode.nodeType === 1 ? sel.anchorNode as HTMLElement : sel.anchorNode.parentElement) : null;
   if (dom && dom.length <= 800 && anchor && anchor.closest('.bv-scroll, #histList')) {
@@ -1143,8 +1194,10 @@ function refreshPill(mx?: number, my?: number) {
     showBkmPopAt(rect.left + rect.width / 2, rect.top);
     return;
   }
-  const x = xtermSelection();
-  if (x && x.length <= 800) { pendingBkmText = x; showBkmPopAt(mx ?? lastMouse.x, my ?? lastMouse.y); }
+  // Only offer to bookmark the xterm selection when the interaction actually came from a terminal —
+  // otherwise the persistent xterm selection re-pops the pill on every click elsewhere.
+  if (allowXterm) { const x = xtermSelection(); if (x && x.length <= 800) { pendingBkmText = x; showBkmPopAt(mx ?? lastMouse.x, my ?? lastMouse.y); return; } }
+  hideBkmPop();
 }
 
 /* --------------------- Blocks (Warp-style) main view --------------------- */
@@ -1160,7 +1213,7 @@ function updateMainView() {
 }
 function updatePaneView(g: number) {
   const s = paneSel(g);
-  const t = g < state.groups ? gTab(g) : undefined;
+  const t = leaves(state.layout).includes(g) ? gTab(g) : undefined;
   if (!t) { E(s.view).classList.remove('show'); return; }
   const on = blocksMode(t);
   E(s.view).classList.toggle('show', on);
@@ -1176,20 +1229,24 @@ function updatePaneView(g: number) {
   }
 }
 function refreshBlockViews() {
-  if ($('#historyPanel').classList.contains('show')) renderHistory();
+  if ($('#historyPanel').classList.contains('show')) scheduleHistory();
   renderBlocksView();
 }
+let _histRAF = 0;
+// Coalesce History re-renders to one per frame — a synchronous re-serialize per PTY chunk pins the UI.
+function scheduleHistory() { if (_histRAF) return; _histRAF = requestAnimationFrame(() => { _histRAF = 0; if ($('#historyPanel').classList.contains('show')) renderHistory(); }); }
 let _bvRAF = 0;
-function renderBlocksView() { if (_bvRAF) return; _bvRAF = requestAnimationFrame(() => { _bvRAF = 0; for (let g = 0; g < state.groups; g++) if (E(P_VIEW[g]).classList.contains('show')) renderPaneBlocks(g); }); }
+function renderBlocksView() { if (_bvRAF) return; _bvRAF = requestAnimationFrame(() => { _bvRAF = 0; for (const g of leaves(state.layout)) if (E(P_VIEW[g]).classList.contains('show')) renderPaneBlocks(g); }); }
 function renderPaneBlocks(g: number) {
   const t = gTab(g); const s = paneSel(g); const wrap = E(s.scroll);
   if (!t) { wrap.innerHTML = '<div class="bv-empty">No terminal open.</div>'; return; }
   (E(s.prompt) as HTMLElement).textContent = '❯'; // minimal prompt (folder shown in the status bar / block tooltips)
   const blocks = t.blocks.filter(realBlock);
+  const prevTop = wrap.scrollTop;
   const atBottom = wrap.scrollTop + wrap.clientHeight >= wrap.scrollHeight - 80;
   if (!blocks.length) wrap.innerHTML = `<div class="bv-empty">Commands you run appear here as blocks.<br><span class="dim">Type below to run one · ⊞/▭ toggles Classic terminal.</span></div>`;
   else wrap.innerHTML = blocks.map(bvBlockHtml).join('');
-  if (atBottom) wrap.scrollTop = wrap.scrollHeight;
+  wrap.scrollTop = atBottom ? wrap.scrollHeight : prevTop; // don't yank the view to the top while the user scrolls back
 }
 // Send the composed line to the pane's shell. PSReadLine's Enter handler turns it into a block.
 function bvGrow(inp: HTMLTextAreaElement) { inp.style.height = 'auto'; inp.style.height = Math.min(inp.scrollHeight, 160) + 'px'; }
@@ -1206,13 +1263,15 @@ function bvKeydown(g: number, ev: KeyboardEvent) {
   const t = gTab(g); const inp = ev.target as HTMLTextAreaElement;
   if (ev.key === 'Enter' && !ev.shiftKey) { ev.preventDefault(); paneSend(g); }
   else if (ev.key === 'Enter') { requestAnimationFrame(() => bvGrow(inp)); }
-  else if (ev.key === 'ArrowUp' && !inp.value.includes('\n')) { if (t && t.cmdHistory.length) { ev.preventDefault(); t.histIdx = Math.max(0, t.histIdx - 1); inp.value = t.cmdHistory[t.histIdx] || ''; requestAnimationFrame(() => inp.setSelectionRange(inp.value.length, inp.value.length)); bvGrow(inp); } }
-  else if (ev.key === 'ArrowDown' && !inp.value.includes('\n')) { if (t && t.cmdHistory.length) { ev.preventDefault(); t.histIdx = Math.min(t.cmdHistory.length, t.histIdx + 1); inp.value = t.cmdHistory[t.histIdx] || ''; bvGrow(inp); } }
-  else if (ev.ctrlKey && ev.key.toLowerCase() === 'c') { if (t) { relay.ptyWrite(t.id, '\x03'); inp.value = ''; bvGrow(inp); } }
+  // History recall only when the caret is on the first/last line — otherwise arrows move within a multi-line command.
+  else if (ev.key === 'ArrowUp' && t && t.cmdHistory.length && !inp.value.slice(0, inp.selectionStart).includes('\n')) { ev.preventDefault(); t.histIdx = Math.max(0, t.histIdx - 1); inp.value = t.cmdHistory[t.histIdx] || ''; requestAnimationFrame(() => inp.setSelectionRange(inp.value.length, inp.value.length)); bvGrow(inp); }
+  else if (ev.key === 'ArrowDown' && t && t.cmdHistory.length && !inp.value.slice(inp.selectionEnd).includes('\n')) { ev.preventDefault(); t.histIdx = Math.min(t.cmdHistory.length, t.histIdx + 1); inp.value = t.cmdHistory[t.histIdx] || ''; bvGrow(inp); }
+  // Ctrl+C interrupts the shell only when nothing is selected; with a selection, let the browser copy it.
+  else if (ev.ctrlKey && ev.key.toLowerCase() === 'c') { if (t && inp.selectionStart === inp.selectionEnd) { relay.ptyWrite(t.id, '\x03'); inp.value = ''; bvGrow(inp); } }
   else if (ev.key === 'Tab') ev.preventDefault();
 }
 type ExFmt = 'md' | 'json' | 'txt' | 'html';
-function outText(b: Block): string { return b.interactive ? '(interactive session)' : stripAnsi(b.output).replace(/\r/g, '').trimEnd(); }
+function outText(b: Block): string { return b.interactive ? '(interactive session)' : collapseCR(stripAnsi(b.output)).trimEnd(); }
 function cmdText(b: Block): string { return stripAnsi(b.command).replace(/[\r\n]+/g, ' ').trim(); }
 // The command exactly as typed — newlines preserved (for display + faithful re-run).
 function cmdRaw(b: Block): string { return stripAnsi(b.command).replace(/\r\n?/g, '\n').replace(/\s+$/, ''); }
@@ -1266,7 +1325,7 @@ async function shareBlock(b: Block) {
 function askAgentFix(b: Block) {
   openAgent();
   const inp = $('#agentInput') as HTMLTextAreaElement;
-  inp.value = `This command failed with exit code ${b.exitCode}:\n\n$ ${cmdText(b)}\n\n${stripAnsi(b.output).replace(/\r/g, '').trim().slice(-1500)}\n\nDiagnose the cause and fix it.`;
+  inp.value = `This command failed with exit code ${b.exitCode}:\n\n$ ${cmdText(b)}\n\n${collapseCR(stripAnsi(b.output)).trim().slice(-1500)}\n\nDiagnose the cause and fix it.`;
   sendAgent();
 }
 
@@ -1394,7 +1453,7 @@ $('#bkmAdd').onclick = () => { if (pendingBkmText) addBookmark(pendingBkmText); 
 // terminal selections after xterm has finalized them.
 document.addEventListener('selectionchange', () => { if (!$('#bkmPop').contains(document.activeElement)) refreshPill(); });
 document.addEventListener('mousemove', (e) => { lastMouse = { x: (e as MouseEvent).clientX, y: (e as MouseEvent).clientY }; });
-document.addEventListener('mouseup', (e) => { const m = e as MouseEvent; setTimeout(() => refreshPill(m.clientX, m.clientY), 0); });
+document.addEventListener('mouseup', (e) => { const m = e as MouseEvent; const inTerm = !!(m.target as HTMLElement)?.closest?.('.xterm, .term-host'); setTimeout(() => refreshPill(m.clientX, m.clientY, inTerm), 0); });
 document.addEventListener('mousedown', (e) => { if (!(e.target as HTMLElement).closest('#bkmPop')) hideBkmPop(); });
 $('#bkmAddGroup').onclick = addBookmarkGroup;
 $('#bkmList').addEventListener('click', (e) => {
@@ -1412,8 +1471,7 @@ $('#bkmList').addEventListener('click', (e) => {
   const item = el.closest('.bkm-item') as HTMLElement | null; if (!item) return;
   const b = bookmarks().find((x) => x.id === item.dataset.bid); if (!b) return;
   const act = (el.closest('[data-bact]') as HTMLElement | null)?.dataset.bact;
-  const run = el.closest('[data-run]');
-  if (act === 'run' || (run && !act)) runBookmark(b.text);
+  if (act === 'run') runBookmark(b.text); // only the explicit Run button executes — never a stray text click
   else if (act === 'copy') { navigator.clipboard?.writeText(b.text); toast('Copied', true); }
   else if (act === 'del') deleteBookmark(b.id);
 });
@@ -1484,14 +1542,15 @@ $('#histFilter').onclick = () => { histFilterFail = !histFilterFail; $('#histFil
 function onBlockAreaClick(e: Event) {
   const el = e.target as HTMLElement;
   const card = el.closest('.hb, .bvb') as HTMLElement | null; if (!card) return;
-  const sc = el.closest('.bv-scroll'); const g = sc ? P_SCROLL.indexOf('#' + sc.id) : 0; // resolve which pane's tab
-  const t = g >= 0 ? gTab(g) : gTab(0);
+  // A Blocks pane resolves to that pane's tab; the History panel (no .bv-scroll) renders the active tab.
+  const sc = el.closest('.bv-scroll'); const gi = sc ? P_SCROLL.indexOf('#' + sc.id) : -1;
+  const t = gi >= 0 ? gTab(gi) : activeTab();
   const b = t?.blocks.find((x) => x.id === card.dataset.bid); if (!t || !b) return;
   const act = (el.closest('[data-act]') as HTMLElement | null)?.dataset.act;
   if (!act) return; // clicking the block body does nothing — only the ▾ arrow collapses (so you can read/select output)
   if (act === 'collapse') { const bid = card.dataset.bid!; if (collapsedBlocks.has(bid)) collapsedBlocks.delete(bid); else collapsedBlocks.add(bid); card.classList.toggle('collapsed'); }
   else if (act === 'copycmd') { navigator.clipboard?.writeText(cmdText(b)); toast('Copied command', true); }
-  else if (act === 'copyout') { navigator.clipboard?.writeText(stripAnsi(b.output).replace(/\r/g, '')); toast('Copied output', true); }
+  else if (act === 'copyout') { navigator.clipboard?.writeText(collapseCR(stripAnsi(b.output))); toast('Copied output', true); }
   else if (act === 'rerun') { sendCommand(t.id, cmdRaw(b)); if (!blocksMode(t)) switchTab(t.id); toast('Re-ran command', true); }
   else if (act === 'pin') { b.pinned = !b.pinned; refreshBlockViews(); persistWorkspace(); }
   else if (act === 'share') shareBlock(b);
@@ -1507,7 +1566,7 @@ $('#btnSplitDown').onclick = () => splitClone('col'); // dividers are created dy
 for (let g = 0; g < 4; g++) {
   E(PANE[g]).addEventListener('mousedown', (e) => {
     if ((e.target as HTMLElement).closest('.pane-tabs')) return;
-    if (g >= state.groups || state.focus === g) return;
+    if (!leaves(state.layout).includes(g) || state.focus === g) return;
     state.focus = g; state.active = state.gv[g] || state.active;
     for (let i = 0; i < 4; i++) E(PANE[i]).classList.toggle('focused', state.groups > 1 && i === g);
     reflectModel(); updateStatus();
@@ -1515,6 +1574,15 @@ for (let g = 0; g < 4; g++) {
   (E(P_CMD[g]) as HTMLElement).addEventListener('keydown', (e) => bvKeydown(g, e as KeyboardEvent));
   (E(P_CMD[g]) as HTMLElement).addEventListener('input', (e) => bvGrow(e.target as HTMLTextAreaElement));
   E(P_SCROLL[g]).addEventListener('click', onBlockAreaClick);
+  // Drag-to-split zones for THIS pane's body — drop a tab on the right/bottom edge to split the
+  // pane you're hovering (data-g identifies which). Created for every pane, not just pane 0.
+  const body = E(PANE[g]).querySelector('.pane-body');
+  if (body) for (const [cls, dir] of [['dz-right', 'row'], ['dz-down', 'col']] as const) {
+    const dz = document.createElement('div');
+    dz.className = 'dz ' + cls; dz.dataset.dz = dir; dz.dataset.g = String(g);
+    dz.title = dir === 'row' ? 'Drop to split right' : 'Drop to split down';
+    body.appendChild(dz);
+  }
 }
 document.querySelectorAll('[data-closeg]').forEach((b) => b.addEventListener('click', (e) => { e.stopPropagation(); closeGroup(+(b as HTMLElement).dataset.closeg!); }));
 $('#blocksViewSet').addEventListener('change', async (e) => { state.settings = await relay.patchSettings({ blocksView: (e.target as HTMLInputElement).checked }); updateMainView(); });
@@ -1608,16 +1676,24 @@ function wireTabStrip(sel: string, group: number) {
     if (!dragTab) return; e.preventDefault();
     const dt = state.tabs.find((t) => t.id === dragTab); if (!dt) { endTabDrag(); return; }
     const el = (e.target as HTMLElement).closest('[data-tab]') as HTMLElement | null;
+    if (el && el.dataset.tab === dragTab && dt.group === group) { endTabDrag(); return; } // dropped onto itself — no-op
     const src = dt.group; const changed = src !== group; dt.group = group; // dropping into this strip moves the tab here
     // Insert at the hovered boundary, or at the end when dropped on the strip's empty area.
     const ref = (el && el.dataset.tab !== dragTab) ? el : (([...strip.querySelectorAll('.tab')].filter((t) => (t as HTMLElement).dataset.tab !== dragTab).pop()) as HTMLElement | undefined);
     if (ref && ref.dataset.tab !== dragTab) { const r = ref.getBoundingClientRect(); reorderById(state.tabs, (t) => t.id, dragTab, ref.dataset.tab!, el ? ((e as DragEvent).clientX < r.left + r.width / 2) : false); }
-    if (changed) { state.gv[group] = dragTab; state.active = dragTab; state.focus = group; collapseIfEmpty(src); }
+    if (changed) {
+      if (state.gv[src] === dragTab) state.gv[src] = groupTabs(src)[0]?.id || ''; // source pane's visible tab left
+      state.gv[group] = dragTab; state.active = dragTab; state.focus = group; collapseIfEmpty(src);
+    }
     endTabDrag(); paneAftermath();
   });
   strip.addEventListener('dragend', endTabDrag);
 }
 for (let g = 0; g < 4; g++) wireTabStrip(P_TABS[g], g);
+// Safety net: if a re-render (renderTabs) removes the dragged tab node mid-drag, its own dragend
+// may never fire — a document-level one guarantees drag state (#tabIns, body.tabdrag) is reset.
+document.addEventListener('dragend', () => { if (dragTab) endTabDrag(); });
+document.addEventListener('drop', (e) => { if (dragTab && !(e.target as HTMLElement).closest('.tabs, .pane, .dz')) endTabDrag(); });
 // Overflow "⌄" dropdown per pane tab bar.
 for (let g = 0; g < 4; g++) {
   const strip = E(P_TABS[g]);
@@ -1634,16 +1710,19 @@ document.querySelectorAll('.dz').forEach((z) => {
   z.addEventListener('drop', (e) => {
     if (!dragTab) return; (e as DragEvent).preventDefault();
     const dir = (z as HTMLElement).dataset.dz as 'row' | 'col';
+    const targetG = +(z as HTMLElement).dataset.g!; // split the pane the zone belongs to (the hovered one)
     const dt = state.tabs.find((t) => t.id === dragTab);
     if (dt) {
-      const used = leaves(state.layout);
-      if (groupTabs(dt.group).length < 2 || used.length >= 4) { toast('Need another tab in the pane (max 4 panes)'); endTabDrag(); return; }
+      const used = leaves(state.layout); const src = dt.group;
+      if (used.length >= 4) { toast('Up to 4 panes'); endTabDrag(); return; }
+      if (src === targetG && groupTabs(src).length < 2) { toast('Need another tab in this pane'); endTabDrag(); return; }
       const free = [0, 1, 2, 3].find((i) => !used.includes(i))!;
-      const src = dt.group; dt.group = free;
+      dt.group = free;
       if (state.gv[src] === dt.id) state.gv[src] = groupTabs(src)[0]?.id || '';
       state.gv[free] = dt.id;
-      state.layout = replaceLeaf(state.layout, src, { d: dir, r: 0.5, a: { g: src }, b: { g: free } });
+      state.layout = replaceLeaf(state.layout, targetG, { d: dir, r: 0.5, a: { g: targetG }, b: { g: free } });
       state.focus = free; state.active = dt.id; state.maxG = null;
+      collapseIfEmpty(src); // moving the tab may have emptied its old pane
       paneAftermath();
     }
     endTabDrag();
@@ -1668,11 +1747,13 @@ for (let g = 0; g < 4; g++) {
     if (tgt.closest('.tabs') || tgt.closest('.dz')) return; // handled by strip / dz drop
     (e as DragEvent).preventDefault();
     const dt = state.tabs.find((t) => t.id === dragTab); if (!dt) { endTabDrag(); return; }
-    const src = dt.group; dt.group = g;
+    const src = dt.group; if (src === g) { endTabDrag(); return; } // already in this pane — nothing to do
+    dt.group = g;
     const last = ([...state.tabs].filter((t) => t.group === g && t.id !== dragTab).pop()); // append to the end of group g
     if (last) reorderById(state.tabs, (t) => t.id, dragTab, last.id, false);
+    if (state.gv[src] === dragTab) state.gv[src] = groupTabs(src)[0]?.id || ''; // source pane's visible tab left
     state.gv[g] = dragTab; state.active = dragTab; state.focus = g;
-    if (src !== g) collapseIfEmpty(src);
+    collapseIfEmpty(src);
     endTabDrag(); paneAftermath();
   });
 }
@@ -1687,10 +1768,13 @@ $('#libList').addEventListener('drop', async (e) => {
   if (!dragLib) return; e.preventDefault();
   const el = (e.target as HTMLElement).closest('[data-open]') as HTMLElement | null;
   if (el && el.dataset.open !== dragLib) {
-    reorderById(state.library, (s) => s.id, dragLib, el.dataset.open!, (e as DragEvent).clientY < r(el).top + r(el).height / 2);
+    // The list is rendered from sortedLibrary(), so reorder THAT sequence (what the user sees) and
+    // persist it — reordering the raw state.library would move relative to the wrong neighbor.
+    const ordered = sortedLibrary();
+    reorderById(ordered, (s) => s.id, dragLib, el.dataset.open!, (e as DragEvent).clientY < r(el).top + r(el).height / 2);
     state.settings = await relay.patchSettings({ librarySort: 'custom' });
     ($('#libSort') as HTMLSelectElement).value = 'custom';
-    state.library = await relay.reorderSessions(state.library.map((s) => s.id));
+    state.library = await relay.reorderSessions(ordered.map((s) => s.id));
     renderLibrary();
   }
   endLibDrag();
@@ -1788,7 +1872,8 @@ document.addEventListener('keydown', (e) => {
   else if (mod && e.key.toLowerCase() === 'k') { e.preventDefault(); $('#palette').classList.contains('show') ? closePalette() : openPalette(); }
   else if (mod && !e.shiftKey && e.key.toLowerCase() === 'd') { e.preventDefault(); bookmarkSelection(); }
   else if (mod && e.shiftKey && e.key.toLowerCase() === 'o') { e.preventDefault(); addFolderTab(); }
-  else if (mod && e.shiftKey && e.key.toLowerCase() === 'c') { e.preventDefault(); newClaudeTab(); }
+  else if (mod && e.shiftKey && e.key.toLowerCase() === 'c') { e.preventDefault(); const t = (window.getSelection()?.toString().trim() || '') || xtermSelection(); if (t) { navigator.clipboard?.writeText(t); toast('Copied', true); } } // terminal copy (was: launch Claude)
+  else if (mod && e.shiftKey && e.key.toLowerCase() === 'l') { e.preventDefault(); newClaudeTab(); } // launch Claude Code (moved off Ctrl+Shift+C)
   else if (mod && e.shiftKey && e.key.toLowerCase() === 'h') { e.preventDefault(); $('#historyPanel').classList.contains('show') ? closeHistory() : openHistory(); }
   else if (mod && e.shiftKey && e.key.toLowerCase() === 'b') { e.preventDefault(); toggleBlocksView(); }
   else if (mod && e.shiftKey && e.key.toLowerCase() === 'e') { e.preventDefault(); splitClone('row'); }
@@ -1831,27 +1916,31 @@ new ResizeObserver(() => { clearTimeout(_roT); _roT = setTimeout(() => { fitPane
 
   const ws = await relay.getWorkspace();
   if (state.settings.autoSave && ws.tabs.length) {
-    // Restore each saved tab into its group. Create the ACTIVE one activated so it's fitted to
-    // its real size BEFORE its shell spawns (a post-spawn resize makes ConPTY repaint on Windows).
     const activeId = ws.tabs.some((t: OpenTab) => t.id === ws.active) ? ws.active : ws.tabs[0].id;
-    for (const t of ws.tabs) await newTab(t, t.id === activeId);
-    // Restore the split-tree layout (which tabs are visible per pane, nesting, focus).
-    const savedLayout = ws.layout as LNode | undefined;
-    if (savedLayout && !isLeaf(savedLayout)) {
-      const usedGroups = new Set(state.tabs.map((t) => t.group));                 // groups that actually have tabs
-      if (leaves(savedLayout).every((g) => usedGroups.has(g))) {                   // layout still valid
-        state.layout = savedLayout;
-        for (const g of leaves(savedLayout)) { const id = ws.gv?.[g] || ''; state.gv[g] = state.tabs.some((t) => t.id === id && t.group === g) ? id : (groupTabs(g)[0]?.id || ''); }
-        state.focus = leaves(savedLayout).includes(ws.focus ?? 0) ? (ws.focus ?? 0) : leaves(savedLayout)[0];
-        state.active = state.gv[state.focus] || activeId;
-        reconcilePanes(); updateMainView();
-      }
-    }
+    // Apply the saved split layout FIRST, so each tab restores into its real pane. (If we created
+    // tabs first, reconcilePanes would flatten every group to 0 while the layout is still {g:0}.)
+    const savedGroups = new Set<number>(ws.tabs.map((t: OpenTab) => (typeof t.group === 'number' ? t.group : 0)));
+    const validLayout = ws.layout != null && isValidLayout(ws.layout, savedGroups);
+    if (validLayout) {
+      state.layout = ws.layout as LNode;
+      for (const g of leaves(state.layout)) state.gv[g] = ws.gv?.[g] || '';
+      state.focus = leaves(state.layout).includes(ws.focus ?? 0) ? (ws.focus ?? 0) : leaves(state.layout)[0];
+    } else { state.layout = { g: 0 }; state.focus = 0; }
+    // Create every tab WITHOUT activating (no mid-loop reconcile); pin each to a real leaf.
+    const lvs = leaves(state.layout);
+    for (const t of ws.tabs) { if (typeof t.group !== 'number' || !lvs.includes(t.group)) t.group = lvs[0]; await newTab(t, false); }
+    // Repair each pane's visible tab, then settle the whole layout in one pass.
+    for (const g of lvs) { if (!state.tabs.some((t) => t.id === state.gv[g] && t.group === g)) state.gv[g] = groupTabs(g)[0]?.id || ''; }
+    if (!validLayout) state.gv[0] = state.tabs.some((t) => t.id === activeId) ? activeId : (groupTabs(0)[0]?.id || '');
+    state.active = state.gv[state.focus] || activeId;
+    E('#termEmpty').style.display = 'none';
+    reconcilePanes(); renderTabs(); updateStatus(); reflectModel();
   } else if (state.settings.workspace) {
     newTab();
   } else {
-    $('#termEmpty').innerHTML = 'Open a project folder to start.<br>Press <b>Ctrl/⌘ K</b> → “Open folder”.';
+    E('#termEmpty').innerHTML = 'Open a project folder to start.<br>Press <b>Ctrl/⌘ K</b> → “Open folder”.';
   }
   renderFiles(); // populate the Files section even if no terminal is active yet
   updateMainView(); // reflect Blocks/Classic choice (and the toggle button) on first paint
+  booting = false; persistWorkspace(true); // restore complete — resume autosave and write the settled state once
 })();

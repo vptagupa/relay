@@ -13,7 +13,7 @@ interface Term {
   proc: pty.IPty;
   buf: string;                    // rolling output buffer, for replay on reattach
   wc: WebContents | null;         // currently attached renderer (null when detached)
-  parser: { feed(chunk: string): string } | null; // shell-integration block parser
+  parser: { feed(chunk: string): string; close(): void } | null; // shell-integration block parser
 }
 
 const terms = new Map<string, Term>();
@@ -109,6 +109,7 @@ export function createTerm(id: string, cwd: string, wc: WebContents, cols = 80, 
     if (term.wc && !term.wc.isDestroyed()) term.wc.send('pty:data', { id, data: clean });
   });
   proc.onExit(({ exitCode }) => {
+    try { term.parser?.close(); } catch { /* finalize any open block */ }
     if (term.wc && !term.wc.isDestroyed()) term.wc.send('pty:exit', { id, exitCode });
     terms.delete(id);
   });
@@ -128,7 +129,7 @@ export function createTerm(id: string, cwd: string, wc: WebContents, cols = 80, 
 }
 
 export function writeTerm(id: string, data: string): void {
-  terms.get(id)?.proc.write(data);
+  try { terms.get(id)?.proc.write(data); } catch { /* pty may have exited between the lookup and the write */ }
 }
 
 export function resizeTerm(id: string, cols: number, rows: number): void {

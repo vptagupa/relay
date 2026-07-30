@@ -60,7 +60,7 @@ const api = {
   exportSession: (p: { name: string; content: string; ext: string }): Promise<{ ok: boolean; path?: string; error?: string }> => ipcRenderer.invoke('session:export', p),
 
   // --- file browser ---
-  fsList: (dir: string): Promise<{ path: string; parent: string; entries: { name: string; isDir: boolean }[]; error?: string }> => ipcRenderer.invoke('fs:list', dir),
+  fsList: (dir: string): Promise<{ path: string; parent: string; entries: { name: string; isDir: boolean }[]; truncated?: boolean; error?: string }> => ipcRenderer.invoke('fs:list', dir),
   fsOpen: (p: string): Promise<{ method: 'vscode' | 'default' | 'error'; error?: string }> => ipcRenderer.invoke('fs:open', p),
 
   // --- agent ---

@@ -2,7 +2,7 @@ import { app, BrowserWindow, ipcMain, dialog, Menu, shell } from 'electron';
 import path from 'node:path';
 import os from 'node:os';
 import { promises as fsp, appendFileSync } from 'node:fs';
-import { exec } from 'node:child_process';
+import { exec, execFile } from 'node:child_process';
 import { createTerm, writeTerm, resizeTerm, detachTerm, killTerm, killAll } from './pty';
 import * as store from './store';
 import * as keys from './keys';
@@ -78,13 +78,17 @@ function createWindow(): void {
   win.webContents.on('console-message', (_e, level, message, line, sourceId) => {
     if (level >= 2) logFatal('renderer-console', `${message}  (${sourceId}:${line})`);
   });
-  win.webContents.on('render-process-gone', (_e, d) => logFatal('render-process-gone', JSON.stringify(d)));
+  // If the renderer dies or reloads, release any in-flight approval promises so the agent loop
+  // (and its provider request) can't leak and wedge the agent panel for the rest of the session.
+  win.webContents.on('render-process-gone', (_e, d) => { logFatal('render-process-gone', JSON.stringify(d)); clearPendingApprovals(); });
+  win.webContents.on('did-start-navigation', (_e, _url, isInPlace, isMainFrame) => { if (isMainFrame && !isInPlace) clearPendingApprovals(); });
+  win.webContents.on('did-fail-load', (_e, code, desc, url) => logFatal('did-fail-load', `${code} ${desc} ${url}`));
+  win.on('closed', () => { win = null; }); // drop the ref so stale window handlers / late IPC can't hit a destroyed window
 
-  if (MAIN_WINDOW_VITE_DEV_SERVER_URL) {
-    win.loadURL(MAIN_WINDOW_VITE_DEV_SERVER_URL);
-  } else {
-    win.loadFile(path.join(__dirname, `../renderer/${MAIN_WINDOW_VITE_NAME}/index.html`));
-  }
+  const loaded = MAIN_WINDOW_VITE_DEV_SERVER_URL
+    ? win.loadURL(MAIN_WINDOW_VITE_DEV_SERVER_URL)
+    : win.loadFile(path.join(__dirname, `../renderer/${MAIN_WINDOW_VITE_NAME}/index.html`));
+  loaded.catch((err) => logFatal('window-load', err)); // otherwise a load failure is a blank window + unhandled rejection
 
   // Keep the custom maximize/restore icon in sync with the real window state.
   win.on('maximize', () => win?.webContents.send('win:state', true));
@@ -111,8 +115,10 @@ if (!isSquirrel) {
 
 /* -------------------- PTY IPC -------------------- */
 ipcMain.handle('pty:create', async (e, { id, cwd, cols, rows, restore }) => {
-  const integrate = (await store.getSettings()).shellIntegration;
-  return createTerm(id, cwd, e.sender, cols, rows, restore, integrate);
+  try {
+    const integrate = (await store.getSettings()).shellIntegration;
+    return createTerm(id, cwd, e.sender, cols, rows, restore, integrate);
+  } catch (err) { logFatal('pty:create', err); return false; } // a spawn failure must not reject into the renderer
 });
 ipcMain.on('pty:write', (_e, { id, data }) => writeTerm(id, data));
 ipcMain.on('pty:resize', (_e, { id, cols, rows }) => resizeTerm(id, cols, rows));
@@ -188,18 +194,26 @@ function isCodeFile(p: string): boolean {
 }
 function tryCode(p: string): Promise<boolean> {
   return new Promise((resolve) => {
-    // `code` resolves to code.cmd on Windows via the shell; errors if VS Code isn't on PATH.
-    exec(`code "${p.replace(/"/g, '')}"`, { windowsHide: true, timeout: 15000 }, (err) => resolve(!err));
+    if (process.platform === 'win32') {
+      // `code` is code.cmd on Windows and needs a shell; reject chars that could break out of the
+      // quoted argument or trigger %VAR% expansion, so a crafted filename can't inject a command.
+      if (/["%\r\n]/.test(p)) return resolve(false);
+      exec(`code "${p}"`, { windowsHide: true, timeout: 15000 }, (err) => resolve(!err));
+    } else {
+      // No shell → the path is a literal argv entry, so $(...)/backticks in a filename can't expand.
+      execFile('code', [p], { timeout: 15000 }, (err) => resolve(!err));
+    }
   });
 }
 ipcMain.handle('fs:list', async (_e, dir: string) => {
   try {
     const abs = dir ? path.resolve(dir) : os.homedir();
     const ents = await fsp.readdir(abs, { withFileTypes: true });
-    const entries = ents
+    const sorted = ents
       .map((e) => ({ name: e.name, isDir: e.isDirectory() }))
       .sort((a, b) => (a.isDir === b.isDir ? a.name.localeCompare(b.name) : a.isDir ? -1 : 1));
-    return { path: abs, parent: path.dirname(abs), entries };
+    const MAX = 5000; // don't flood IPC + the renderer when listing node_modules / C:\Windows\WinSxS
+    return { path: abs, parent: path.dirname(abs), entries: sorted.slice(0, MAX), truncated: sorted.length > MAX };
   } catch (e: any) {
     return { path: dir, parent: dir, entries: [], error: e.message };
   }
@@ -224,6 +238,8 @@ ipcMain.on('workspace:set-sync', (e, ws) => {
 
 /* -------------------- agent (with approval round-trip) -------------------- */
 const pendingApprovals = new Map<string, (ok: boolean) => void>();
+// Deny + drop every in-flight approval (called when the renderer crashes or reloads).
+function clearPendingApprovals() { for (const resolve of pendingApprovals.values()) resolve(false); pendingApprovals.clear(); }
 ipcMain.on('agent:approval-response', (_e, { id, ok }) => {
   pendingApprovals.get(id)?.(ok);
   pendingApprovals.delete(id);
