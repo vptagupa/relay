@@ -27,7 +27,7 @@ const activeTab = () => state.tabs.find((t) => t.id === state.active);
 $('#app').innerHTML = `
   <div class="app">
     <div class="winbar">
-      <div class="winbar-brand"><span class="winbar-mark">›_</span><span class="winbar-title">Relay v2</span></div>
+      <div class="winbar-brand"><span class="winbar-mark">›_</span><span class="winbar-title">Relay</span></div>
       <div class="winbar-ctx" id="winCtx"></div>
       <div class="win-controls">
         <button class="win-btn" id="winMin" aria-label="Minimize"><svg viewBox="0 0 10 10"><line x1="1" y1="5" x2="9" y2="5"/></svg></button>
@@ -180,6 +180,8 @@ const XTERM_THEME = {
   selectionBackground: 'rgba(240,180,41,.28)',
   black: '#0b0e13', red: '#ff7b72', green: '#7ee787', yellow: '#f0b429', blue: '#6cb6ff',
   magenta: '#d2a8ff', cyan: '#56d4dd', white: '#d8dee7', brightBlack: '#66717f',
+  brightRed: '#ffa198', brightGreen: '#a2f2b0', brightYellow: '#f7c744', brightBlue: '#89bdff',
+  brightMagenta: '#e0bbff', brightCyan: '#7ee0e8', brightWhite: '#ffffff',
 };
 function toast(msg: string, ok = false) {
   const w = $('#toastWrap');

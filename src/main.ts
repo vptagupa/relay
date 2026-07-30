@@ -58,7 +58,7 @@ function createWindow(): void {
     minWidth: 780,
     minHeight: 480,
     backgroundColor: '#0e1116',
-    title: 'Relay v2',
+    title: 'Relay',
     icon: path.join(__dirname, '..', '..', 'assets', 'icon.png'), // dev taskbar icon (packaged uses the exe icon)
     // Native chrome off; our custom bar is drawn in the renderer.
     // Windows/Linux: fully frameless. macOS: keep the native traffic lights (hiddenInset).

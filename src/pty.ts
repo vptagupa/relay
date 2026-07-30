@@ -57,14 +57,18 @@ export function createTerm(id: string, cwd: string, wc: WebContents, cols = 80, 
   const spawnArgs = isPwsh
     ? ['-NoLogo', '-NoExit', '-EncodedCommand', Buffer.from(shellIntegrationInit('powershell'), 'utf16le').toString('base64')]
     : [];
-  const env = { ...process.env, TERM: 'xterm-256color' } as Record<string, string>;
+  const env = { ...process.env, TERM: 'xterm-256color', COLORTERM: 'truecolor' } as Record<string, string>;
   // Relay may itself be launched from inside a Claude Code session; its environment then
   // carries Claude Code runtime/session markers. If those leak into the shell, a `claude`
   // run INSIDE Relay thinks it's a nested child session and disables transcript saving.
   // Scrub the markers so Claude Code launched in Relay is always a clean top-level session.
   for (const k of ['CLAUDECODE', 'CLAUDE_CODE_CHILD_SESSION', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_CODE_SSE_PORT', 'CLAUDE_CODE_SESSION_ID']) delete env[k];
+  // Relay is a full-color terminal: don't let a NO_COLOR / FORCE_COLOR=0 inherited from its own
+  // launch environment strip color from programs (Claude Code, git, npm…) run inside it.
+  delete env.NO_COLOR;
+  if (env.FORCE_COLOR === '0' || env.FORCE_COLOR === 'false') delete env.FORCE_COLOR;
   const proc = pty.spawn(shellPath, spawnArgs, {
-    name: 'xterm-color',
+    name: 'xterm-256color',
     cols,
     rows,
     cwd: startDir,
