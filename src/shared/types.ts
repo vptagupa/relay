@@ -47,16 +47,15 @@ export interface OpenTab extends TermColors {
   scrollback?: string;
   blocks?: Block[];                 // command history as structured blocks
   chat?: ChatTurn[];                // this terminal's agent conversation
-  group?: 0 | 1;                    // which split group (pane) this tab belongs to
+  group?: number;                   // which split group (pane) this tab belongs to
 }
 
 export interface Workspace {
   active: string;
   tabs: OpenTab[];
-  gv?: [string, string];            // visible tab id per group (split-layout restore)
-  focus?: 0 | 1;
-  splitDir?: 'row' | 'col';
-  splitRatio?: number;              // left/top pane size fraction
+  gv?: string[];                    // visible tab id per group (split-layout restore)
+  focus?: number;
+  layout?: unknown;                 // nested split-tree layout (opaque; renderer-owned shape)
 }
 
 // A saved command snippet — created by highlighting text in a block and bookmarking it.

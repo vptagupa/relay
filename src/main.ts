@@ -73,6 +73,13 @@ function createWindow(): void {
     },
   });
 
+  // TEMP DIAG: mirror renderer console errors/warnings into relay-error.log so we can
+  // diagnose init crashes that leave the UI unresponsive (no main-process exception fires).
+  win.webContents.on('console-message', (_e, level, message, line, sourceId) => {
+    if (level >= 2) logFatal('renderer-console', `${message}  (${sourceId}:${line})`);
+  });
+  win.webContents.on('render-process-gone', (_e, d) => logFatal('render-process-gone', JSON.stringify(d)));
+
   if (MAIN_WINDOW_VITE_DEV_SERVER_URL) {
     win.loadURL(MAIN_WINDOW_VITE_DEV_SERVER_URL);
   } else {
