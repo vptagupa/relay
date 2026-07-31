@@ -3,7 +3,8 @@ import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { SerializeAddon } from '@xterm/addon-serialize';
 import { MODELS, modelById } from './shared/models';
-import { THEMES, themeById, DEFAULT_THEME, type Theme } from './themes';
+import { themeById, DEFAULT_THEME } from './themes';
+import { activeTheme, activeXterm, TEMPLATES, curTemplate, applyThemeVars, renderThemeGrid } from './theme';
 import { type LNode, type Split, isLeaf, leaves, replaceLeaf, removeLeaf, siblingLeaf, isValidLayout } from './layout';
 import { stripAnsi, collapseCR } from './ansi';
 import { type ExFmt, realBlock, cmdText, cmdRaw, buildExport } from './blocks-text';
@@ -62,10 +63,8 @@ $('#app').innerHTML = appHtml(Array.from({ length: NPANES }, (_, g) => paneHtml(
 for (const s of ['#termEmpty', ...PANE, ...P_TABS, ...P_HOST, ...P_VIEW, ...P_SCROLL, ...P_CMD, ...P_PROMPT]) E(s);
 
 /* ----------------------------- helpers ----------------------------- */
-// Themes (palette + terminal colors + traits) live in the single registry at src/themes.ts.
-const activeTheme = (): Theme => themeById(state.settings.template);
-function activeXterm(): Record<string, string> { return activeTheme().xterm; }
-// toast + makeEditable (shared UI helpers) live in ./ui — imported above.
+// Theme runtime (activeTheme/activeXterm/TEMPLATES/curTemplate/applyThemeVars/renderThemeGrid) lives
+// in ./theme; the registry in ./themes. toast + makeEditable (shared UI helpers) live in ./ui.
 // Move the item identified by dragId to before/after targetId within arr.
 function reorderById<T>(arr: T[], getId: (x: T) => string, dragId: string, targetId: string, before: boolean) {
   const from = arr.findIndex((x) => getId(x) === dragId); if (from < 0) return;
@@ -622,30 +621,14 @@ function reflectModel() {
 }
 
 /* ----------------------------- theme + sidebar + status ----------------------------- */
-// Everything about a theme lives in the registry (src/themes.ts). The picker list is derived
-// from it, and applyTheme() writes the theme's CSS vars + trait classes onto the document.
-const TEMPLATES = THEMES.map((t) => ({ id: t.id, name: t.name, c1: t.swatch[0], c2: t.swatch[1] }));
-const curTemplate = () => activeTheme().id;
-// Write a theme's variables + traits onto <html>. Split out so it can run synchronously at boot
-// (before the first paint / any terminals exist) to avoid a flash of the wrong theme.
-function applyThemeVars(t: Theme) {
-  const root = document.documentElement;
-  root.setAttribute('data-theme', t.id);
-  for (const [k, v] of Object.entries(t.vars)) root.style.setProperty('--' + k, v);
-  for (const c of [...root.classList]) if (c.startsWith('t-')) root.classList.remove(c); // clear old trait classes
-  for (const trait of t.traits) root.classList.add('t-' + trait);
-}
+// applyTheme/setTemplate/cycleTemplate stay here: they re-tint live terminals and persist the choice.
+// The pure theme lookups + var-writing + picker rendering live in ./theme (imported above).
 function applyTheme() {
   applyThemeVars(activeTheme());
   for (const t of state.tabs) { applyTermColors(t); t.term.refresh(0, t.term.rows - 1); } // re-tint every live terminal
 }
 async function setTemplate(id: string) { state.settings = await relay.patchSettings({ template: id as Settings['template'] }); applyTheme(); reflectSettings(); }
 async function cycleTemplate() { const i = TEMPLATES.findIndex((t) => t.id === curTemplate()); await setTemplate(TEMPLATES[(i + 1) % TEMPLATES.length].id); }
-function renderThemeGrid() {
-  const cur = curTemplate();
-  $('#themeGrid').innerHTML = TEMPLATES.map((t) =>
-    `<button class="theme-sw ${t.id === cur ? 'on' : ''}" data-tpl="${t.id}" title="${t.name}"><span class="pv"><i style="background:${t.c1}"></i><i style="background:${t.c2}"></i></span><span class="nm">${t.name}${t.id === 'graphite' ? ' · default' : ''}</span></button>`).join('');
-}
 function applySidebar() { $('#main').classList.toggle('collapsed', state.settings.sidebarCollapsed); const t = activeTab(); if (t) setTimeout(() => { t.fit.fit(); relay.ptyResize(t.id, t.term.cols, t.term.rows); }, 210); }
 function applyToolbar() { document.querySelector('.titlebar')?.classList.toggle('shown', state.settings.toolbarShown); }
 // Size the Library section from the saved fraction of the sidebar height; Files fills the rest.
