@@ -34,13 +34,20 @@ function logFatal(kind: string, err: unknown): void {
 // Async, size-capped mirror for renderer console messages — a warn-in-a-loop must never block the
 // main thread on sync disk I/O or grow the log without bound.
 let rendererLogBytes = 0;
+let rendererLogCapped = false; // once renderer console output hits the cap we STOP appending — never
+// truncate the shared log, or we'd wipe the logFatal crash records this file exists to preserve.
 async function logRenderer(text: string): Promise<void> {
+  if (rendererLogCapped) return;
   try {
     const f = path.join(app.getPath('userData'), 'relay-error.log');
     const line = `[${new Date().toISOString()}] renderer-console: ${text}\n`;
     rendererLogBytes += line.length;
-    if (rendererLogBytes > 1_000_000) { await fsp.writeFile(f, line); rendererLogBytes = line.length; } // reset when large
-    else await fsp.appendFile(f, line);
+    if (rendererLogBytes > 1_000_000) {
+      rendererLogCapped = true; // append-only so crash records survive; bound growth by suppressing, not wiping
+      await fsp.appendFile(f, `[${new Date().toISOString()}] renderer-console: (further renderer output suppressed — exceeded 1 MB this session)\n`);
+      return;
+    }
+    await fsp.appendFile(f, line);
   } catch { /* diagnostics only */ }
 }
 process.on('uncaughtException', (err) => {
