@@ -382,6 +382,10 @@ button{font-family:inherit;color:inherit;cursor:pointer;border:none;background:n
 .hist-export{width:34px;height:32px;border-radius:7px;display:grid;place-items:center;color:var(--text-dim);border:1px solid var(--border);background:var(--surface-2);font-size:14px;cursor:pointer}
 .hist-export:hover,.hist-filter:hover{border-color:var(--border-strong);color:var(--text)}
 .hist-list{flex:1;overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:9px}
+/* Children of these flex-column scroll lists must keep their natural height. An .hb/.hr-item with
+   overflow:hidden has an automatic min-size of 0, so with a long history flexbox shrinks every item
+   to fit the panel — collapsing blocks into empty bars — instead of scrolling. flex:none = scroll. */
+.hist-list>*,.hist-rail>*{flex:none}
 .hist-empty{padding:28px 16px;text-align:center;color:var(--muted);font-size:12.5px;line-height:1.7}
 .history .dim{color:var(--muted)}
 .hb{border:1px solid var(--border);border-radius:10px;background:var(--surface-2);overflow:hidden}
