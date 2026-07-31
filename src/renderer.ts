@@ -102,6 +102,14 @@ async function newTab(seed?: Partial<OpenTab> & { libId?: string }, activate = t
   state.tabs.push(tab);
   applyTermColors(tab); // honor any restored per-terminal body/text colors
   term.onData((d) => relay.ptyWrite(id, d));
+  // Shift+Enter → send a literal newline so multiline TUIs (e.g. Claude Code) insert a line instead
+  // of submitting; xterm otherwise emits the same \r as plain Enter. Plain Enter is unchanged.
+  term.attachCustomKeyEventHandler((e) => {
+    if (e.type === 'keydown' && e.key === 'Enter' && e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
+      e.preventDefault(); relay.ptyWrite(id, '\n'); return false; // suppress xterm's default \r
+    }
+    return true;
+  });
   term.onSelectionChange(() => { if (state.active === id) refreshPill(undefined, undefined, true); }); // show the ★ pill for terminal selections
   let saveT: any;
   term.onData(() => { clearTimeout(saveT); saveT = setTimeout(persistWorkspace, 1500); }); // keep the persisted snapshot fresh
@@ -1491,11 +1499,11 @@ document.addEventListener('keydown', (e) => {
   // typing, not navigating — suppress ALL app chords. Escape still falls through below to close panels.
   const modalInput = !!el && (el.isContentEditable || el.id === 'palInput' || el.id === 'histSearch' || el.id === 'agentInput');
   if (mod && modalInput) return;
-  // Anywhere else that's editable (the command input, the terminal), keep the nav chords working but
-  // let the delete-word / EOF chords reach the field instead of firing a destructive app action —
-  // Ctrl+W (delete word) was closing the tab while you typed.
+  // Anywhere else that's editable (the command input, the terminal), keep every app chord working
+  // EXCEPT Ctrl+W (delete-word) — which was closing the tab while you typed. Ctrl+D stays global so
+  // highlighting text + Ctrl+D still bookmarks; Ctrl+K/T/S/L etc. keep working from the terminal.
   const editable = !!el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable);
-  if (mod && editable && !e.shiftKey && (key === 'w' || key === 'd')) return;
+  if (mod && editable && !e.shiftKey && key === 'w') return;
   if (mod && e.shiftKey && e.key.toLowerCase() === 'k') { e.preventDefault(); $('#bookmarksPanel').classList.contains('show') ? closeBookmarks() : openBookmarks(); }
   else if (mod && e.key.toLowerCase() === 'k') { e.preventDefault(); $('#palette').classList.contains('show') ? closePalette() : openPalette(); }
   else if (mod && !e.shiftKey && e.key.toLowerCase() === 'd') { e.preventDefault(); bookmarkSelection(); }
