@@ -85,14 +85,29 @@ export interface ToolContext {
   newId: () => string;
 }
 
-// Confine every path to the workspace root; reject traversal / escapes.
-function resolveInside(workspace: string, rel: string): string {
+// Confine every path to the workspace root, resolving symlinks so a link INSIDE the workspace can't
+// point outside it (a hostile repo must not make the agent read/write beyond the project). For a path
+// that doesn't exist yet (a file being created) the deepest existing ancestor is realpath'd — the
+// non-existent tail segments can't be symlinks. Also blocks `../` traversal (via path.resolve).
+async function resolveInside(workspace: string, rel: string): Promise<string> {
   const abs = path.resolve(workspace, rel);
-  const root = path.resolve(workspace);
-  if (abs !== root && !abs.startsWith(root + path.sep)) {
-    throw new Error(`Path "${rel}" escapes the project root.`);
+  const realRoot = await fs.realpath(path.resolve(workspace)).catch(() => path.resolve(workspace));
+  const inside = (p: string) => p === realRoot || p.startsWith(realRoot + path.sep);
+  const tail: string[] = []; // segments below the deepest existing ancestor
+  let probe = abs;
+  for (;;) {
+    let real: string | null = null;
+    try { real = await fs.realpath(probe); } catch (e: unknown) { if (!e || (e as { code?: string }).code !== 'ENOENT') throw e; }
+    if (real !== null) {
+      const full = tail.length ? path.join(real, ...tail) : real;
+      if (!inside(real) || !inside(full)) throw new Error(`Path "${rel}" escapes the project root.`);
+      return full;
+    }
+    const parent = path.dirname(probe);
+    if (parent === probe) throw new Error(`Path "${rel}" escapes the project root.`); // reached fs root
+    tail.unshift(path.basename(probe));
+    probe = parent;
   }
-  return abs;
 }
 
 async function readIfExists(abs: string): Promise<string | null> {
@@ -142,12 +157,12 @@ export async function executeTool(name: string, input: any, ctx: ToolContext): P
 
   // --- read-only tools run immediately ---
   if (name === 'read_file') {
-    const abs = resolveInside(ctx.workspace, input.path);
+    const abs = await resolveInside(ctx.workspace, input.path);
     const text = await fs.readFile(abs, 'utf8');
     return text.length > 60_000 ? text.slice(0, 60_000) + '\n…[truncated]' : text;
   }
   if (name === 'list_dir') {
-    const abs = resolveInside(ctx.workspace, input.path || '.');
+    const abs = await resolveInside(ctx.workspace, input.path || '.');
     const entries = await fs.readdir(abs, { withFileTypes: true });
     return entries.map((e) => (e.isDirectory() ? e.name + '/' : e.name)).sort().join('\n') || '[empty]';
   }
@@ -157,13 +172,13 @@ export async function executeTool(name: string, input: any, ctx: ToolContext): P
   let apply: () => Promise<string>;
 
   if (name === 'write_file') {
-    const abs = resolveInside(ctx.workspace, input.path);
+    const abs = await resolveInside(ctx.workspace, input.path);
     const next = String(input.content ?? '');
     const prev = await readIfExists(abs);
     req = { id: ctx.newId(), kind: 'write', title: `${prev === null ? 'Create' : 'Overwrite'} ${input.path}`, detail: input.path, diff: lineDiff(prev ?? '', next) };
     apply = async () => { await fs.mkdir(path.dirname(abs), { recursive: true }); await fs.writeFile(abs, next, 'utf8'); return `Wrote ${input.path} (${next.length} bytes).`; };
   } else if (name === 'edit_file') {
-    const abs = resolveInside(ctx.workspace, input.path);
+    const abs = await resolveInside(ctx.workspace, input.path);
     const prev = await readIfExists(abs);
     if (prev === null) throw new Error(`File not found: ${input.path}`);
     const oldS = String(input.old_string ?? '');
