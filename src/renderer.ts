@@ -3,6 +3,7 @@ import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { SerializeAddon } from '@xterm/addon-serialize';
 import { MODELS, modelById, DEFAULT_MODEL } from './shared/models';
+import { THEMES, themeById, DEFAULT_THEME, type Theme } from './themes';
 import type { Settings, SavedSession, AgentEvent, ApprovalRequest, ChatTurn, OpenTab, Block, Bookmark, BookmarkGroup } from './shared/types';
 
 // TEMP DIAG: surface full stacks (minify is off) for the init crash.
@@ -69,6 +70,10 @@ const P_PROMPT = ['#bvPrompt', '#bvPrompt2', '#bvPrompt3', '#bvPrompt4'];
 // longer find it. Resolve each ONCE while still attached and cache the live reference.
 const _elCache: Record<string, HTMLElement> = {};
 const E = (sel: string): HTMLElement => (_elCache[sel] ??= document.querySelector(sel) as HTMLElement);
+
+// Apply the default theme's CSS vars synchronously BEFORE the template renders — no flash, and
+// no need for per-theme blocks in the stylesheet (boot() re-applies the persisted theme).
+applyThemeVars(themeById(DEFAULT_THEME));
 
 /* ----------------------------- layout ----------------------------- */
 $('#app').innerHTML = `
@@ -264,28 +269,9 @@ $('#app').innerHTML = `
 for (const s of ['#termEmpty', ...PANE, ...P_TABS, ...P_HOST, ...P_VIEW, ...P_SCROLL, ...P_CMD, ...P_PROMPT]) E(s);
 
 /* ----------------------------- helpers ----------------------------- */
-// One xterm palette per theme template — so the terminal itself follows the chosen theme
-// (a light "Daylight" terminal, a neon "Voltage" one, etc.), not just the app chrome.
-const ANSI_DARK = {
-  black: '#3b3f4a', red: '#ff7b72', green: '#7ee787', yellow: '#f0c674', blue: '#6cb6ff',
-  magenta: '#d2a8ff', cyan: '#56d4dd', white: '#d8dee7', brightBlack: '#66717f',
-  brightRed: '#ffa198', brightGreen: '#a2f2b0', brightYellow: '#f7d774', brightBlue: '#89bdff',
-  brightMagenta: '#e0bbff', brightCyan: '#7ee0e8', brightWhite: '#ffffff',
-};
-const ANSI_LIGHT = {
-  black: '#161b22', red: '#c0341d', green: '#15803d', yellow: '#9a6700', blue: '#1d4ed8',
-  magenta: '#9333ea', cyan: '#0e7490', white: '#55606e', brightBlack: '#8a94a3',
-  brightRed: '#dc2626', brightGreen: '#16a34a', brightYellow: '#b45309', brightBlue: '#2563eb',
-  brightMagenta: '#a855f7', brightCyan: '#0891b2', brightWhite: '#161b22',
-};
-const XTERM_THEMES: Record<string, Record<string, string>> = {
-  graphite: { background: '#0e0f12', foreground: '#e8eaee', cursor: '#6e7bff', cursorAccent: '#0e0f12', selectionBackground: 'rgba(110,123,255,.28)', ...ANSI_DARK },
-  ember: { background: '#181310', foreground: '#f4ebe0', cursor: '#f2a93b', cursorAccent: '#181310', selectionBackground: 'rgba(242,169,59,.26)', ...ANSI_DARK },
-  voltage: { background: '#0c0819', foreground: '#ece6ff', cursor: '#ff2e97', cursorAccent: '#0c0819', selectionBackground: 'rgba(255,46,151,.28)', ...ANSI_DARK, magenta: '#ff6ac1', cyan: '#22d3ee', brightMagenta: '#ff8fd0', brightCyan: '#67e8f9' },
-  aurora: { background: '#0d1426', foreground: '#eaf1ff', cursor: '#a78bfa', cursorAccent: '#0d1426', selectionBackground: 'rgba(167,139,250,.28)', ...ANSI_DARK },
-  daylight: { background: '#fbfcfd', foreground: '#161b22', cursor: '#0e7c66', cursorAccent: '#fbfcfd', selectionBackground: 'rgba(14,124,102,.2)', ...ANSI_LIGHT },
-};
-function activeXterm(): Record<string, string> { return XTERM_THEMES[state.settings.template] || XTERM_THEMES.graphite; }
+// Themes (palette + terminal colors + traits) live in the single registry at src/themes.ts.
+const activeTheme = (): Theme => themeById(state.settings.template);
+function activeXterm(): Record<string, string> { return activeTheme().xterm; }
 let toastT: ReturnType<typeof setTimeout> | null = null;
 function toast(msg: string, ok = false) {
   const w = $('#toastWrap');
@@ -891,17 +877,21 @@ function reflectModel() {
 }
 
 /* ----------------------------- theme + sidebar + status ----------------------------- */
-// The five selectable design templates (palette + xterm theme). Graphite is the default.
-const TEMPLATES: { id: string; name: string; c1: string; c2: string }[] = [
-  { id: 'graphite', name: 'Graphite', c1: '#0b0c0e', c2: '#6e7bff' },
-  { id: 'ember', name: 'Ember', c1: '#15110d', c2: '#f2a93b' },
-  { id: 'voltage', name: 'Voltage', c1: '#0a0713', c2: '#ff2e97' },
-  { id: 'aurora', name: 'Aurora', c1: '#0b1120', c2: '#a78bfa' },
-  { id: 'daylight', name: 'Daylight', c1: '#eef1f5', c2: '#0e7c66' },
-];
-const curTemplate = () => state.settings.template || 'graphite';
+// Everything about a theme lives in the registry (src/themes.ts). The picker list is derived
+// from it, and applyTheme() writes the theme's CSS vars + trait classes onto the document.
+const TEMPLATES = THEMES.map((t) => ({ id: t.id, name: t.name, c1: t.swatch[0], c2: t.swatch[1] }));
+const curTemplate = () => activeTheme().id;
+// Write a theme's variables + traits onto <html>. Split out so it can run synchronously at boot
+// (before the first paint / any terminals exist) to avoid a flash of the wrong theme.
+function applyThemeVars(t: Theme) {
+  const root = document.documentElement;
+  root.setAttribute('data-theme', t.id);
+  for (const [k, v] of Object.entries(t.vars)) root.style.setProperty('--' + k, v);
+  for (const c of [...root.classList]) if (c.startsWith('t-')) root.classList.remove(c); // clear old trait classes
+  for (const trait of t.traits) root.classList.add('t-' + trait);
+}
 function applyTheme() {
-  document.documentElement.setAttribute('data-theme', curTemplate());
+  applyThemeVars(activeTheme());
   for (const t of state.tabs) { applyTermColors(t); t.term.refresh(0, t.term.rows - 1); } // re-tint every live terminal
 }
 async function setTemplate(id: string) { state.settings = await relay.patchSettings({ template: id as Settings['template'] }); applyTheme(); reflectSettings(); }

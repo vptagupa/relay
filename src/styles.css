@@ -6,85 +6,46 @@
   --sans:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif;
   /* --r/--r-sm/--r-lg (shape), --glass/--chrome (depth) and --gap/--pad (space) are per-theme below */
 }
-/* Graphite is the default palette (also on bare :root to avoid a flash before JS runs). */
-:root,:root[data-theme="graphite"]{
-  --bg:#0b0c0e;--surface:#121317;--surface-2:#171920;--surface-3:#1c1e24;--canvas:#0e0f12;
-  --border:#26282f;--border-strong:#343742;--text:#e8eaee;--text-dim:#a2a8b2;--muted:#6b7280;
-  --accent:#6e7bff;--accent-2:#8fd0ff;--accent-ghost:rgba(110,123,255,.14);--accent-line:rgba(110,123,255,.5);
-  --ok:#4ec46a;--err:#f0616a;--sel:rgba(110,123,255,.24);--on-accent:#0b0c0e;
-  --shadow:0 22px 60px -20px rgba(0,0,0,.62);
-  --r:6px;--r-sm:4px;--r-lg:10px;--glass:0px;--chrome:var(--surface);--gap:11px;--pad:9px; /* precise, compact, flat */
-}
-:root[data-theme="ember"]{
-  --bg:#15110d;--surface:#1d1712;--surface-2:#241c15;--surface-3:#2c2118;--canvas:#181310;
-  --border:#3a2c20;--border-strong:#493829;--text:#f4ebe0;--text-dim:#c7b6a2;--muted:#8a7461;
-  --accent:#f2a93b;--accent-2:#ffcf85;--accent-ghost:rgba(242,169,59,.14);--accent-line:rgba(242,169,59,.55);
-  --ok:#8bbf5f;--err:#e5644e;--sel:rgba(242,169,59,.24);--on-accent:#231604;
-  --shadow:0 22px 60px -20px rgba(0,0,0,.6);
-  --r:9px;--r-sm:6px;--r-lg:13px;--glass:0px;--chrome:var(--surface);--gap:14px;--pad:12px; /* warm, roomy/comfortable */
-}
-:root[data-theme="voltage"]{
-  --bg:#0a0713;--surface:#120c22;--surface-2:#170f2b;--surface-3:#1e1440;--canvas:#0c0819;
-  --border:#33215c;--border-strong:#402c66;--text:#ece6ff;--text-dim:#ab9de0;--muted:#6c5da8;
-  --accent:#ff2e97;--accent-2:#22d3ee;--accent-ghost:rgba(255,46,151,.16);--accent-line:rgba(255,46,151,.55);
-  --ok:#2bd9a6;--err:#ff4d6d;--sel:rgba(255,46,151,.26);--on-accent:#0a0713;
-  --shadow:0 22px 60px -20px rgba(0,0,0,.72),0 0 50px -24px rgba(34,211,238,.5);
-  --r:4px;--r-sm:3px;--r-lg:6px;--glass:0px;--chrome:var(--surface);--gap:10px;--pad:8px; /* sharp, tight, high-contrast */
-}
-:root[data-theme="aurora"]{
-  --bg:#0b1120;--surface:#151d31;--surface-2:#1b2438;--surface-3:#232e48;--canvas:#0d1426;
-  --border:#263149;--border-strong:#384662;--text:#eaf1ff;--text-dim:#aebbd6;--muted:#7683a0;
-  --accent:#a78bfa;--accent-2:#5eead4;--accent-ghost:rgba(167,139,250,.16);--accent-line:rgba(167,139,250,.5);
-  --ok:#34d399;--err:#fb7185;--sel:rgba(167,139,250,.26);--on-accent:#0b1120;
-  --shadow:0 24px 64px -22px rgba(3,7,25,.75);
-  --r:11px;--r-sm:8px;--r-lg:16px;--glass:14px;--chrome:color-mix(in srgb,var(--surface) 80%,transparent);--gap:16px;--pad:13px; /* soft, airy, frosted glass */
-}
-:root[data-theme="daylight"]{
-  --bg:#f5f6f8;--surface:#ffffff;--surface-2:#f2f4f7;--surface-3:#eef7f4;--canvas:#fbfcfd;
-  --border:#e4e7ec;--border-strong:#ccd3dd;--text:#161b22;--text-dim:#55606e;--muted:#8a94a3;
-  --accent:#0e7c66;--accent-2:#2563eb;--accent-ghost:rgba(14,124,102,.1);--accent-line:rgba(14,124,102,.34);
-  --ok:#15803d;--err:#dc2626;--sel:rgba(14,124,102,.16);--on-accent:#ffffff;
-  --shadow:0 24px 60px -26px rgba(20,40,60,.24);
-  --r:8px;--r-sm:5px;--r-lg:12px;--glass:0px;--chrome:var(--surface);--gap:13px;--pad:11px; /* crisp, open, normal density */
-}
-/* Aurora theme: a subtle violet→teal aurora behind the frosted chrome. */
-:root[data-theme="aurora"] body{background:linear-gradient(165deg,#0d1426,#0a0f1e)}
-:root[data-theme="aurora"] body::before{
-  content:"";position:fixed;inset:0;z-index:0;pointer-events:none;
-  background:radial-gradient(130% 100% at 8% -8%,rgba(139,92,246,.42),transparent 55%),radial-gradient(120% 110% at 102% 12%,rgba(45,212,191,.32),transparent 55%);
-}
-:root[data-theme="aurora"] .app{position:relative;z-index:1;background:transparent}
-/* Corners follow each theme's --r (Graphite 6px … Voltage 4px … Aurora 11px). */
+/* Theme palettes (colors + space/shape) are applied to <html> from the registry in src/themes.ts
+   (renderer applyThemeVars). Nothing here defines a theme; components below just read the vars.
+   Corners follow each theme's --r. */
 .bvb,.hb,.lib-item,.file-item,.ctx-menu,.bkm-pop,.model-menu,.pal{border-radius:var(--r)}
 .modal,.agent,.history{border-radius:var(--r-lg)}
 .tb-btn,.bv-input,.set,.btn{border-radius:var(--r-sm)}
-/* Aurora only: translucent white-frost panels floating over the gradient (all other themes flat). */
-:root[data-theme="aurora"] .sidebar,:root[data-theme="aurora"] .winbar,:root[data-theme="aurora"] .titlebar,:root[data-theme="aurora"] .tabstrip,:root[data-theme="aurora"] .pane-tabs,:root[data-theme="aurora"] .statusbar,:root[data-theme="aurora"] .agent-head{
-  background:rgba(255,255,255,.05);backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);border-color:rgba(255,255,255,.1);
-}
-/* Blocks view must still COVER the live xterm — give it its own aurora gradient (not transparent,
-   or the terminal underneath bleeds through) and float frosted cards on it. */
-:root[data-theme="aurora"] .term-area{background:transparent}
-:root[data-theme="aurora"] .blocks-view{background:linear-gradient(170deg,#0f1834,#0b1020)}
-:root[data-theme="aurora"] .bv-scroll,:root[data-theme="aurora"] .bv-input{background:transparent}
-:root[data-theme="aurora"] .bvb{background:rgba(255,255,255,.06);border-color:rgba(255,255,255,.12);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px)}
-:root[data-theme="aurora"] .bvb-cmd{background:rgba(255,255,255,.07);border-bottom-color:rgba(255,255,255,.1)}
-:root[data-theme="aurora"] .lib-item:hover,:root[data-theme="aurora"] .file-item:hover{background:rgba(255,255,255,.07)}
-:root[data-theme="aurora"] .tab.active{background:rgba(255,255,255,.06);box-shadow:inset 0 -2px 0 var(--accent-2)} /* teal underline, per artifact */
-:root[data-theme="aurora"] .p-path{color:#7cc6ff} /* light-blue path, per artifact */
 
-/* Daylight: the strip goes light-grey so the white active tab clearly pops (was near-invisible). */
-:root[data-theme="daylight"] .pane-tabs{background:var(--surface-2)}
-:root[data-theme="daylight"] .tab.active{background:var(--surface);box-shadow:inset 0 -2.5px 0 var(--accent),0 1px 4px rgba(20,40,60,.08)}
-:root[data-theme="daylight"] .tab:hover:not(.active){background:rgba(20,30,45,.04)}
+/* ============================ THEME TRAITS ============================ */
+/* Structural add-ons a theme opts into via `traits` in themes.ts → `.t-<trait>` on <html>.
+   They read the theme's own vars, so they work for ANY theme that declares the trait. */
 
-/* Voltage: neon synthwave identity — faint grid canvas, accent glow, cyan second accent. */
-:root[data-theme="voltage"] .blocks-view{background-color:var(--canvas);background-image:linear-gradient(rgba(124,77,255,.11) 1px,transparent 1px),linear-gradient(90deg,rgba(124,77,255,.11) 1px,transparent 1px);background-size:26px 26px}
-:root[data-theme="voltage"] .tab.active{box-shadow:inset 0 -2px 0 var(--accent),0 0 14px -3px var(--accent)}
-:root[data-theme="voltage"] .winbar-mark,:root[data-theme="voltage"] .mark,:root[data-theme="voltage"] .agent-ava{box-shadow:0 0 12px rgba(255,46,151,.55)}
-:root[data-theme="voltage"] .bv-prompt,:root[data-theme="voltage"] .bvb-p{text-shadow:0 0 10px rgba(255,46,151,.5)}
-:root[data-theme="voltage"] .p-path{color:var(--accent-2)} /* cyan path, per artifact */
-:root[data-theme="voltage"] .tt-model,:root[data-theme="voltage"] .lib-pill{box-shadow:0 0 10px -2px var(--accent-line)}
+/* .t-glass — translucent frosted panels floating over a gradient of the theme's accents. */
+.t-glass body{background:linear-gradient(165deg,var(--canvas),var(--bg))}
+.t-glass body::before{content:"";position:fixed;inset:0;z-index:0;pointer-events:none;
+  background:radial-gradient(130% 100% at 8% -8%,color-mix(in srgb,var(--accent) 42%,transparent),transparent 55%),radial-gradient(120% 110% at 102% 12%,color-mix(in srgb,var(--accent-2) 32%,transparent),transparent 55%)}
+.t-glass .app{position:relative;z-index:1;background:transparent}
+.t-glass .sidebar,.t-glass .winbar,.t-glass .titlebar,.t-glass .tabstrip,.t-glass .pane-tabs,.t-glass .statusbar,.t-glass .agent-head{
+  background:rgba(255,255,255,.05);backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);border-color:rgba(255,255,255,.1)}
+/* blocks view still covers the live xterm (its own gradient), with frosted cards on top */
+.t-glass .term-area{background:transparent}
+.t-glass .blocks-view{background:linear-gradient(170deg,var(--surface),var(--bg))}
+.t-glass .bv-scroll,.t-glass .bv-input{background:transparent}
+.t-glass .bvb{background:rgba(255,255,255,.06);border-color:rgba(255,255,255,.12);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px)}
+.t-glass .bvb-cmd{background:rgba(255,255,255,.07);border-bottom-color:rgba(255,255,255,.1)}
+.t-glass .lib-item:hover,.t-glass .file-item:hover{background:rgba(255,255,255,.07)}
+.t-glass .tab.active{background:rgba(255,255,255,.06);box-shadow:inset 0 -2px 0 var(--accent-2)}
+.t-glass .p-path{color:var(--path,var(--accent-2))} /* uses the theme's --path if set, else accent-2 */
+
+/* .t-neon — synthwave grid canvas, accent glow, and accent-2 as the second accent. */
+.t-neon .blocks-view{background-color:var(--canvas);background-image:linear-gradient(color-mix(in srgb,var(--accent) 12%,transparent) 1px,transparent 1px),linear-gradient(90deg,color-mix(in srgb,var(--accent) 12%,transparent) 1px,transparent 1px);background-size:26px 26px}
+.t-neon .tab.active{box-shadow:inset 0 -2px 0 var(--accent),0 0 14px -3px var(--accent)}
+.t-neon .winbar-mark,.t-neon .mark,.t-neon .agent-ava{box-shadow:0 0 12px color-mix(in srgb,var(--accent) 55%,transparent)}
+.t-neon .bv-prompt,.t-neon .bvb-p{text-shadow:0 0 10px color-mix(in srgb,var(--accent) 50%,transparent)}
+.t-neon .tt-model,.t-neon .lib-pill{box-shadow:0 0 10px -2px var(--accent-line)}
+.t-neon .p-path{color:var(--accent-2)}
+
+/* .t-light-tabs — grey tab strip so the white active tab clearly pops (light themes). */
+.t-light-tabs .pane-tabs{background:var(--surface-2)}
+.t-light-tabs .tab.active{background:var(--surface);box-shadow:inset 0 -2.5px 0 var(--accent),0 1px 4px rgba(20,40,60,.08)}
+.t-light-tabs .tab:hover:not(.active){background:rgba(20,30,45,.04)}
 *{box-sizing:border-box}
 html,body,#app{height:100%;margin:0}
 body{background:var(--bg);color:var(--text);font-family:var(--sans);font-size:14px;-webkit-font-smoothing:antialiased;overflow:hidden}

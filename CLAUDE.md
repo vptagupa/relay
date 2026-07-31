@@ -19,8 +19,8 @@ These are the skills and principles you bring to every change. Apply them; call 
 
 ### SOLID — module & type design
 - **S — Single Responsibility.** One module/function/type, one reason to change. `pty.ts`, `blocks.ts`, `store.ts` are good examples; `renderer.ts` is the counter‑example — split cohesive concerns (tabs, layout, blocks view, library, agent panel) out of it rather than growing it.
-- **O — Open/Closed.** Extend by *adding data*, not editing components. A new theme = one `[data-theme]` token block + one `TEMPLATES`/`XTERM_THEMES` entry, no component edits. A new shell = one branch in the shell‑integration map. Favor config/lookup tables over switch‑statements sprinkled across the code.
-- **L — Liskov Substitution.** Every implementation must honor its contract everywhere it's used. Both `LNode` variants (leaf vs split) must be handled at every use site; a parser's `close()` must behave like the interface promises. **Every `[data-theme]` must define the *full* token set** — a partial theme silently breaks components (this bit us with undefined `--c-green`/`--c-blue`).
+- **O — Open/Closed.** Extend by *adding data*, not editing components. A new theme = **one `Theme` object in `src/themes.ts`** (vars + xterm palette + swatch + traits); nothing else changes. A new shell = one branch in the shell‑integration map. Favor config/lookup tables over switch‑statements sprinkled across the code.
+- **L — Liskov Substitution.** Every implementation must honor its contract everywhere it's used. Both `LNode` variants (leaf vs split) must be handled at every use site; a parser's `close()` must behave like the interface promises. **Every theme in the registry must define the *full* `vars` set** — a partial theme silently breaks components (this bit us with undefined `--c-green`/`--c-blue`).
 - **I — Interface Segregation.** Keep the exposed surface small and purpose‑specific. The preload `contextBridge` API is narrow, typed methods — not a god‑object; don't make callers depend on options/methods they don't use, and split fat option bags.
 - **D — Dependency Inversion.** Depend on abstractions, not concretions. The renderer talks to `window.relay` (the preload contract), **never** `ipcRenderer`/Node directly — the IPC boundary is the inversion seam. Logic that reaches straight into the DOM or a global singleton is hard to test; pass dependencies in.
 
@@ -71,7 +71,8 @@ A cross‑platform terminal app (Windows focus) with a Warp/Wave‑style **comma
 | `src/store.ts` | Persistence: **`relay.json`** = `{ sessions, settings }` (rare writes), **`workspace.json`** = open‑tab snapshot (frequent). Atomic (temp‑file + rename), serialized, dedup‑loaded. |
 | `src/shared/types.ts`, `src/shared/models.ts` | Cross‑boundary types and model registry. |
 | `src/agent/*` | Agent loop + tools. |
-| `src/styles.css` | All styles + the 5‑theme token system. |
+| `src/themes.ts` | **The theme registry — single source of truth.** Each theme = CSS vars + xterm palette + picker swatch + structural traits. Add a theme here and nothing else changes. |
+| `src/styles.css` | All component styles (read theme vars) + the `.t-<trait>` structural add‑ons (`glass`, `neon`, `light-tabs`). No palettes live here. |
 | `forge.config.ts`, `vite.*.config.ts` | Packaging + bundling. |
 
 ## Build / run / verify workflow
@@ -98,7 +99,7 @@ launch: %LOCALAPPDATA%\relay_terminal\Relay.exe
 ## Project conventions (specifics for this repo)
 
 - **Match the surrounding code**: dense, single‑file style with comments that explain *why* (ConPTY repaint avoidance, flush‑on‑close, bracketed‑paste, etc.). Keep that comment discipline.
-- **Theming is token‑driven.** Never hardcode colors/radii — use the CSS vars (`--bg`, `--surface`, `--accent`, `--r`, `--pad`, `--on-accent`, …). Each theme is a `:root[data-theme="<name>"]` block: `graphite` (default), `ember`, `voltage`, `aurora`, `daylight`. Space & shape (`--r`, `--gap`, `--pad`, `--glass`) are per‑theme. The xterm palette per theme lives in `XTERM_THEMES` in `renderer.ts`.
+- **Theming is registry‑driven.** All themes live in **`src/themes.ts`** (`THEMES` array): `graphite` (default), `ember`, `voltage`, `aurora`, `daylight`. Each object holds the CSS vars (colors + space/shape: `--r`, `--gap`, `--pad`, `--glass`, …), the xterm palette, a picker swatch, and `traits`. `applyThemeVars()` writes the vars onto `<html>` and toggles a `.t-<trait>` class. **Never hardcode colors/radii in components** — read the vars. Structural theme effects belong in a reusable `.t-<trait>` rule (styles.css), not a `[data-theme="x"]` selector.
 - **Persisted‑but‑not‑obvious state** goes through `store.ts`; keep `relay.json` (Library/settings) and `workspace.json` (tabs) separate.
 - **Commits:** work on `main`; end commit messages with
   `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>`.
