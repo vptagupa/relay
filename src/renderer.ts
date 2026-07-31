@@ -110,7 +110,10 @@ async function newTab(seed?: Partial<OpenTab> & { libId?: string }, activate = t
     }
     return true;
   });
-  term.onSelectionChange(() => { if (state.active === id) refreshPill(undefined, undefined, true); }); // show the ★ pill for terminal selections
+  // Only (re)show the pill while a selection actually exists. A full-screen TUI (Claude Code) redraws
+  // constantly and clears the xterm selection, which would otherwise fire this with an empty selection
+  // and hide the pill the instant it appeared. Real dismissal is click-away / Escape / after save.
+  term.onSelectionChange(() => { if (state.active === id && (term.getSelection() || '').trim()) refreshPill(undefined, undefined, true); });
   let saveT: any;
   term.onData(() => { clearTimeout(saveT); saveT = setTimeout(persistWorkspace, 1500); }); // keep the persisted snapshot fresh
   if (activate) {
@@ -871,7 +874,9 @@ function refreshPill(mx?: number, my?: number, allowXterm = false) {
   // Only offer to bookmark the xterm selection when the interaction actually came from a terminal —
   // otherwise the persistent xterm selection re-pops the pill on every click elsewhere.
   if (allowXterm) { const x = xtermSelection(); if (x && x.length <= 800) { pendingBkmText = x; showBkmPopAt(mx ?? lastMouse.x, my ?? lastMouse.y); return; } }
-  hideBkmPop();
+  // Nothing to show right now — but DON'T hide here. A full-screen TUI (Claude Code) clears the xterm
+  // selection on every redraw, and hiding on that would make the pill vanish the instant it appeared.
+  // Dismissal is the click-away handler below, Escape, or after a save.
 }
 
 /* --------------------- Blocks (Warp-style) main view --------------------- */
