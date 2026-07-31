@@ -12,6 +12,7 @@ import { ICON_SPRITE } from './icons';
 import { type Tab, state, activeTab, gTab, groupTabs } from './state';
 import { type PalAction, initPalette, openPalette, closePalette, renderPalette, palMove, palRun, palClick } from './palette';
 import { groupOf, addToList, reorderBookmark, removeGroup } from './bookmarks';
+import { toast, makeEditable } from './ui';
 import type { Settings, SavedSession, AgentEvent, ApprovalRequest, ChatTurn, OpenTab, Block, Bookmark, BookmarkGroup } from './shared/types';
 
 // TEMP DIAG: surface full stacks (minify is off) for the init crash.
@@ -207,13 +208,7 @@ for (const s of ['#termEmpty', ...PANE, ...P_TABS, ...P_HOST, ...P_VIEW, ...P_SC
 // Themes (palette + terminal colors + traits) live in the single registry at src/themes.ts.
 const activeTheme = (): Theme => themeById(state.settings.template);
 function activeXterm(): Record<string, string> { return activeTheme().xterm; }
-let toastT: ReturnType<typeof setTimeout> | null = null;
-function toast(msg: string, ok = false) {
-  const w = $('#toastWrap');
-  w.innerHTML = `<div class="toast ${ok ? 'ok' : ''}"><span class="tdot"></span>${esc(msg)}</div>`;
-  if (toastT) clearTimeout(toastT); // don't let a prior toast's timer clear this newer one early
-  toastT = setTimeout(() => { w.innerHTML = ''; toastT = null; }, 2600);
-}
+// toast + makeEditable (shared UI helpers) live in ./ui — imported above.
 // Move the item identified by dragId to before/after targetId within arr.
 function reorderById<T>(arr: T[], getId: (x: T) => string, dragId: string, targetId: string, before: boolean) {
   const from = arr.findIndex((x) => getId(x) === dragId); if (from < 0) return;
@@ -222,30 +217,6 @@ function reorderById<T>(arr: T[], getId: (x: T) => string, dragId: string, targe
   if (to < 0) { arr.push(item); return; }
   if (!before) to += 1;
   arr.splice(to, 0, item);
-}
-function makeEditable(el: HTMLElement, commit: (v: string) => void, onDone?: () => void) {
-  const dragAnc = el.closest('[draggable="true"]') as HTMLElement | null; // don't drag while renaming
-  if (dragAnc) dragAnc.draggable = false;
-  const original = el.textContent || '';
-  el.setAttribute('contenteditable', 'true');
-  el.focus();
-  const sel = window.getSelection(); const r = document.createRange();
-  r.selectNodeContents(el); sel?.removeAllRanges(); sel?.addRange(r);
-  let finished = false;
-  const done = (save: boolean) => {
-    if (finished) return; finished = true;
-    el.onblur = null; el.onkeydown = null; // detach BEFORE blur so cancel can't re-commit via onblur
-    el.removeAttribute('contenteditable');
-    if (dragAnc) dragAnc.draggable = true;
-    if (save) commit(el.textContent?.trim() || ''); else el.textContent = original; // Escape restores the old text
-    el.blur();
-    onDone?.(); // always runs, on commit OR cancel
-  };
-  el.onkeydown = (e) => {
-    if (e.key === 'Enter') { e.preventDefault(); done(true); }
-    else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); done(false); } // don't let Escape also close the panel
-  };
-  el.onblur = () => done(true);
 }
 function shortCwd(c: string) { const h = state.settings.workspace; return c && h && c.startsWith(h) ? '…' + (c.slice(h.length) || '/') : (c || '~'); }
 // Real identity + a home-relative cwd for the Blocks-view prompt line (agent@host ~/path $).
