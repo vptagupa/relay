@@ -14,6 +14,7 @@ import { type PalAction, initPalette, openPalette, closePalette, renderPalette, 
 import { groupOf, addToList, reorderBookmark, removeGroup } from './bookmarks';
 import { toast, makeEditable } from './ui';
 import { filterHistory, railEntry } from './history';
+import { initFiles, renderFiles } from './files';
 import { initBlockView, blockHtml, bvBlockHtml, collapsedBlocks, fmtDur } from './block-view';
 import type { Settings, SavedSession, AgentEvent, ApprovalRequest, ChatTurn, OpenTab, Block, Bookmark, BookmarkGroup } from './shared/types';
 
@@ -574,20 +575,7 @@ function flushTabToLibrary(t: Tab) {
 }
 
 /* ----------------------------- file browser (follows the active terminal) ----------------------------- */
-async function renderFiles() {
-  const target = state.browsePath || activeTab()?.cwd || state.settings.workspace || '';
-  const res = await relay.fsList(target);
-  const el = $('#fileList');
-  if (res.error) { el.innerHTML = `<div class="lib-empty">${esc(res.error)}</div>`; return; }
-  state.browse = res; state.browsePath = res.path;
-  $('#filesPath').textContent = res.path || '—'; $('#filesPath').title = res.path;
-  const rows = res.entries.map((e: { name: string; isDir: boolean }) => `
-    <div class="file-item" data-fpath="${esc(res.path + '/' + e.name)}" data-dir="${e.isDir}">
-      <span class="file-ic ${e.isDir ? 'dir' : ''}">${svgIcon(e.isDir ? 'i-folder' : 'i-file', 15)}</span><span class="file-name">${esc(e.name)}</span>
-    </div>`).join('');
-  const note = res.truncated ? `<div class="lib-empty">Showing first ${res.entries.length.toLocaleString()} items — folder is larger.</div>` : '';
-  el.innerHTML = (rows || '<div class="lib-empty">(empty folder)</div>') + note;
-}
+// The Files sidebar (renderFiles + navigate/open wiring) lives in ./files — imported above.
 function openSession(s: SavedSession) {
   // If this Library entry is already open in a tab, just focus it — don't duplicate.
   const open = state.tabs.find((t) => (t.libId && t.libId === s.id) || (!!s.termId && t.id === s.termId));
@@ -1480,15 +1468,7 @@ $('#mainDivider').addEventListener('mousedown', (e) => {
 });
 
 // file browser
-$('#filesUp').onclick = () => { if (state.browse && state.browse.parent && state.browse.parent !== state.browse.path) { state.browsePath = state.browse.parent; renderFiles(); } };
-$('#fileList').addEventListener('click', async (e) => {
-  const el = (e.target as HTMLElement).closest('[data-fpath]') as HTMLElement | null; if (!el) return;
-  const p = el.dataset.fpath!;
-  if (el.dataset.dir === 'true') { state.browsePath = p; renderFiles(); return; }
-  const r = await relay.fsOpen(p);
-  const name = p.split('/').pop();
-  toast(r.method === 'vscode' ? `Opening ${name} in VS Code` : r.method === 'error' ? `Couldn't open ${name}` : `Opening ${name}`, r.method !== 'error');
-});
+initFiles({ fsList: (p: string) => relay.fsList(p), fsOpen: (p: string) => relay.fsOpen(p) }); // Files sidebar: wire events + supply the fs bridge
 
 // agent
 $('#btnAgent').onclick = openAgent;
