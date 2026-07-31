@@ -5,7 +5,7 @@ import { SerializeAddon } from '@xterm/addon-serialize';
 import { MODELS, modelById } from './shared/models';
 import { THEMES, themeById, DEFAULT_THEME, type Theme } from './themes';
 import { type LNode, type Split, isLeaf, leaves, replaceLeaf, removeLeaf, siblingLeaf, isValidLayout } from './layout';
-import { stripAnsi, collapseCR, ansiToHtml } from './ansi';
+import { stripAnsi, collapseCR } from './ansi';
 import { type ExFmt, realBlock, cmdText, cmdRaw, buildExport } from './blocks-text';
 import { $, E, esc, uid, svgIcon } from './dom';
 import { ICON_SPRITE } from './icons';
@@ -14,6 +14,7 @@ import { type PalAction, initPalette, openPalette, closePalette, renderPalette, 
 import { groupOf, addToList, reorderBookmark, removeGroup } from './bookmarks';
 import { toast, makeEditable } from './ui';
 import { filterHistory, railEntry } from './history';
+import { initBlockView, blockHtml, bvBlockHtml, collapsedBlocks, fmtDur } from './block-view';
 import type { Settings, SavedSession, AgentEvent, ApprovalRequest, ChatTurn, OpenTab, Block, Bookmark, BookmarkGroup } from './shared/types';
 
 // TEMP DIAG: surface full stacks (minify is off) for the init crash.
@@ -220,14 +221,9 @@ function reorderById<T>(arr: T[], getId: (x: T) => string, dragId: string, targe
   arr.splice(to, 0, item);
 }
 function shortCwd(c: string) { const h = state.settings.workspace; return c && h && c.startsWith(h) ? '…' + (c.slice(h.length) || '/') : (c || '~'); }
-// Real identity + a home-relative cwd for the Blocks-view prompt line (agent@host ~/path $).
-const SYS = ((relay.sys as { user: string; host: string; home: string }) || { user: 'user', host: 'relay', home: '' });
-function promptCwd(c: string) {
-  let p = (c || SYS.home || '~').replace(/\\/g, '/');
-  const home = (SYS.home || '').replace(/\\/g, '/');
-  if (home && (p === home || p.startsWith(home + '/'))) p = '~' + p.slice(home.length);
-  return p;
-}
+// The command-block renderers (blockHtml/bvBlockHtml) + their prompt identity live in ./block-view;
+// hand it the real user/host/home from the preload bridge for the Blocks-view prompt line.
+initBlockView(relay.sys as { user: string; host: string; home: string } | undefined);
 // Last path segment of a folder path (handles both \ and /), for naming a folder's terminal.
 function baseName(p: string): string { const s = p.replace(/[\\/]+$/, ''); const i = Math.max(s.lastIndexOf('\\'), s.lastIndexOf('/')); return (i >= 0 ? s.slice(i + 1) : s) || s; }
 
@@ -890,11 +886,8 @@ async function sendAgent() {
 /* ----------------------------- command history (blocks) ----------------------------- */
 let histFilterFail = false;
 let histQuery = '';
-// Blocks the user has collapsed (by block id). Kept out of the DOM so it survives the
-// Blocks-view re-renders that rebuild innerHTML — otherwise a collapse would flicker back open.
-const collapsedBlocks = new Set<string>();
-function fmtDur(ms: number): string { return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(ms < 10000 ? 1 : 0)}s`; }
-// ANSI text helpers (stripAnsi/collapseCR/ansiToHtml) live in ./ansi — imported above.
+// collapsedBlocks + fmtDur + the block renderers (blockHtml/bvBlockHtml) live in ./block-view.
+// ANSI text helpers live in ./ansi (renderer still uses stripAnsi/collapseCR directly).
 // Structured command blocks stream in from the shell-integration parser (main process).
 relay.onPtyBlock((id: string, ev: { type: 'start' | 'update' | 'end'; block: Block }) => {
   const t = state.tabs.find((x) => x.id === id); if (!t) return;
@@ -926,54 +919,6 @@ function maybeNotify(t: Tab, b: Block) {
     const n = new Notification(`${ok ? '✓' : '✗'} ${cmd.slice(0, 64)}`, { body: `${t.name} · ${ok ? 'done' : 'exit ' + b.exitCode} · ${fmtDur(dur)}` });
     n.onclick = () => { relay.winFocus?.(); switchTab(t.id); };
   } catch { /* notifications unavailable */ }
-}
-function blockHtml(b: Block, color = false): string {
-  const badge = b.running ? '<span class="hb-badge run">running…</span>'
-    : b.exitCode === 0 ? '<span class="hb-badge ok">✓ 0</span>'
-    : b.exitCode != null ? `<span class="hb-badge fail">✗ ${b.exitCode}</span>` : '';
-  const dur = b.endedAt && b.startedAt ? fmtDur(b.endedAt - b.startedAt) : '';
-  const d = new Date(b.startedAt); const clock = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
-  const cmd = stripAnsi(b.command).replace(/[\r\n]+/g, ' ').trim();
-  if (b.interactive) {
-    return `<div class="hb interactive" data-bid="${b.id}">
-      <div class="hb-head"><span class="hb-p" style="color:var(--c-blue)">◧</span><span class="hb-cmd">${cmd ? esc(cmd) : 'interactive session'}</span><span class="hb-meta">${dur ? `<span>${dur}</span>` : ''}<span>${clock}</span></span>${badge}</div>
-      <div class="hb-int">Interactive full-screen session — ran live in the terminal (screen not captured as history).</div>
-      <div class="hb-actions"><button data-act="copycmd">Copy cmd</button><button data-act="rerun">Re-run</button><button data-act="pin">${b.pinned ? '★ Pinned' : '☆ Pin'}</button><button data-act="share">Share</button></div>
-    </div>`;
-  }
-  const plain = collapseCR(stripAnsi(b.output)).trim();
-  const out = color ? ansiToHtml(collapseCR(b.output)) : esc(plain);
-  const failed = b.exitCode != null && b.exitCode !== 0;
-  return `<div class="hb${collapsedBlocks.has(b.id) ? ' collapsed' : ''}${b.pinned ? ' pin' : ''}" data-bid="${b.id}">
-    <div class="hb-head"><span class="hb-p">❯</span><span class="hb-cmd">${cmd ? esc(cmd) : '<span class="dim">prompt</span>'}</span><span class="hb-meta">${dur ? `<span>${dur}</span>` : ''}<span>${clock}</span></span>${badge}<span class="hb-chev" data-act="collapse" title="Collapse / expand">▾</span></div>
-    <div class="hb-out">${plain ? out : '<span class="dim">(no output)</span>'}</div>
-    <div class="hb-actions"><button data-act="copycmd">Copy cmd</button><button data-act="copyout">Copy output</button><button data-act="rerun">Re-run</button><button data-act="pin">${b.pinned ? '★ Pinned' : '☆ Pin'}</button><button data-act="share">Share</button>${failed ? '<button data-act="fix" class="fix">Ask agent to fix</button>' : ''}</div>
-  </div>`;
-}
-// Blocks-view (Warp-style transcript) renderer — matches the artifact: a colored
-// `user@host ~/path $ command` prompt line, output beneath, subtle left-accent band,
-// hover-revealed actions. Output keeps its ANSI colors.
-function bvBlockHtml(b: Block): string {
-  const cwd = b.cwd || activeTab()?.cwd || '';
-  const cmd = cmdRaw(b); // display exactly as typed — newlines preserved (CSS renders them)
-  const d = new Date(b.startedAt);
-  const clock = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`;
-  const dur = b.endedAt && b.startedAt ? fmtDur(b.endedAt - b.startedAt) : '';
-  // Artifact-style prompt line: user@host  ~/path  (accent user · dim host · path).
-  const prompt = `<span class="p-user">${esc(SYS.user)}</span><span class="p-at">@</span><span class="p-host">${esc(SYS.host)}</span> <span class="p-path">${esc(promptCwd(cwd))}</span>`;
-  if (b.interactive) {
-    return `<div class="bvb int" data-bid="${b.id}" title="ran in ${esc(promptCwd(cwd))}"><div class="bvb-cmd"><span class="bvb-line">${prompt} <span class="bvb-text">${esc(cmd || 'interactive')}</span></span><span class="bvb-badge int">tui</span><span class="bvb-ts">${clock}</span></div><div class="bvb-out"><span class="o-dim">— interactive full-screen session · ran live in the terminal —</span></div></div>`;
-  }
-  const failed = b.exitCode != null && b.exitCode !== 0;
-  const cls = b.running ? 'run' : failed ? 'fail' : 'ok';
-  const badge = b.running ? '<span class="bvb-badge run">running…</span>'
-    : failed ? `<span class="bvb-badge fail">exit ${b.exitCode}</span>`
-    : `<span class="bvb-badge ok">✓</span>`; // clean green check on success (duration moves to the hover timestamp)
-  const out = ansiToHtml(collapseCR(b.output));
-  return `<div class="bvb ${cls}" data-bid="${b.id}" title="ran in ${esc(promptCwd(cwd))}">
-    <div class="bvb-cmd"><span class="bvb-line">${prompt} <span class="bvb-text">${cmd ? esc(cmd) : ''}</span></span>${badge}<span class="bvb-ts">${dur ? esc(dur) + ' · ' : ''}${clock}</span>
-      <span class="bvb-actions"><button data-act="copyout" title="Copy output">copy</button><button data-act="rerun" title="Re-run">re-run</button><button data-act="pin" title="Pin">${b.pinned ? '★' : 'pin'}</button><button data-act="share" title="Export block">share</button>${failed ? '<button data-act="fix" title="Ask the agent to fix">ask agent</button>' : ''}</span>
-    </div>${out.trim() ? `<div class="bvb-out">${out}</div>` : ''}</div>`;
 }
 function renderHistory() {
   const list = $('#histList'); const rail = $('#histRail'); const t = activeTab();
