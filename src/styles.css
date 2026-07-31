@@ -4,8 +4,11 @@
   --shadow-sm:0 3px 12px -4px rgba(0,0,0,.6);
   --mono:ui-monospace,"SF Mono","Cascadia Code","JetBrains Mono",Menlo,Consolas,monospace;
   --sans:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif;
-  /* --r/--r-sm/--r-lg (shape), --glass/--chrome (depth) and --gap/--pad (space) are per-theme below */
+  /* --r/--r-sm/--r-lg (shape) and --gap/--pad (space) are per-theme below; --sel tints ::selection */
 }
+/* Themed text selection (DOM only — xterm draws its own selection on canvas). */
+::selection{background:var(--sel);color:var(--text)}
+::-moz-selection{background:var(--sel);color:var(--text)}
 /* Theme palettes (colors + space/shape) are applied to <html> from the registry in src/themes.ts
    (renderer applyThemeVars). Nothing here defines a theme; components below just read the vars.
    Corners follow each theme's --r. */
