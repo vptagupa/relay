@@ -55,7 +55,7 @@ export function appHtml(panes: string): string {
       <div class="main-divider" id="mainDivider" title="Drag to resize sidebar"></div>
       <section class="term-area">
         <div class="tabstrip">
-          <button class="side-toggle" id="btnSidebar" title="Toggle library">▤</button>
+          <button class="side-toggle" id="btnSidebar" title="Toggle library (⌘B)">▤</button>
           <button class="tab-add" id="btnNewTab" title="New terminal (⌘T)"><svg width="16" height="16"><use href="#i-plus"/></svg></button>
           <button class="tab-add" id="btnAddFolder" title="Open folder in new terminal (⌘⇧O)"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h5l2 2h9a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1z"/><line x1="12" y1="11" x2="12" y2="16"/><line x1="9.5" y1="13.5" x2="14.5" y2="13.5"/></svg></button>
           <button class="tab-add cc" id="btnClaude" title="Launch Claude Code (⌘⇧L)"><svg width="16" height="16"><use href="#i-spark"/></svg></button>

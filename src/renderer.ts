@@ -108,6 +108,12 @@ async function newTab(seed?: Partial<OpenTab> & { libId?: string }, activate = t
     if (e.type === 'keydown' && e.key === 'Enter' && e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
       e.preventDefault(); relay.ptyWrite(id, '\n'); return false; // suppress xterm's default \r
     }
+    // Ctrl+B is a global app shortcut (toggle sidebar). Ignore it here — returning false stops xterm
+    // from emitting ^B (\x02) to the shell WITHOUT canceling the event, so it still bubbles up to the
+    // document keydown handler that does the toggle. Otherwise a focused terminal swallows the chord.
+    if (e.type === 'keydown' && (e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'b') {
+      return false;
+    }
     return true;
   });
   // Only (re)show the pill while a selection actually exists. A full-screen TUI (Claude Code) redraws
@@ -1538,6 +1544,7 @@ document.addEventListener('keydown', (e) => {
   else if (mod && e.shiftKey && e.key.toLowerCase() === 'l') { e.preventDefault(); newClaudeTab(); } // launch Claude Code (moved off Ctrl+Shift+C)
   else if (mod && e.shiftKey && e.key.toLowerCase() === 'h') { e.preventDefault(); $('#historyPanel').classList.contains('show') ? closeHistory() : openHistory(); }
   else if (mod && e.shiftKey && e.key.toLowerCase() === 'b') { e.preventDefault(); toggleBlocksView(); }
+  else if (mod && !e.shiftKey && e.key.toLowerCase() === 'b') { e.preventDefault(); toggleSidebar(); } // toggle the left sidebar
   else if (mod && e.shiftKey && e.key.toLowerCase() === 'e') { e.preventDefault(); splitClone('row'); }
   else if (mod && e.key === '\\') { e.preventDefault(); splitClone('row'); }                                    // VS Code: split
   else if (mod && e.altKey && e.key === 'ArrowRight') { e.preventDefault(); moveActiveToGroup(1); }              // move tab to right group
