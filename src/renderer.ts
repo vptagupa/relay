@@ -10,6 +10,7 @@ import { type ExFmt, realBlock, cmdText, cmdRaw, buildExport } from './blocks-te
 import { $, E, esc, uid, svgIcon } from './dom';
 import { ICON_SPRITE } from './icons';
 import { type Tab, state, activeTab, gTab, groupTabs } from './state';
+import { type PalAction, initPalette, openPalette, closePalette, renderPalette, palMove, palRun, palClick } from './palette';
 import type { Settings, SavedSession, AgentEvent, ApprovalRequest, ChatTurn, OpenTab, Block, Bookmark, BookmarkGroup } from './shared/types';
 
 // TEMP DIAG: surface full stacks (minify is off) for the init crash.
@@ -1267,8 +1268,8 @@ function showApproval(req: ApprovalRequest) {
 }
 
 /* ----------------------------- command palette ----------------------------- */
-interface PalAction { g: string; t: string; run: () => void; }
-let palItems: PalAction[] = []; let palSel = 0;
+// The command-palette machinery (open/close/filter/render/keyboard) lives in ./palette. This is
+// just the action registry it renders — kept here because each action calls an app function.
 function paletteActions(): PalAction[] {
   const base: PalAction[] = [
     { g: 'Terminal', t: 'New terminal', run: () => newTab() },
@@ -1306,19 +1307,7 @@ function paletteActions(): PalAction[] {
   const lib: PalAction[] = state.library.map((s) => ({ g: 'Open from Library', t: `${s.name}  ·  ${modelById(s.model).short}`, run: () => openSession(s) }));
   return base.concat(models, lib);
 }
-function renderPalette(q: string) {
-  const all = paletteActions();
-  palItems = q ? all.filter((a) => (a.t + ' ' + a.g).toLowerCase().includes(q.toLowerCase())) : all;
-  palSel = 0;
-  if (!palItems.length) { $('#palList').innerHTML = '<div class="pal-empty">No matches</div>'; return; }
-  let html = '', lastG = '';
-  palItems.forEach((a, i) => { if (a.g !== lastG) { html += `<div class="pal-group">${esc(a.g)}</div>`; lastG = a.g; } html += `<div class="pal-item ${i === 0 ? 'sel' : ''}" data-i="${i}">${esc(a.t)}</div>`; });
-  $('#palList').innerHTML = html;
-}
-function openPalette() { renderPalette(''); ($('#palInput') as HTMLInputElement).value = ''; $('#palette').classList.add('show'); $('#scrim').classList.add('show'); setTimeout(() => ($('#palInput') as HTMLElement).focus(), 20); }
-function closePalette() { $('#palette').classList.remove('show'); if (!$('#settings').classList.contains('show')) $('#scrim').classList.remove('show'); }
-function palMove(d: number) { if (!palItems.length) return; palSel = (palSel + d + palItems.length) % palItems.length; [...document.querySelectorAll('#palList .pal-item')].forEach((el, i) => el.classList.toggle('sel', i === palSel)); (document.querySelector('#palList .pal-item.sel') as HTMLElement)?.scrollIntoView({ block: 'nearest' }); }
-function palRun() { const a = palItems[palSel]; if (a) { closePalette(); a.run(); } }
+initPalette(paletteActions); // hand the registry to the palette module (open/close/render/keyboard)
 
 /* ----------------------------- settings ----------------------------- */
 function reflectSettings() {
@@ -1762,7 +1751,7 @@ $('#modelMenu').addEventListener('click', (e) => { const it = (e.target as HTMLE
 // palette
 $('#palInput').addEventListener('input', () => renderPalette(($('#palInput') as HTMLInputElement).value));
 $('#palInput').addEventListener('keydown', (e) => { const ev = e as KeyboardEvent; if (ev.key === 'ArrowDown') { ev.preventDefault(); palMove(1); } else if (ev.key === 'ArrowUp') { ev.preventDefault(); palMove(-1); } else if (ev.key === 'Enter') { ev.preventDefault(); palRun(); } else if (ev.key === 'Escape') closePalette(); });
-$('#palList').addEventListener('click', (e) => { const it = (e.target as HTMLElement).closest('[data-i]') as HTMLElement | null; if (it) { palSel = +it.dataset.i!; palRun(); } });
+$('#palList').addEventListener('click', (e) => { const it = (e.target as HTMLElement).closest('[data-i]') as HTMLElement | null; if (it) palClick(+it.dataset.i!); });
 
 // settings
 $('#btnSettings').onclick = openSettings;
