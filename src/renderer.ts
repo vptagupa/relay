@@ -5,6 +5,7 @@ import { SerializeAddon } from '@xterm/addon-serialize';
 import { MODELS, modelById } from './shared/models';
 import { themeById, DEFAULT_THEME } from './themes';
 import { activeTheme, activeXterm, TEMPLATES, curTemplate, applyThemeVars, renderThemeGrid } from './theme';
+import { sortSessions } from './library';
 import { type LNode, type Split, isLeaf, leaves, replaceLeaf, removeLeaf, siblingLeaf, isValidLayout } from './layout';
 import { stripAnsi, collapseCR } from './ansi';
 import { type ExFmt, realBlock, cmdText, cmdRaw, buildExport } from './blocks-text';
@@ -526,14 +527,8 @@ async function toggleAutosave() {
 }
 
 /* ----------------------------- library ----------------------------- */
-function sortedLibrary(): SavedSession[] {
-  const s = state.settings.librarySort;
-  if (s === 'custom') return [...state.library]; // manual drag order (stored array order)
-  return [...state.library].sort((a, b) =>
-    s === 'name' ? a.name.localeCompare(b.name)
-      : s === 'model' ? (modelById(a.model).name.localeCompare(modelById(b.model).name) || a.name.localeCompare(b.name))
-        : b.lastUsed - a.lastUsed);
-}
+// Pure sort lives in ./library; this reads the current list + mode from state.
+const sortedLibrary = (): SavedSession[] => sortSessions(state.library, state.settings.librarySort);
 function renderLibrary() {
   const el = $('#libList');
   if (!state.library.length) { el.innerHTML = '<div class="lib-empty">No saved terminals yet.<br>Open one and press ⤓ Save.</div>'; return; }
