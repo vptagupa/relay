@@ -37,7 +37,7 @@ export function blockHtml(b: Block, color = false): string {
   const cmd = stripAnsi(b.command).replace(/[\r\n]+/g, ' ').trim();
   if (b.interactive) {
     return `<div class="hb interactive" data-bid="${b.id}">
-      <div class="hb-head"><span class="hb-p" style="color:var(--c-blue)">◧</span><span class="hb-cmd">${cmd ? esc(cmd) : 'interactive session'}</span><span class="hb-meta">${dur ? `<span>${dur}</span>` : ''}<span>${clock}</span></span>${badge}</div>
+      <div class="hb-head"><span class="hb-p" style="color:var(--accent-2)">◧</span><span class="hb-cmd">${cmd ? esc(cmd) : 'interactive session'}</span><span class="hb-meta">${dur ? `<span>${dur}</span>` : ''}<span>${clock}</span></span>${badge}</div>
       <div class="hb-int">Interactive full-screen session — ran live in the terminal (screen not captured as history).</div>
       <div class="hb-actions"><button data-act="copycmd">Copy cmd</button><button data-act="rerun">Re-run</button><button data-act="pin">${b.pinned ? '★ Pinned' : '☆ Pin'}</button><button data-act="share">Share</button></div>
     </div>`;
