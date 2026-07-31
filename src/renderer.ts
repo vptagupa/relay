@@ -13,6 +13,7 @@ const relay = (window as any).relay;
 const $ = <T extends HTMLElement = HTMLElement>(s: string) => document.querySelector(s) as T;
 const uid = () => (crypto as any).randomUUID();
 const esc = (s: string) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]!));
+const svgIcon = (id: string, sz = 16) => `<svg width="${sz}" height="${sz}" aria-hidden="true"><use href="#${id}"/></svg>`; // artifact line-icon set
 
 interface Tab { id: string; name: string; model: string; cwd: string; libId?: string; term: Terminal; fit: FitAddon; ser: SerializeAddon; el: HTMLElement; lastCols?: number; lastRows?: number; tabBg?: string; tabFg?: string; bodyBg?: string; bodyFg?: string; chat: ChatTurn[]; blocks: Block[]; bkNonce: string; cmdHistory: string[]; histIdx: number; liveInteractive: boolean; group: number; }
 
@@ -24,7 +25,7 @@ const state = {
   focus: 0,                              // which group has focus
   layout: { g: 0 } as LNode,             // nested split tree (leaves = pane indices)
   maxG: null as null | number,           // a group temporarily maximized (fills the pane grid)
-  settings: { workspace: null, defaultModel: DEFAULT_MODEL, autoApprove: false, autoSave: true, theme: 'dark', sidebarCollapsed: false, toolbarShown: false, librarySort: 'recent', librarySplit: 0.4, sidebarWidth: 260, hasKey: {} } as Settings,
+  settings: { workspace: null, defaultModel: DEFAULT_MODEL, autoApprove: false, autoSave: true, theme: 'dark', template: 'graphite', sidebarCollapsed: false, toolbarShown: false, librarySort: 'recent', librarySplit: 0.4, sidebarWidth: 260, hasKey: {} } as Settings,
   library: [] as SavedSession[],
   history: [] as ChatTurn[],
   browsePath: '' as string,
@@ -71,6 +72,22 @@ const E = (sel: string): HTMLElement => (_elCache[sel] ??= document.querySelecto
 
 /* ----------------------------- layout ----------------------------- */
 $('#app').innerHTML = `
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+    <symbol id="i-term" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6l5 6-5 6"/><path d="M13 18h7"/></symbol>
+    <symbol id="i-folder" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></symbol>
+    <symbol id="i-file" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></symbol>
+    <symbol id="i-split" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M12 4v16"/></symbol>
+    <symbol id="i-splitdown" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 12h18"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4-4"/></symbol>
+    <symbol id="i-star" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><path d="M12 3l2.6 5.6 6 .8-4.4 4.2 1.1 6L12 17l-5.3 2.6 1.1-6L3.4 9.4l6-.8z"/></symbol>
+    <symbol id="i-spark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v4M12 17v4M3 12h4M17 12h4M6 6l2.5 2.5M15.5 15.5 18 18M18 6l-2.5 2.5M8.5 15.5 6 18"/></symbol>
+    <symbol id="i-grid" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></symbol>
+    <symbol id="i-save" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v11M8 11l4 4 4-4"/><path d="M5 20h14"/></symbol>
+    <symbol id="i-clear" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6H9.5L4 12l5.5 6H20a1 1 0 0 0 1-1V7a1 1 0 0 0-1-1z"/><path d="M13 10l4 4M17 10l-4 4"/></symbol>
+    <symbol id="i-max" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M8 4H5a1 1 0 0 0-1 1v3M16 4h3a1 1 0 0 1 1 1v3M8 20H5a1 1 0 0 1-1-1v-3M16 20h3a1 1 0 0 1 1-1v-3"/></symbol>
+    <symbol id="i-up" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V6M6 12l6-6 6 6"/></symbol>
+  </defs></svg>
   <div class="app">
     <div class="winbar">
       <div class="winbar-brand"><span class="winbar-mark">›_</span><span class="winbar-title">Relay</span></div>
@@ -102,7 +119,7 @@ $('#app').innerHTML = `
         </div>
         <div class="side-divider" id="sideDivider" title="Drag to resize"></div>
         <div class="side-view side-files" id="viewFiles">
-          <div class="side-head"><span class="side-title">Files</span><button class="files-up" id="filesUp" title="Parent folder">↑</button></div>
+          <div class="side-head"><span class="side-title">Files</span><button class="files-up" id="filesUp" title="Parent folder"><svg width="15" height="15"><use href="#i-up"/></svg></button></div>
           <div class="files-path" id="filesPath">—</div>
           <div class="side-list" id="fileList"></div>
         </div>
@@ -112,43 +129,43 @@ $('#app').innerHTML = `
       <section class="term-area">
         <div class="tabstrip">
           <button class="side-toggle" id="btnSidebar" title="Toggle library">▤</button>
-          <button class="tab-add" id="btnNewTab" title="New terminal (⌘T)">+</button>
+          <button class="tab-add" id="btnNewTab" title="New terminal (⌘T)"><svg width="16" height="16"><use href="#i-plus"/></svg></button>
           <button class="tab-add" id="btnAddFolder" title="Open folder in new terminal (⌘⇧O)"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h5l2 2h9a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1z"/><line x1="12" y1="11" x2="12" y2="16"/><line x1="9.5" y1="13.5" x2="14.5" y2="13.5"/></svg></button>
-          <button class="tab-add cc" id="btnClaude" title="Launch Claude Code (⌘⇧L)">✳</button>
+          <button class="tab-add cc" id="btnClaude" title="Launch Claude Code (⌘⇧L)"><svg width="16" height="16"><use href="#i-spark"/></svg></button>
           <div class="tt-spacer"></div>
           <button class="tt-model" id="tabModelBtn" title="Model for this terminal"><span class="dot"></span><span id="tabModelName">Opus 5</span> ▾</button>
-          <button class="tt-icon blocks-toggle on" id="btnBlocks" title="Blocks view / Classic terminal (⌘⇧B)">⊞</button>
-          <button class="tt-icon" id="btnSplitRight" title="Split right — clone this terminal into a pane on the right (⌘⇧E)">◨</button>
-          <button class="tt-icon" id="btnSplitDown" title="Split down — clone this terminal into a pane below">⬓</button>
-          <button class="tt-icon" id="btnBookmarks" title="Bookmarks — highlight a command to save one (⌘⇧K)">★</button>
-          <button class="tt-icon" id="btnSave" title="Save to Library (⌘S)">⤓</button>
-          <button class="tt-icon" id="btnClear" title="Clear terminal (⌃L)">⌫</button>
+          <button class="tt-icon blocks-toggle on" id="btnBlocks" title="Blocks view / Classic terminal (⌘⇧B)"><svg width="16" height="16"><use href="#i-grid"/></svg></button>
+          <button class="tt-icon" id="btnSplitRight" title="Split right — clone this terminal into a pane on the right (⌘⇧E)"><svg width="16" height="16"><use href="#i-split"/></svg></button>
+          <button class="tt-icon" id="btnSplitDown" title="Split down — clone this terminal into a pane below"><svg width="16" height="16"><use href="#i-splitdown"/></svg></button>
+          <button class="tt-icon" id="btnBookmarks" title="Bookmarks — highlight a command to save one (⌘⇧K)"><svg width="16" height="16"><use href="#i-star"/></svg></button>
+          <button class="tt-icon" id="btnSave" title="Save to Library (⌘S)"><svg width="16" height="16"><use href="#i-save"/></svg></button>
+          <button class="tt-icon" id="btnClear" title="Clear terminal (⌃L)"><svg width="16" height="16"><use href="#i-clear"/></svg></button>
         </div>
         <div class="term-stack">
          <div class="pane-grid" id="paneGrid">
           <div class="pane primary" id="primaryPane" data-g="0">
-            <div class="pane-tabs"><div class="tabs" id="tabs"></div><button class="pane-add" data-g="0" title="New terminal in this pane">+</button><button class="pane-max" data-g="0" title="Maximize / restore pane">⛶</button></div>
+            <div class="pane-tabs"><div class="tabs" id="tabs"></div><button class="pane-add" data-g="0" title="New terminal in this pane"><svg width="15" height="15"><use href="#i-plus"/></svg></button><button class="pane-max" data-g="0" title="Maximize / restore pane"><svg width="14" height="14"><use href="#i-max"/></svg></button></div>
             <div class="pane-body">
               <div class="term-host" id="termHost"><div class="term-empty" id="termEmpty">No terminal yet.<br>Press + to open one.</div></div>
               <div class="blocks-view" id="blocksView"><div class="bv-scroll" id="bvScroll"></div><div class="bv-input"><span class="bv-prompt" id="bvPrompt">❯</span><textarea class="bv-cmd" id="bvCmd" rows="1" placeholder="type a command — Enter runs · Shift+Enter new line · ↑ recalls" spellcheck="false" autocomplete="off"></textarea></div></div>
             </div>
           </div>
           <div class="pane tile" id="tilePane" data-g="1" style="display:none">
-            <div class="pane-tabs"><div class="tabs" id="tabs1"></div><button class="pane-add" data-g="1" title="New terminal in this pane">+</button><button class="pane-max" data-g="1" title="Maximize / restore pane">⛶</button><button class="pane-x" data-closeg="1" title="Close this pane">✕</button></div>
+            <div class="pane-tabs"><div class="tabs" id="tabs1"></div><button class="pane-add" data-g="1" title="New terminal in this pane"><svg width="15" height="15"><use href="#i-plus"/></svg></button><button class="pane-max" data-g="1" title="Maximize / restore pane"><svg width="14" height="14"><use href="#i-max"/></svg></button><button class="pane-x" data-closeg="1" title="Close this pane">✕</button></div>
             <div class="pane-body">
               <div class="term-host" id="tileHost"></div>
               <div class="blocks-view" id="blocksView2"><div class="bv-scroll" id="bvScroll2"></div><div class="bv-input"><span class="bv-prompt" id="bvPrompt2">❯</span><textarea class="bv-cmd" id="bvCmd2" rows="1" placeholder="type a command — Enter runs · Shift+Enter new line" spellcheck="false" autocomplete="off"></textarea></div></div>
             </div>
           </div>
           <div class="pane" id="pane2" data-g="2" style="display:none">
-            <div class="pane-tabs"><div class="tabs" id="tabs2"></div><button class="pane-add" data-g="2" title="New terminal in this pane">+</button><button class="pane-max" data-g="2" title="Maximize / restore pane">⛶</button><button class="pane-x" data-closeg="2" title="Close this pane">✕</button></div>
+            <div class="pane-tabs"><div class="tabs" id="tabs2"></div><button class="pane-add" data-g="2" title="New terminal in this pane"><svg width="15" height="15"><use href="#i-plus"/></svg></button><button class="pane-max" data-g="2" title="Maximize / restore pane"><svg width="14" height="14"><use href="#i-max"/></svg></button><button class="pane-x" data-closeg="2" title="Close this pane">✕</button></div>
             <div class="pane-body">
               <div class="term-host" id="host2"></div>
               <div class="blocks-view" id="blocksView3"><div class="bv-scroll" id="bvScroll3"></div><div class="bv-input"><span class="bv-prompt" id="bvPrompt3">❯</span><textarea class="bv-cmd" id="bvCmd3" rows="1" placeholder="type a command — Enter runs · Shift+Enter new line" spellcheck="false" autocomplete="off"></textarea></div></div>
             </div>
           </div>
           <div class="pane" id="pane3" data-g="3" style="display:none">
-            <div class="pane-tabs"><div class="tabs" id="tabs3"></div><button class="pane-add" data-g="3" title="New terminal in this pane">+</button><button class="pane-max" data-g="3" title="Maximize / restore pane">⛶</button><button class="pane-x" data-closeg="3" title="Close this pane">✕</button></div>
+            <div class="pane-tabs"><div class="tabs" id="tabs3"></div><button class="pane-add" data-g="3" title="New terminal in this pane"><svg width="15" height="15"><use href="#i-plus"/></svg></button><button class="pane-max" data-g="3" title="Maximize / restore pane"><svg width="14" height="14"><use href="#i-max"/></svg></button><button class="pane-x" data-closeg="3" title="Close this pane">✕</button></div>
             <div class="pane-body">
               <div class="term-host" id="host3"></div>
               <div class="blocks-view" id="blocksView4"><div class="bv-scroll" id="bvScroll4"></div><div class="bv-input"><span class="bv-prompt" id="bvPrompt4">❯</span><textarea class="bv-cmd" id="bvCmd4" rows="1" placeholder="type a command — Enter runs · Shift+Enter new line" spellcheck="false" autocomplete="off"></textarea></div></div>
@@ -208,6 +225,7 @@ $('#app').innerHTML = `
     <div class="modal-head">Settings</div>
     <div class="modal-sub">API keys are encrypted with your OS keychain and stay in the app's main process — never in this window.</div>
     <div class="modal-body">
+      <div class="field"><label>Theme</label><div class="theme-grid" id="themeGrid"></div><div class="fhint">Recolors the whole app and the terminal. Quick-cycle with the ◐ button in the title bar.</div></div>
       <div class="field"><label>Project folder</label><div class="row"><input id="setWs" readonly placeholder="none"><button class="set" id="setWsBtn">Choose…</button></div></div>
       <div class="field"><label>Anthropic API key (Claude) <span class="opt">optional</span></label><div class="row"><input id="keyAnthropic" type="password" placeholder="blank = use your Claude Code login"><button class="set" data-key="anthropic">Save</button></div><div class="state off" id="stateAnthropic">not set</div><div class="fhint">Leave blank to sign in with your Claude subscription / Claude Code login (or an environment key). Paste a key only to override.</div></div>
       <div class="field"><label>OpenAI API key (GPT)</label><div class="row"><input id="keyOpenai" type="password" placeholder="sk-…"><button class="set" data-key="openai">Save</button></div><div class="state off" id="stateOpenai">not set</div></div>
@@ -246,14 +264,28 @@ $('#app').innerHTML = `
 for (const s of ['#termEmpty', ...PANE, ...P_TABS, ...P_HOST, ...P_VIEW, ...P_SCROLL, ...P_CMD, ...P_PROMPT]) E(s);
 
 /* ----------------------------- helpers ----------------------------- */
-const XTERM_THEME = {
-  background: '#0b0e13', foreground: '#d8dee7', cursor: '#f0b429', cursorAccent: '#0b0e13',
-  selectionBackground: 'rgba(240,180,41,.28)',
-  black: '#0b0e13', red: '#ff7b72', green: '#7ee787', yellow: '#f0b429', blue: '#6cb6ff',
+// One xterm palette per theme template — so the terminal itself follows the chosen theme
+// (a light "Daylight" terminal, a neon "Voltage" one, etc.), not just the app chrome.
+const ANSI_DARK = {
+  black: '#3b3f4a', red: '#ff7b72', green: '#7ee787', yellow: '#f0c674', blue: '#6cb6ff',
   magenta: '#d2a8ff', cyan: '#56d4dd', white: '#d8dee7', brightBlack: '#66717f',
-  brightRed: '#ffa198', brightGreen: '#a2f2b0', brightYellow: '#f7c744', brightBlue: '#89bdff',
+  brightRed: '#ffa198', brightGreen: '#a2f2b0', brightYellow: '#f7d774', brightBlue: '#89bdff',
   brightMagenta: '#e0bbff', brightCyan: '#7ee0e8', brightWhite: '#ffffff',
 };
+const ANSI_LIGHT = {
+  black: '#161b22', red: '#c0341d', green: '#15803d', yellow: '#9a6700', blue: '#1d4ed8',
+  magenta: '#9333ea', cyan: '#0e7490', white: '#55606e', brightBlack: '#8a94a3',
+  brightRed: '#dc2626', brightGreen: '#16a34a', brightYellow: '#b45309', brightBlue: '#2563eb',
+  brightMagenta: '#a855f7', brightCyan: '#0891b2', brightWhite: '#161b22',
+};
+const XTERM_THEMES: Record<string, Record<string, string>> = {
+  graphite: { background: '#0e0f12', foreground: '#e8eaee', cursor: '#6e7bff', cursorAccent: '#0e0f12', selectionBackground: 'rgba(110,123,255,.28)', ...ANSI_DARK },
+  ember: { background: '#181310', foreground: '#f4ebe0', cursor: '#f2a93b', cursorAccent: '#181310', selectionBackground: 'rgba(242,169,59,.26)', ...ANSI_DARK },
+  voltage: { background: '#0c0819', foreground: '#ece6ff', cursor: '#ff2e97', cursorAccent: '#0c0819', selectionBackground: 'rgba(255,46,151,.28)', ...ANSI_DARK, magenta: '#ff6ac1', cyan: '#22d3ee', brightMagenta: '#ff8fd0', brightCyan: '#67e8f9' },
+  aurora: { background: '#0d1426', foreground: '#eaf1ff', cursor: '#a78bfa', cursorAccent: '#0d1426', selectionBackground: 'rgba(167,139,250,.28)', ...ANSI_DARK },
+  daylight: { background: '#fbfcfd', foreground: '#161b22', cursor: '#0e7c66', cursorAccent: '#fbfcfd', selectionBackground: 'rgba(14,124,102,.2)', ...ANSI_LIGHT },
+};
+function activeXterm(): Record<string, string> { return XTERM_THEMES[state.settings.template] || XTERM_THEMES.graphite; }
 let toastT: ReturnType<typeof setTimeout> | null = null;
 function toast(msg: string, ok = false) {
   const w = $('#toastWrap');
@@ -312,7 +344,7 @@ async function newTab(seed?: Partial<OpenTab> & { libId?: string }, activate = t
   if (seed?.id) { const ex = state.tabs.find((t) => t.id === seed.id); if (ex) { if (activate) switchTab(ex.id); return ex; } }
   const id = seed?.id || uid();
   const n = state.tabs.length + 1;
-  const term = new Terminal({ fontFamily: "ui-monospace, 'Cascadia Code', 'JetBrains Mono', Menlo, Consolas, monospace", fontSize: 13, theme: XTERM_THEME, cursorBlink: true, allowProposedApi: true, scrollback: 5000 });
+  const term = new Terminal({ fontFamily: "ui-monospace, 'Cascadia Code', 'JetBrains Mono', Menlo, Consolas, monospace", fontSize: 13, theme: activeXterm(), cursorBlink: true, allowProposedApi: true, scrollback: 5000 });
   const fit = new FitAddon(); const ser = new SerializeAddon();
   term.loadAddon(fit); term.loadAddon(ser);
   const el = document.createElement('div'); el.className = 'xterm-wrap hidden'; // hidden first — avoids overlap flash
@@ -568,9 +600,8 @@ function tabHtml(t: Tab): string {
   const style = (t.tabBg || t.tabFg) ? ` style="${t.tabBg ? `background:${t.tabBg};` : ''}${t.tabFg ? `color:${t.tabFg};` : ''}"` : '';
   const fgStyle = t.tabFg ? ` style="color:${t.tabFg}"` : '';
   const activeInGroup = t.id === state.gv[t.group]; // the visible tab of its own group
-  return `<div class="tab ${activeInGroup ? 'active' : ''}${(t.tabBg || t.tabFg) ? ' colored' : ''}" draggable="true" data-tab="${t.id}" title="${esc(t.name)}"${style}>
-      <span class="tab-glyph"${fgStyle}>›_</span><span class="tab-name" data-rename="${t.id}">${esc(t.name)}</span>
-      <span class="tab-model"${fgStyle}>${esc(modelById(t.model).short)}</span>
+  return `<div class="tab ${activeInGroup ? 'active' : ''}${(t.tabBg || t.tabFg) ? ' colored' : ''}" draggable="true" data-tab="${t.id}" title="${esc(t.name)} · ${esc(modelById(t.model).short)}"${style}>
+      <span class="tab-glyph"${fgStyle}>${svgIcon('i-term', 13)}</span><span class="tab-name" data-rename="${t.id}">${esc(t.name)}</span>
       <span class="tab-close" data-close="${t.id}">✕</span>
     </div>`;
 }
@@ -616,7 +647,7 @@ function clearActive() { activeTab()?.term.clear(); }
 // base theme each time, so clearing a color reverts cleanly to the default.
 function applyTermColors(t: Tab) {
   t.term.options.theme = {
-    ...XTERM_THEME,
+    ...activeXterm(),
     ...(t.bodyBg ? { background: t.bodyBg, cursorAccent: t.bodyBg } : {}),
     ...(t.bodyFg ? { foreground: t.bodyFg, cursor: t.bodyFg } : {}),
   };
@@ -662,7 +693,7 @@ function closeTabMenu() { $('#tabMenu').classList.remove('show'); }
 // The tab and the body each get an independent background + text color.
 type ColorKey = 'tabBg' | 'tabFg' | 'bodyBg' | 'bodyFg';
 const COLOR_PRESETS = ['#f0b429', '#ff7b72', '#7ee787', '#6cb6ff', '#d2a8ff', '#56d4dd', '#f78166', '#3fb950', '#0b0e13', '#d8dee7'];
-const COLOR_DEFAULTS: Record<ColorKey, string> = { tabBg: '#161b22', tabFg: '#d8dee7', bodyBg: XTERM_THEME.background, bodyFg: XTERM_THEME.foreground };
+const colDefault = (key: ColorKey): string => key === 'bodyBg' ? activeXterm().background : key === 'bodyFg' ? activeXterm().foreground : key === 'tabBg' ? '#171920' : '#e8eaee';
 let colorPopId = '';
 function colorOf(t: Tab, key: ColorKey): string | undefined { return t[key]; }
 function renderColorPop(t: Tab) {
@@ -673,7 +704,7 @@ function renderColorPop(t: Tab) {
       <div class="cp-label">${label}</div>
       <div class="cp-swatches">
         ${COLOR_PRESETS.map((c) => `<button class="cp-sw${val && val.toLowerCase() === c.toLowerCase() ? ' on' : ''}" data-set="${key}" data-color="${c}" style="background:${c}" title="${c}"></button>`).join('')}
-        <label class="cp-custom" title="Custom color"><input type="color" data-cust="${key}" value="${val || COLOR_DEFAULTS[key]}"></label>
+        <label class="cp-custom" title="Custom color"><input type="color" data-cust="${key}" value="${val || colDefault(key)}"></label>
         <button class="cp-reset" data-reset="${key}" title="Reset to default">⟲</button>
       </div>
     </div>`;
@@ -701,7 +732,7 @@ function updateRowUI(key: ColorKey) {
   const pop = $('#colorPop');
   pop.querySelectorAll(`.cp-sw[data-set="${key}"]`).forEach((sw) => (sw as HTMLElement).classList.toggle('on', !!val && (sw as HTMLElement).dataset.color!.toLowerCase() === val.toLowerCase()));
   const inp = pop.querySelector(`input[data-cust="${key}"]`) as HTMLInputElement | null;
-  if (inp) inp.value = val || COLOR_DEFAULTS[key];
+  if (inp) inp.value = val || colDefault(key);
 }
 // Set (or clear, when color is undefined) one of the four colors, apply it live to the tab
 // and body, persist, and refresh only that row. The popover stays open until "Done".
@@ -765,9 +796,9 @@ function renderLibrary() {
   if (!state.library.length) { el.innerHTML = '<div class="lib-empty">No saved terminals yet.<br>Open one and press ⤓ Save.</div>'; return; }
   el.innerHTML = sortedLibrary().map((s) => `
     <div class="lib-item" draggable="true" data-open="${s.id}">
-      <div class="lib-row"><span class="lib-name" data-libname="${s.id}">${esc(s.name)}</span>
+      <div class="lib-row"><span class="lib-ic">${svgIcon('i-term', 14)}</span><span class="lib-name" data-libname="${s.id}">${esc(s.name)}</span>
         <span class="lib-actions"><button class="lib-act" data-librename="${s.id}" title="Rename">✎</button><button class="lib-act danger" data-libdel="${s.id}" title="Delete">🗑</button></span></div>
-      <div class="lib-meta"><span>${esc(shortCwd(s.cwd))}</span><span>·</span><span style="color:var(--accent)">${esc(modelById(s.model).short)}</span></div>
+      <div class="lib-meta"><span class="lib-cwd">${esc(shortCwd(s.cwd))}</span><span class="lib-pill">${esc(modelById(s.model).short)}</span></div>
     </div>`).join('');
 }
 async function saveActive() {
@@ -809,7 +840,7 @@ async function renderFiles() {
   $('#filesPath').textContent = res.path || '—'; $('#filesPath').title = res.path;
   const rows = res.entries.map((e: { name: string; isDir: boolean }) => `
     <div class="file-item" data-fpath="${esc(res.path + '/' + e.name)}" data-dir="${e.isDir}">
-      <span class="file-ic">${e.isDir ? '📁' : '📄'}</span><span class="file-name">${esc(e.name)}</span>
+      <span class="file-ic ${e.isDir ? 'dir' : ''}">${svgIcon(e.isDir ? 'i-folder' : 'i-file', 15)}</span><span class="file-name">${esc(e.name)}</span>
     </div>`).join('');
   const note = res.truncated ? `<div class="lib-empty">Showing first ${res.entries.length.toLocaleString()} items — folder is larger.</div>` : '';
   el.innerHTML = (rows || '<div class="lib-empty">(empty folder)</div>') + note;
@@ -860,8 +891,26 @@ function reflectModel() {
 }
 
 /* ----------------------------- theme + sidebar + status ----------------------------- */
-function applyTheme() { document.documentElement.setAttribute('data-theme', state.settings.theme); $('#btnTheme').textContent = state.settings.theme === 'dark' ? '☀' : '☾'; }
-async function toggleTheme() { state.settings = await relay.patchSettings({ theme: state.settings.theme === 'dark' ? 'light' : 'dark' }); applyTheme(); }
+// The five selectable design templates (palette + xterm theme). Graphite is the default.
+const TEMPLATES: { id: string; name: string; c1: string; c2: string }[] = [
+  { id: 'graphite', name: 'Graphite', c1: '#0b0c0e', c2: '#6e7bff' },
+  { id: 'ember', name: 'Ember', c1: '#15110d', c2: '#f2a93b' },
+  { id: 'voltage', name: 'Voltage', c1: '#0a0713', c2: '#ff2e97' },
+  { id: 'aurora', name: 'Aurora', c1: '#0b1120', c2: '#a78bfa' },
+  { id: 'daylight', name: 'Daylight', c1: '#eef1f5', c2: '#0e7c66' },
+];
+const curTemplate = () => state.settings.template || 'graphite';
+function applyTheme() {
+  document.documentElement.setAttribute('data-theme', curTemplate());
+  for (const t of state.tabs) { applyTermColors(t); t.term.refresh(0, t.term.rows - 1); } // re-tint every live terminal
+}
+async function setTemplate(id: string) { state.settings = await relay.patchSettings({ template: id as Settings['template'] }); applyTheme(); reflectSettings(); }
+async function cycleTemplate() { const i = TEMPLATES.findIndex((t) => t.id === curTemplate()); await setTemplate(TEMPLATES[(i + 1) % TEMPLATES.length].id); }
+function renderThemeGrid() {
+  const cur = curTemplate();
+  $('#themeGrid').innerHTML = TEMPLATES.map((t) =>
+    `<button class="theme-sw ${t.id === cur ? 'on' : ''}" data-tpl="${t.id}" title="${t.name}"><span class="pv"><i style="background:${t.c1}"></i><i style="background:${t.c2}"></i></span><span class="nm">${t.name}${t.id === 'graphite' ? ' · default' : ''}</span></button>`).join('');
+}
 function applySidebar() { $('#main').classList.toggle('collapsed', state.settings.sidebarCollapsed); const t = activeTab(); if (t) setTimeout(() => { t.fit.fit(); relay.ptyResize(t.id, t.term.cols, t.term.rows); }, 210); }
 function applyToolbar() { document.querySelector('.titlebar')?.classList.toggle('shown', state.settings.toolbarShown); }
 // Size the Library section from the saved fraction of the sidebar height; Files fills the rest.
@@ -1057,15 +1106,19 @@ function bvBlockHtml(b: Block): string {
   const d = new Date(b.startedAt);
   const clock = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`;
   const dur = b.endedAt && b.startedAt ? fmtDur(b.endedAt - b.startedAt) : '';
+  // Artifact-style prompt line: user@host  ~/path  (accent user · dim host · path).
+  const prompt = `<span class="p-user">${esc(SYS.user)}</span><span class="p-at">@</span><span class="p-host">${esc(SYS.host)}</span> <span class="p-path">${esc(promptCwd(cwd))}</span>`;
   if (b.interactive) {
-    return `<div class="bvb int" data-bid="${b.id}" title="ran in ${esc(promptCwd(cwd))}"><div class="bvb-cmd"><span class="bvb-line"><span class="bvb-p">◧</span> <span class="bvb-text">${esc(cmd || 'interactive')}</span></span><span class="bvb-ts">${clock}</span></div><div class="bvb-out"><span class="o-dim">— interactive full-screen session · ran live in the terminal —</span></div></div>`;
+    return `<div class="bvb int" data-bid="${b.id}" title="ran in ${esc(promptCwd(cwd))}"><div class="bvb-cmd"><span class="bvb-line">${prompt} <span class="bvb-text">${esc(cmd || 'interactive')}</span></span><span class="bvb-badge int">tui</span><span class="bvb-ts">${clock}</span></div><div class="bvb-out"><span class="o-dim">— interactive full-screen session · ran live in the terminal —</span></div></div>`;
   }
   const failed = b.exitCode != null && b.exitCode !== 0;
-  const cls = b.running ? 'run' : failed ? 'fail' : 'info';
-  const badge = b.running ? '<span class="bvb-badge run">running…</span>' : failed ? `<span class="bvb-badge fail">exit ${b.exitCode}</span>` : '';
+  const cls = b.running ? 'run' : failed ? 'fail' : 'ok';
+  const badge = b.running ? '<span class="bvb-badge run">running…</span>'
+    : failed ? `<span class="bvb-badge fail">exit ${b.exitCode}</span>`
+    : `<span class="bvb-badge ok">✓</span>`; // clean green check on success (duration moves to the hover timestamp)
   const out = ansiToHtml(collapseCR(b.output));
   return `<div class="bvb ${cls}" data-bid="${b.id}" title="ran in ${esc(promptCwd(cwd))}">
-    <div class="bvb-cmd"><span class="bvb-line"><span class="bvb-p">❯</span> <span class="bvb-text">${cmd ? esc(cmd) : ''}</span></span>${badge}<span class="bvb-ts">${dur ? esc(dur) + ' · ' : ''}${clock}</span>
+    <div class="bvb-cmd"><span class="bvb-line">${prompt} <span class="bvb-text">${cmd ? esc(cmd) : ''}</span></span>${badge}<span class="bvb-ts">${dur ? esc(dur) + ' · ' : ''}${clock}</span>
       <span class="bvb-actions"><button data-act="copyout" title="Copy output">copy</button><button data-act="rerun" title="Re-run">re-run</button><button data-act="pin" title="Pin">${b.pinned ? '★' : 'pin'}</button><button data-act="share" title="Export block">share</button>${failed ? '<button data-act="fix" title="Ask the agent to fix">ask agent</button>' : ''}</span>
     </div>${out.trim() ? `<div class="bvb-out">${out}</div>` : ''}</div>`;
 }
@@ -1381,7 +1434,8 @@ function paletteActions(): PalAction[] {
     { g: 'Terminal', t: 'Close terminals to the right', run: () => state.active && closeRight(state.active) },
     { g: 'Terminal', t: 'Close terminals to the left', run: () => state.active && closeLeft(state.active) },
     { g: 'Terminal', t: 'Close all terminals', run: () => closeAll() },
-    { g: 'View', t: 'Toggle theme', run: toggleTheme },
+    { g: 'View', t: 'Next theme', run: cycleTemplate },
+    { g: 'View', t: 'Choose theme…', run: () => { openSettings(); } },
     { g: 'View', t: 'Toggle library sidebar', run: toggleSidebar },
     { g: 'View', t: 'Toggle top toolbar', run: toggleToolbar },
     { g: 'View', t: 'Toggle auto-save', run: toggleAutosave },
@@ -1423,6 +1477,7 @@ function palRun() { const a = palItems[palSel]; if (a) { closePalette(); a.run()
 /* ----------------------------- settings ----------------------------- */
 function reflectSettings() {
   ($('#setWs') as HTMLInputElement).value = state.settings.workspace || '';
+  renderThemeGrid();
   ($('#autoApprove') as HTMLInputElement).checked = state.settings.autoApprove;
   ($('#shellIntegration') as HTMLInputElement).checked = state.settings.shellIntegration;
   ($('#blocksViewSet') as HTMLInputElement).checked = state.settings.blocksView;
@@ -1603,7 +1658,8 @@ $('#notifySet').addEventListener('change', async (e) => { state.settings = await
 $('#btnSave').onclick = saveActive;
 $('#btnClear').onclick = clearActive;
 $('#btnSidebar').onclick = toggleSidebar;
-$('#btnTheme').onclick = toggleTheme;
+$('#btnTheme').onclick = cycleTemplate; // quick-cycle through the five templates
+$('#themeGrid').addEventListener('click', (e) => { const b = (e.target as HTMLElement).closest('[data-tpl]') as HTMLElement | null; if (b) setTemplate(b.dataset.tpl!); });
 $('#btnPalette').onclick = openPalette;
 $('#btnOpen').onclick = addFolderTab;
 $('#stAutosave').onclick = toggleAutosave;

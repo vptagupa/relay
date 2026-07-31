@@ -78,6 +78,7 @@ export interface Settings {
   autoApprove: boolean;             // agent tool calls run without prompting
   autoSave: boolean;                // open terminals persist across relaunch
   theme: 'dark' | 'light';
+  template: 'graphite' | 'ember' | 'voltage' | 'aurora' | 'daylight'; // selected design theme
   sidebarCollapsed: boolean;
   toolbarShown: boolean;            // top toolbar visibility
   librarySort: 'recent' | 'name' | 'model' | 'custom';
