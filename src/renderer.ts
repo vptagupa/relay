@@ -13,6 +13,7 @@ import { type Tab, state, activeTab, gTab, groupTabs } from './state';
 import { type PalAction, initPalette, openPalette, closePalette, renderPalette, palMove, palRun, palClick } from './palette';
 import { groupOf, addToList, reorderBookmark, removeGroup } from './bookmarks';
 import { toast, makeEditable } from './ui';
+import { filterHistory, railEntry } from './history';
 import type { Settings, SavedSession, AgentEvent, ApprovalRequest, ChatTurn, OpenTab, Block, Bookmark, BookmarkGroup } from './shared/types';
 
 // TEMP DIAG: surface full stacks (minify is off) for the init crash.
@@ -978,9 +979,7 @@ function renderHistory() {
   const list = $('#histList'); const rail = $('#histRail'); const t = activeTab();
   if (!t) { list.innerHTML = '<div class="hist-empty">No terminal open.</div>'; rail.innerHTML = ''; return; }
   const q = histQuery.trim().toLowerCase();
-  let blocks = t.blocks.filter(realBlock);
-  if (histFilterFail) blocks = blocks.filter((b) => b.exitCode != null && b.exitCode !== 0);
-  if (q) blocks = blocks.filter((b) => (stripAnsi(b.command) + ' ' + stripAnsi(b.output)).toLowerCase().includes(q));
+  const blocks = filterHistory(t.blocks, histQuery, histFilterFail);
   if (!blocks.length) {
     rail.innerHTML = '';
     list.innerHTML = `<div class="hist-empty">${t.blocks.length ? 'No matching commands.' : 'Run a command to build history.<br><span class="dim">Blocks use shell integration (Settings → Command blocks).</span>'}</div>`;
@@ -988,8 +987,7 @@ function renderHistory() {
   }
   // Outline rail — one entry per block, click to jump to it.
   rail.innerHTML = blocks.map((b) => {
-    const dot = b.running ? 'run' : b.interactive ? 'int' : b.exitCode === 0 ? 'ok' : b.exitCode != null ? 'fail' : 'ok';
-    const label = stripAnsi(b.command).replace(/[\r\n]+/g, ' ').trim() || (b.interactive ? '(interactive)' : 'prompt');
+    const { dot, label } = railEntry(b);
     return `<div class="hr-item" data-jump="${b.id}" title="${esc(label)}"><span class="hr-dot ${dot}"></span><span class="hr-t">${esc(label)}</span></div>`;
   }).join('');
   const prevTop = list.scrollTop;
