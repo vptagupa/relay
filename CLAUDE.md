@@ -17,6 +17,13 @@ These are the skills and principles you bring to every change. Apply them; call 
 - **Extract on the third repeat.** Two similar lines are fine; a third means a helper (`reorderById`, `svgIcon`, `E()`). Shared logic across the IPC boundary lives in `shared/`.
 - **But don't over‑DRY.** A little duplication beats the wrong abstraction. Don't force a shared function over cases whose variation makes the abstraction leaky (e.g. the three drag handlers differ enough to stay separate). Prefer clarity over cleverness.
 
+### SOLID — module & type design
+- **S — Single Responsibility.** One module/function/type, one reason to change. `pty.ts`, `blocks.ts`, `store.ts` are good examples; `renderer.ts` is the counter‑example — split cohesive concerns (tabs, layout, blocks view, library, agent panel) out of it rather than growing it.
+- **O — Open/Closed.** Extend by *adding data*, not editing components. A new theme = one `[data-theme]` token block + one `TEMPLATES`/`XTERM_THEMES` entry, no component edits. A new shell = one branch in the shell‑integration map. Favor config/lookup tables over switch‑statements sprinkled across the code.
+- **L — Liskov Substitution.** Every implementation must honor its contract everywhere it's used. Both `LNode` variants (leaf vs split) must be handled at every use site; a parser's `close()` must behave like the interface promises. **Every `[data-theme]` must define the *full* token set** — a partial theme silently breaks components (this bit us with undefined `--c-green`/`--c-blue`).
+- **I — Interface Segregation.** Keep the exposed surface small and purpose‑specific. The preload `contextBridge` API is narrow, typed methods — not a god‑object; don't make callers depend on options/methods they don't use, and split fat option bags.
+- **D — Dependency Inversion.** Depend on abstractions, not concretions. The renderer talks to `window.relay` (the preload contract), **never** `ipcRenderer`/Node directly — the IPC boundary is the inversion seam. Logic that reaches straight into the DOM or a global singleton is hard to test; pass dependencies in.
+
 ### Desktop / Electron architecture
 - **Respect the process boundary.** Main = privileged (Node, fs, OS, secrets, child processes). Renderer = untrusted UI. **Preload = the only bridge**, thin and typed. Never expose Node/fs/keys to the renderer; never `require` Node in renderer code.
 - **Security is non‑negotiable.** `contextIsolation` on, `nodeIntegration` off, secrets via OS keychain (`safeStorage`). Validate every IPC payload. Launch external tools with `execFile`/arg arrays, never string‑interpolated `exec` (shell injection). Treat any file/repo content as hostile.
