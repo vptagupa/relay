@@ -47,6 +47,9 @@ export function createShellParser(emit: (e: BlockEvent) => void): { feed(chunk: 
   let updateTimer: ReturnType<typeof setTimeout> | null = null;
 
   function startBlock(command: string): void {
+    // A new command starting while the previous block is still open means its 133;D end-marker was
+    // lost/garbled — close that orphan (exit unknown) so it can't spin "running" forever.
+    if (cur) endBlock(cur.exitCode);
     cur = { id: `b${++n}`, command, output: '', cwd: lastCwd, exitCode: null, startedAt: Date.now(), endedAt: null, running: true };
     emit({ type: 'start', block: cur });
   }
