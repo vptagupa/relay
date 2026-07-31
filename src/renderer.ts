@@ -53,7 +53,6 @@ function isValidLayout(n: unknown, allowed: Set<number>): n is LNode {
   };
   return walk(n);
 }
-const splitOn = () => state.groups > 1;                                    // more than one pane?
 const gTab = (g: number) => state.tabs.find((t) => t.id === state.gv[g]);   // visible tab of group g
 const groupTabs = (g: number) => state.tabs.filter((t) => t.group === g);   // all tabs in group g
 // Per-pane DOM selectors, indexed by group slot 0..3.
@@ -64,7 +63,6 @@ const P_VIEW = ['#blocksView', '#blocksView2', '#blocksView3', '#blocksView4'];
 const P_SCROLL = ['#bvScroll', '#bvScroll2', '#bvScroll3', '#bvScroll4'];
 const P_CMD = ['#bvCmd', '#bvCmd2', '#bvCmd3', '#bvCmd4'];
 const P_PROMPT = ['#bvPrompt', '#bvPrompt2', '#bvPrompt3', '#bvPrompt4'];
-const P_DIV = ['#divider0', '#divider1', '#divider2']; // divider before pane 1,2,3
 // Persistent per-pane elements are reused as split leaves. Once a pane is removed from the
 // grid (during a layout rebuild) it's detached from the document, so querySelector can no
 // longer find it. Resolve each ONCE while still attached and cache the live reference.
@@ -135,7 +133,6 @@ $('#app').innerHTML = `
               <div class="blocks-view" id="blocksView"><div class="bv-scroll" id="bvScroll"></div><div class="bv-input"><span class="bv-prompt" id="bvPrompt">❯</span><textarea class="bv-cmd" id="bvCmd" rows="1" placeholder="type a command — Enter runs · Shift+Enter new line · ↑ recalls" spellcheck="false" autocomplete="off"></textarea></div></div>
             </div>
           </div>
-          <div class="pane-divider" id="divider0" style="display:none" title="Drag to resize"></div>
           <div class="pane tile" id="tilePane" data-g="1" style="display:none">
             <div class="pane-tabs"><div class="tabs" id="tabs1"></div><button class="pane-add" data-g="1" title="New terminal in this pane">+</button><button class="pane-max" data-g="1" title="Maximize / restore pane">⛶</button><button class="pane-x" data-closeg="1" title="Close this pane">✕</button></div>
             <div class="pane-body">
@@ -143,7 +140,6 @@ $('#app').innerHTML = `
               <div class="blocks-view" id="blocksView2"><div class="bv-scroll" id="bvScroll2"></div><div class="bv-input"><span class="bv-prompt" id="bvPrompt2">❯</span><textarea class="bv-cmd" id="bvCmd2" rows="1" placeholder="type a command — Enter runs · Shift+Enter new line" spellcheck="false" autocomplete="off"></textarea></div></div>
             </div>
           </div>
-          <div class="pane-divider" id="divider1" style="display:none" title="Drag to resize"></div>
           <div class="pane" id="pane2" data-g="2" style="display:none">
             <div class="pane-tabs"><div class="tabs" id="tabs2"></div><button class="pane-add" data-g="2" title="New terminal in this pane">+</button><button class="pane-max" data-g="2" title="Maximize / restore pane">⛶</button><button class="pane-x" data-closeg="2" title="Close this pane">✕</button></div>
             <div class="pane-body">
@@ -151,7 +147,6 @@ $('#app').innerHTML = `
               <div class="blocks-view" id="blocksView3"><div class="bv-scroll" id="bvScroll3"></div><div class="bv-input"><span class="bv-prompt" id="bvPrompt3">❯</span><textarea class="bv-cmd" id="bvCmd3" rows="1" placeholder="type a command — Enter runs · Shift+Enter new line" spellcheck="false" autocomplete="off"></textarea></div></div>
             </div>
           </div>
-          <div class="pane-divider" id="divider2" style="display:none" title="Drag to resize"></div>
           <div class="pane" id="pane3" data-g="3" style="display:none">
             <div class="pane-tabs"><div class="tabs" id="tabs3"></div><button class="pane-add" data-g="3" title="New terminal in this pane">+</button><button class="pane-max" data-g="3" title="Maximize / restore pane">⛶</button><button class="pane-x" data-closeg="3" title="Close this pane">✕</button></div>
             <div class="pane-body">
@@ -275,7 +270,7 @@ function reorderById<T>(arr: T[], getId: (x: T) => string, dragId: string, targe
   if (!before) to += 1;
   arr.splice(to, 0, item);
 }
-function makeEditable(el: HTMLElement, commit: (v: string) => void) {
+function makeEditable(el: HTMLElement, commit: (v: string) => void, onDone?: () => void) {
   const dragAnc = el.closest('[draggable="true"]') as HTMLElement | null; // don't drag while renaming
   if (dragAnc) dragAnc.draggable = false;
   const original = el.textContent || '';
@@ -291,6 +286,7 @@ function makeEditable(el: HTMLElement, commit: (v: string) => void) {
     if (dragAnc) dragAnc.draggable = true;
     if (save) commit(el.textContent?.trim() || ''); else el.textContent = original; // Escape restores the old text
     el.blur();
+    onDone?.(); // always runs, on commit OR cancel
   };
   el.onkeydown = (e) => {
     if (e.key === 'Enter') { e.preventDefault(); done(true); }
@@ -306,9 +302,6 @@ function promptCwd(c: string) {
   const home = (SYS.home || '').replace(/\\/g, '/');
   if (home && (p === home || p.startsWith(home + '/'))) p = '~' + p.slice(home.length);
   return p;
-}
-function promptLine(cwd: string) {
-  return `<span class="p-user">${esc(SYS.user)}</span><span class="p-at">@</span><span class="p-host">${esc(SYS.host)}</span> <span class="p-path">${esc(promptCwd(cwd))}</span><span class="p-dollar"> $</span>`;
 }
 // Last path segment of a folder path (handles both \ and /), for naming a folder's terminal.
 function baseName(p: string): string { const s = p.replace(/[\\/]+$/, ''); const i = Math.max(s.lastIndexOf('\\'), s.lastIndexOf('/')); return (i >= 0 ? s.slice(i + 1) : s) || s; }
@@ -408,7 +401,11 @@ function makeDivider(n: { d: 'row' | 'col'; r: number; a: LNode; b: LNode }): HT
     (e as MouseEvent).preventDefault(); d.classList.add('dragging'); document.body.style.userSelect = 'none'; let raf = 0;
     const move = (ev: MouseEvent) => {
       const box = d.parentElement!.getBoundingClientRect(); const col = n.d === 'col';
-      let f = ((col ? ev.clientY - box.top : ev.clientX - box.left)) / ((col ? box.height : box.width) || 1);
+      // The two panes share the space MINUS the divider's own thickness, so divide by that (and
+      // center on the divider) — otherwise the split drifts a few px from the cursor.
+      const dz = col ? d.offsetHeight : d.offsetWidth;
+      const avail = ((col ? box.height : box.width) - dz) || 1;
+      const f = ((col ? ev.clientY - box.top : ev.clientX - box.left) - dz / 2) / avail;
       n.r = Math.min(0.85, Math.max(0.15, f));
       (d.previousElementSibling as HTMLElement).style.flex = String(n.r); (d.nextElementSibling as HTMLElement).style.flex = String(1 - n.r);
       if (!raf) raf = requestAnimationFrame(() => { raf = 0; fitPanes(); });
@@ -472,7 +469,6 @@ function closeGroup(g: number) {
   state.active = state.gv[state.focus] || state.gv[dest]; state.maxG = null;
   paneAftermath();
 }
-function closeSplitTab() { closeGroup(state.focus); }
 // Focus the Nth pane in visual (leaf) order (Ctrl+1..4).
 function focusGroupN(n: number) { const g = leaves(state.layout)[n]; if (g !== undefined) focusGroup(g); }
 function focusGroup(g: number) {
@@ -487,7 +483,18 @@ function focusGroup(g: number) {
 function moveActiveToGroup(dir: -1 | 1) {
   const t = activeTab(); if (!t) return;
   const lvs = leaves(state.layout); const idx = lvs.indexOf(t.group); const target = lvs[idx + dir];
-  if (target === undefined) { if (groupTabs(t.group).length >= 2) splitClone('row'); return; }
+  if (target === undefined) {
+    // At the edge — split off a NEW pane and MOVE this tab into it (not a cloned fresh shell).
+    if (lvs.length >= 4 || groupTabs(t.group).length < 2) return; // need room + a tab to leave behind
+    const src = t.group; const free = [0, 1, 2, 3].find((i) => !lvs.includes(i))!;
+    t.group = free;
+    if (state.gv[src] === t.id) state.gv[src] = groupTabs(src)[0]?.id || '';
+    state.gv[free] = t.id;
+    state.layout = replaceLeaf(state.layout, src, { d: 'row', r: 0.5, a: { g: src }, b: { g: free } });
+    state.focus = free; state.active = t.id; state.maxG = null;
+    paneAftermath();
+    return;
+  }
   const src = t.group; t.group = target;
   if (state.gv[src] === t.id) state.gv[src] = groupTabs(src)[0]?.id || '';
   state.gv[target] = t.id; state.focus = target; state.active = t.id;
@@ -567,10 +574,16 @@ function tabHtml(t: Tab): string {
       <span class="tab-close" data-close="${t.id}">✕</span>
     </div>`;
 }
+let editingTabId: string | null = null; // a tab whose name is being edited — don't nuke its node
 function renderTabs() {
-  for (let g = 0; g < 4; g++) E(P_TABS[g]).innerHTML = groupTabs(g).map(tabHtml).join('');
+  for (let g = 0; g < 4; g++) {
+    if (editingTabId && groupTabs(g).some((t) => t.id === editingTabId)) continue; // keep the in-progress rename input
+    E(P_TABS[g]).innerHTML = groupTabs(g).map(tabHtml).join('');
+  }
   requestAnimationFrame(() => { updateTabOverflow(); revealActiveTab(state.focus); });
 }
+// Start editing a tab's name, guarding the node from re-render until the edit finishes.
+function editTabName(nm: HTMLElement, id: string) { editingTabId = id; makeEditable(nm, (v) => renameTab(id, v), () => { editingTabId = null; renderTabs(); }); }
 // Show a "⌄" dropdown on a pane's tab bar when its tabs overflow the available width.
 function updateTabOverflow() {
   for (let g = 0; g < 4; g++) {
@@ -1361,7 +1374,7 @@ function paletteActions(): PalAction[] {
   const base: PalAction[] = [
     { g: 'Terminal', t: 'New terminal', run: () => newTab() },
     { g: 'Terminal', t: 'Save to Library', run: saveActive },
-    { g: 'Terminal', t: 'Rename terminal', run: () => { const el = document.querySelector(`[data-rename="${state.active}"]`) as HTMLElement | null; if (el) makeEditable(el, (v) => renameTab(state.active, v)); } },
+    { g: 'Terminal', t: 'Rename terminal', run: () => { const el = document.querySelector(`[data-rename="${state.active}"]`) as HTMLElement | null; if (el) editTabName(el, state.active); } },
     { g: 'Terminal', t: 'Clear terminal', run: clearActive },
     { g: 'Terminal', t: 'Close terminal', run: () => state.active && closeTab(state.active) },
     { g: 'Terminal', t: 'Close other terminals', run: () => state.active && closeOthers(state.active) },
@@ -1566,8 +1579,8 @@ $('#btnSplitDown').onclick = () => splitClone('col'); // dividers are created dy
 for (let g = 0; g < 4; g++) {
   E(PANE[g]).addEventListener('mousedown', (e) => {
     if ((e.target as HTMLElement).closest('.pane-tabs')) return;
-    if (!leaves(state.layout).includes(g) || state.focus === g) return;
-    state.focus = g; state.active = state.gv[g] || state.active;
+    if (!leaves(state.layout).includes(g) || state.focus === g || !state.gv[g]) return; // ignore clicks on an empty pane
+    state.focus = g; state.active = state.gv[g];
     for (let i = 0; i < 4; i++) E(PANE[i]).classList.toggle('focused', state.groups > 1 && i === g);
     reflectModel(); updateStatus();
   });
@@ -1652,7 +1665,7 @@ function wireTabStrip(sel: string, group: number) {
   });
   strip.addEventListener('dblclick', (e) => {
     const nm = (e.target as HTMLElement).closest('[data-rename]') as HTMLElement | null;
-    if (nm) makeEditable(nm, (v) => renameTab(nm.dataset.rename!, v));
+    if (nm) editTabName(nm, nm.dataset.rename!);
   });
   strip.addEventListener('contextmenu', (e) => {
     const el = (e.target as HTMLElement).closest('[data-tab]') as HTMLElement | null; if (!el) return;

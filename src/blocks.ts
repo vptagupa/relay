@@ -160,7 +160,10 @@ export function shellIntegrationInit(shell: string): string {
     // command line (633;E) + C(output start), respecting multi-line input.
     return [
       `Import-Module PSReadLine -ErrorAction SilentlyContinue`,
-      `function global:prompt { $c=$global:LASTEXITCODE; if($null -eq $c){$c=0}; $e=[char]27; $b=[char]7; $p=$executionContext.SessionState.Path.CurrentLocation.Path; "$e]133;D;$c$b$e]133;A$b$e]633;P;Cwd=$p$b" + "PS $p> " + "$e]133;B$b" }`,
+      // Capture the user's existing prompt (oh-my-posh / starship / default) ONCE, then wrap it with
+      // our OSC markers instead of replacing it — so custom prompts still render under shell integration.
+      `if (-not (Test-Path variable:global:__relayOrigPrompt)) { $global:__relayOrigPrompt = $function:prompt }`,
+      `function global:prompt { $c=$global:LASTEXITCODE; if($null -eq $c){$c=0}; $e=[char]27; $b=[char]7; $p=$executionContext.SessionState.Path.CurrentLocation.Path; $orig = try { & $global:__relayOrigPrompt } catch { "PS $p> " }; if (-not $orig) { $orig = "PS $p> " }; "$e]133;D;$c$b$e]133;A$b$e]633;P;Cwd=$p$b" + $orig + "$e]133;B$b" }`,
       `if (Get-Module PSReadLine) { Set-PSReadLineKeyHandler -Key Enter -ScriptBlock { $l=''; $k=0; [Microsoft.PowerShell.PSConsoleReadLine]::GetBufferState([ref]$l,[ref]$k); $er=$null; [void][System.Management.Automation.Language.Parser]::ParseInput($l,[ref]$null,[ref]$er); if ($er | Where-Object { $_.IncompleteInput }) { [Microsoft.PowerShell.PSConsoleReadLine]::InsertLineBreak() } else { [Console]::Write("$([char]27)]633;E;$l$([char]7)$([char]27)]133;C$([char]7)"); [Microsoft.PowerShell.PSConsoleReadLine]::AcceptLine() } } }`,
     ].join('; ');
   }

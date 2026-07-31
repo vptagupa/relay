@@ -99,10 +99,16 @@ export function createTerm(id: string, cwd: string, wc: WebContents, cols = 80, 
   }
 
   const spawnAt = Date.now();
+  let clearCarry = ''; // trailing partial escape held across chunks so a split "\x1b[" + "2J" still matches
   proc.onData((data) => {
     // For a brief window after a restore-spawn, drop the shell's startup clears so its
     // repaint can't wipe the restored history. After the window, everything works normally.
-    if (restore && Date.now() - spawnAt < STARTUP_GUARD_MS) data = data.replace(STARTUP_CLEARS, '');
+    if (restore && Date.now() - spawnAt < STARTUP_GUARD_MS) {
+      data = clearCarry + data; clearCarry = '';
+      data = data.replace(STARTUP_CLEARS, '');
+      const m = data.match(/\x1b(?:\[[0-9]{0,2})?$/); // could be the start of \x1b[2J / \x1b[3J / \x1bc
+      if (m && m[0].length < 4) { clearCarry = m[0]; data = data.slice(0, data.length - m[0].length); }
+    } else if (clearCarry) { data = clearCarry + data; clearCarry = ''; } // window ended — flush any held bytes
     const clean = parser ? parser.feed(data) : data; // strip integration markers before display
     term.buf += clean;
     if (term.buf.length > BUF_CAP) term.buf = term.buf.slice(term.buf.length - BUF_CAP);

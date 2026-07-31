@@ -31,6 +31,18 @@ function logFatal(kind: string, err: unknown): void {
     appendFileSync(path.join(app.getPath('userData'), 'relay-error.log'), `[${new Date().toISOString()}] ${kind}: ${stack}\n`);
   } catch { /* nothing more we can do */ }
 }
+// Async, size-capped mirror for renderer console messages — a warn-in-a-loop must never block the
+// main thread on sync disk I/O or grow the log without bound.
+let rendererLogBytes = 0;
+async function logRenderer(text: string): Promise<void> {
+  try {
+    const f = path.join(app.getPath('userData'), 'relay-error.log');
+    const line = `[${new Date().toISOString()}] renderer-console: ${text}\n`;
+    rendererLogBytes += line.length;
+    if (rendererLogBytes > 1_000_000) { await fsp.writeFile(f, line); rendererLogBytes = line.length; } // reset when large
+    else await fsp.appendFile(f, line);
+  } catch { /* diagnostics only */ }
+}
 process.on('uncaughtException', (err) => {
   logFatal('uncaughtException', err);
   // Never pop a modal dialog during a Squirrel maintenance run — it would keep the process
@@ -76,7 +88,7 @@ function createWindow(): void {
   // TEMP DIAG: mirror renderer console errors/warnings into relay-error.log so we can
   // diagnose init crashes that leave the UI unresponsive (no main-process exception fires).
   win.webContents.on('console-message', (_e, level, message, line, sourceId) => {
-    if (level >= 2) logFatal('renderer-console', `${message}  (${sourceId}:${line})`);
+    if (level >= 2) void logRenderer(`${message}  (${sourceId}:${line})`);
   });
   // If the renderer dies or reloads, release any in-flight approval promises so the agent loop
   // (and its provider request) can't leak and wedge the agent panel for the rest of the session.
