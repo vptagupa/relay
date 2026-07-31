@@ -12,7 +12,13 @@ export function appHtml(panes: string): string {
   <div class="app">
     <div class="winbar">
       <div class="winbar-brand"><span class="winbar-mark">›_</span><span class="winbar-title">Relay</span></div>
-      <div class="winbar-ctx" id="winCtx"></div>
+      <div class="winbar-ctx">
+        <button class="winbar-search" id="winSearch" title="Search commands & sessions (⌘K)">
+          <span class="winbar-search-ic">⌕</span>
+          <span class="winbar-search-ph">Search commands, sessions…</span>
+          <span class="kbd">⌘K</span>
+        </button>
+      </div>
       <div class="win-controls">
         <button class="win-btn" id="winMin" aria-label="Minimize"><svg viewBox="0 0 10 10"><line x1="1" y1="5" x2="9" y2="5"/></svg></button>
         <button class="win-btn" id="winMax" aria-label="Maximize"><svg viewBox="0 0 10 10"><rect x="1.5" y="1.5" width="7" height="7"/></svg></button>

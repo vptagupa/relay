@@ -653,8 +653,6 @@ function updateStatus() {
   const cwd = t?.cwd || state.settings.workspace || '';
   $('#stCwd').textContent = shortCwd(cwd);
   $('#wsLabel').textContent = state.settings.workspace || 'No folder open';
-  const folder = cwd ? (cwd.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || '') : '';
-  $('#winCtx').textContent = [folder, t?.name].filter(Boolean).join('  ·  ');
 }
 function tickClock() { const d = new Date(); $('#stClock').textContent = String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0'); }
 
@@ -1252,6 +1250,7 @@ $('#btnSidebar').onclick = toggleSidebar;
 $('#btnTheme').onclick = cycleTemplate; // quick-cycle through the five templates
 $('#themeGrid').addEventListener('click', (e) => { const b = (e.target as HTMLElement).closest('[data-tpl]') as HTMLElement | null; if (b) setTemplate(b.dataset.tpl!); });
 $('#btnPalette').onclick = openPalette;
+$('#winSearch').onclick = openPalette; // command-search box in the top window bar
 $('#btnOpen').onclick = addFolderTab;
 $('#stAutosave').onclick = toggleAutosave;
 $('#libSort').addEventListener('change', async (e) => { state.settings = await relay.patchSettings({ librarySort: (e.target as HTMLSelectElement).value as any }); renderLibrary(); });
