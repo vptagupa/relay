@@ -1,0 +1,157 @@
+// The app's full chrome markup — winbar, title bar, sidebar (Library + Files), terminal area,
+// status bar, and every floating surface (agent, history, bookmarks, palette, settings, approval,
+// confirm, menus, toast). Pure markup with two dynamic holes: the icon sprite (from ./icons) and the
+// pane grid (the renderer generates one pane per NPANES and passes the joined HTML in as `panes`).
+// Element ids/classes here are the contract the renderer wires events to after this is injected.
+
+import { ICON_SPRITE } from './icons';
+
+export function appHtml(panes: string): string {
+  return `
+  ${ICON_SPRITE}
+  <div class="app">
+    <div class="winbar">
+      <div class="winbar-brand"><span class="winbar-mark">›_</span><span class="winbar-title">Relay</span></div>
+      <div class="winbar-ctx" id="winCtx"></div>
+      <div class="win-controls">
+        <button class="win-btn" id="winMin" aria-label="Minimize"><svg viewBox="0 0 10 10"><line x1="1" y1="5" x2="9" y2="5"/></svg></button>
+        <button class="win-btn" id="winMax" aria-label="Maximize"><svg viewBox="0 0 10 10"><rect x="1.5" y="1.5" width="7" height="7"/></svg></button>
+        <button class="win-btn close" id="winClose" aria-label="Close"><svg viewBox="0 0 10 10"><line x1="1" y1="1" x2="9" y2="9"/><line x1="9" y1="1" x2="1" y2="9"/></svg></button>
+      </div>
+    </div>
+    <header class="titlebar">
+      <div class="brand"><span class="ws" id="wsLabel">No folder open</span></div>
+      <div class="tb-spacer"></div>
+      <button class="tb-btn" id="btnOpen">Open folder…</button>
+      <button class="tb-btn" id="btnHistory" title="Command history (⌘⇧H)">☰ History</button>
+      <button class="tb-btn accent" id="btnAgent">✦ Agent <span class="kbd">⌘J</span></button>
+      <button class="tb-btn" id="btnPalette" title="Command palette"><span class="kbd">⌘K</span></button>
+      <button class="tb-btn tb-icon" id="btnTheme" title="Toggle theme">◐</button>
+      <button class="tb-btn tb-icon" id="btnSettings" title="Settings">⚙</button>
+    </header>
+    <div class="main" id="main">
+      <aside class="sidebar">
+        <div class="side-view side-library" id="viewLibrary">
+          <div class="side-head"><span class="side-title">Library</span>
+            <select class="lib-sort" id="libSort" title="Sort saved terminals">
+              <option value="recent">Recent</option><option value="name">Name</option><option value="model">Model</option><option value="custom">Custom</option>
+            </select></div>
+          <div class="side-list" id="libList"></div>
+        </div>
+        <div class="side-divider" id="sideDivider" title="Drag to resize"></div>
+        <div class="side-view side-files" id="viewFiles">
+          <div class="side-head"><span class="side-title">Files</span><button class="files-up" id="filesUp" title="Parent folder"><svg width="15" height="15"><use href="#i-up"/></svg></button></div>
+          <div class="files-path" id="filesPath">—</div>
+          <div class="side-list" id="fileList"></div>
+        </div>
+        <div class="side-foot"><span class="sdot" id="storeDot"></span><span id="storeText">Saved on this machine</span></div>
+      </aside>
+      <div class="main-divider" id="mainDivider" title="Drag to resize sidebar"></div>
+      <section class="term-area">
+        <div class="tabstrip">
+          <button class="side-toggle" id="btnSidebar" title="Toggle library">▤</button>
+          <button class="tab-add" id="btnNewTab" title="New terminal (⌘T)"><svg width="16" height="16"><use href="#i-plus"/></svg></button>
+          <button class="tab-add" id="btnAddFolder" title="Open folder in new terminal (⌘⇧O)"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h5l2 2h9a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1z"/><line x1="12" y1="11" x2="12" y2="16"/><line x1="9.5" y1="13.5" x2="14.5" y2="13.5"/></svg></button>
+          <button class="tab-add cc" id="btnClaude" title="Launch Claude Code (⌘⇧L)"><svg width="16" height="16"><use href="#i-spark"/></svg></button>
+          <div class="tt-spacer"></div>
+          <button class="tt-model" id="tabModelBtn" title="Model for this terminal"><span class="dot"></span><span id="tabModelName">Opus 5</span> ▾</button>
+          <button class="tt-icon blocks-toggle on" id="btnBlocks" title="Blocks view / Classic terminal (⌘⇧B)"><svg width="16" height="16"><use href="#i-grid"/></svg></button>
+          <button class="tt-icon" id="btnSplitRight" title="Split right — clone this terminal into a pane on the right (⌘⇧E)"><svg width="16" height="16"><use href="#i-split"/></svg></button>
+          <button class="tt-icon" id="btnSplitDown" title="Split down — clone this terminal into a pane below"><svg width="16" height="16"><use href="#i-splitdown"/></svg></button>
+          <button class="tt-icon" id="btnBookmarks" title="Bookmarks — highlight a command to save one (⌘⇧K)"><svg width="16" height="16"><use href="#i-star"/></svg></button>
+          <button class="tt-icon" id="btnSave" title="Save to Library (⌘S)"><svg width="16" height="16"><use href="#i-save"/></svg></button>
+          <button class="tt-icon" id="btnClear" title="Clear terminal (⌃L)"><svg width="16" height="16"><use href="#i-clear"/></svg></button>
+        </div>
+        <div class="term-stack">
+         <div class="pane-grid" id="paneGrid">
+          ${panes}
+         </div>
+        </div>
+      </section>
+    </div>
+    <footer class="statusbar">
+      <div class="st-seg accent"><span class="dot"></span><span id="stSession">—</span></div>
+      <div class="st-seg" id="stCwd">~</div>
+      <div class="st-spacer"></div>
+      <div class="st-seg btn" id="stAutosave"><span class="dot"></span><span id="stAutosaveText">Auto-save on</span></div>
+      <div class="st-seg btn" id="stAgent"><span class="dot"></span>agent · Opus 5</div>
+      <div class="st-seg tnum" id="stClock">--:--</div>
+    </footer>
+  </div>
+
+  <aside class="agent" id="agentPanel">
+    <div class="agent-head">
+      <div class="agent-ava">✦</div>
+      <div><div class="agent-title">Agent</div>
+        <button class="model-btn" id="modelBtn"><span class="dot"></span><span id="modelBtnName">Opus 5</span> ▾</button></div>
+      <button class="agent-close" id="btnAgentClose">✕</button>
+    </div>
+    <div class="agent-body" id="agentBody"></div>
+    <div class="agent-inputwrap">
+      <textarea class="agent-input" id="agentInput" rows="1" placeholder="Ask the agent to read or change files in this project…"></textarea>
+      <button class="agent-send" id="agentSend">➤</button>
+    </div>
+  </aside>
+
+  <aside class="history" id="historyPanel" role="dialog" aria-label="Command history">
+    <div class="hist-head"><div class="hist-title">☰ History</div><button class="hist-x" id="btnHistoryClose" aria-label="Close">✕</button></div>
+    <div class="hist-tools">
+      <div class="hist-search"><span>⌕</span><input id="histSearch" placeholder="Search commands & output" spellcheck="false"></div>
+      <button class="hist-filter" id="histFilter" title="Show failures only">✗ Fails</button>
+      <div class="hist-exwrap"><button class="hist-export" id="histExport" title="Export session">⤓</button><div class="hist-exmenu" id="histExMenu"><button data-fmt="md">Markdown</button><button data-fmt="json">JSON</button><button data-fmt="txt">Plain text</button><button data-fmt="html">HTML</button></div></div>
+    </div>
+    <div class="hist-body"><aside class="hist-rail" id="histRail"></aside><div class="hist-list" id="histList"></div></div>
+  </aside>
+
+  <div class="model-menu" id="modelMenu" role="listbox"></div>
+  <div class="ctx-menu" id="tabMenu" role="menu"></div>
+  <div class="ctx-menu" id="tabsMenu" role="menu"></div>
+  <div class="color-pop" id="colorPop"></div>
+
+  <div class="palette" id="palette">
+    <div class="pal-input-wrap"><span class="pal-ic">⌘</span><input class="pal-input" id="palInput" placeholder="Type a command or search sessions…" spellcheck="false"></div>
+    <div class="pal-list" id="palList"></div>
+  </div>
+
+  <div class="scrim" id="scrim"></div>
+
+  <div class="modal" id="settings">
+    <div class="modal-head">Settings</div>
+    <div class="modal-sub">API keys are encrypted with your OS keychain and stay in the app's main process — never in this window.</div>
+    <div class="modal-body">
+      <div class="field"><label>Theme</label><div class="theme-grid" id="themeGrid"></div><div class="fhint">Recolors the whole app and the terminal. Quick-cycle with the ◐ button in the title bar.</div></div>
+      <div class="field"><label>Project folder</label><div class="row"><input id="setWs" readonly placeholder="none"><button class="set" id="setWsBtn">Choose…</button></div></div>
+      <div class="field"><label>Anthropic API key (Claude) <span class="opt">optional</span></label><div class="row"><input id="keyAnthropic" type="password" placeholder="blank = use your Claude Code login"><button class="set" data-key="anthropic">Save</button></div><div class="state off" id="stateAnthropic">not set</div><div class="fhint">Leave blank to sign in with your Claude subscription / Claude Code login (or an environment key). Paste a key only to override.</div></div>
+      <div class="field"><label>OpenAI API key (GPT)</label><div class="row"><input id="keyOpenai" type="password" placeholder="sk-…"><button class="set" data-key="openai">Save</button></div><div class="state off" id="stateOpenai">not set</div></div>
+      <div class="field"><label>Google AI API key (Gemini)</label><div class="row"><input id="keyGoogle" type="password" placeholder="AIza…"><button class="set" data-key="google">Save</button></div><div class="state off" id="stateGoogle">not set</div></div>
+      <label class="chk"><input type="checkbox" id="autoApprove"> Auto-approve agent file writes & commands (skip the confirm step)</label>
+      <label class="chk"><input type="checkbox" id="shellIntegration"> Command blocks — capture each command as a block in History (shell integration; applies to new terminals)</label>
+      <label class="chk"><input type="checkbox" id="blocksViewSet"> Blocks view — show commands as blocks in the main terminal (full-screen apps drop to the live terminal automatically)</label>
+      <label class="chk"><input type="checkbox" id="notifySet"> Notify me when a long command finishes while Relay isn't focused</label>
+    </div>
+    <div class="modal-foot"><button class="btn primary" id="settingsClose">Done</button></div>
+  </div>
+
+  <div class="approval" id="approval">
+    <div class="a-title" id="apTitle"></div>
+    <div class="a-detail" id="apDetail"></div>
+    <div class="a-foot"><button class="btn" id="apDeny">Deny</button><button class="btn primary" id="apAllow">Allow</button></div>
+  </div>
+
+  <aside class="history bookmarks" id="bookmarksPanel" role="dialog" aria-label="Bookmarks">
+    <div class="hist-head"><div class="hist-title">★ Bookmarks</div><button class="hist-x" id="btnBookmarksClose" aria-label="Close">✕</button></div>
+    <div class="hist-tools"><button class="hist-filter" id="bkmAddGroup" title="Add a group">＋ Group</button></div>
+    <div class="hist-list" id="bkmList"></div>
+  </aside>
+
+  <div class="bkm-pop" id="bkmPop"><button id="bkmAdd">★ Bookmark</button></div>
+
+  <div class="confirm" id="confirmBox" role="alertdialog" aria-labelledby="cfTitle">
+    <div class="a-title" id="cfTitle">Close terminal?</div>
+    <div class="a-detail" id="cfDetail"></div>
+    <div class="a-foot"><button class="btn" id="cfCancel">Cancel</button><button class="btn primary" id="cfOk">Close</button></div>
+  </div>
+
+  <div class="toast-wrap" id="toastWrap"></div>
+`;
+}
