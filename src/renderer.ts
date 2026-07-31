@@ -1485,6 +1485,17 @@ document.querySelectorAll('.set[data-key]').forEach((b) => b.addEventListener('c
 document.addEventListener('click', (e) => { const t = e.target as HTMLElement; if ($('#modelMenu').classList.contains('show') && !t.closest('#modelMenu') && !t.closest('#modelBtn') && !t.closest('#tabModelBtn')) closeModelMenu(); });
 document.addEventListener('keydown', (e) => {
   const mod = e.ctrlKey || e.metaKey;
+  const el = e.target as HTMLElement | null;
+  const key = e.key.toLowerCase();
+  // In a modal text input (palette / history search / agent message / inline rename) the user is
+  // typing, not navigating — suppress ALL app chords. Escape still falls through below to close panels.
+  const modalInput = !!el && (el.isContentEditable || el.id === 'palInput' || el.id === 'histSearch' || el.id === 'agentInput');
+  if (mod && modalInput) return;
+  // Anywhere else that's editable (the command input, the terminal), keep the nav chords working but
+  // let the delete-word / EOF chords reach the field instead of firing a destructive app action —
+  // Ctrl+W (delete word) was closing the tab while you typed.
+  const editable = !!el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable);
+  if (mod && editable && !e.shiftKey && (key === 'w' || key === 'd')) return;
   if (mod && e.shiftKey && e.key.toLowerCase() === 'k') { e.preventDefault(); $('#bookmarksPanel').classList.contains('show') ? closeBookmarks() : openBookmarks(); }
   else if (mod && e.key.toLowerCase() === 'k') { e.preventDefault(); $('#palette').classList.contains('show') ? closePalette() : openPalette(); }
   else if (mod && !e.shiftKey && e.key.toLowerCase() === 'd') { e.preventDefault(); bookmarkSelection(); }
