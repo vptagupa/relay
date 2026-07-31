@@ -72,6 +72,19 @@
 :root[data-theme="aurora"] .lib-item:hover,:root[data-theme="aurora"] .file-item:hover{background:rgba(255,255,255,.07)}
 :root[data-theme="aurora"] .tab.active{background:rgba(255,255,255,.06);box-shadow:inset 0 -2px 0 var(--accent-2)} /* teal underline, per artifact */
 :root[data-theme="aurora"] .p-path{color:#7cc6ff} /* light-blue path, per artifact */
+
+/* Daylight: the strip goes light-grey so the white active tab clearly pops (was near-invisible). */
+:root[data-theme="daylight"] .pane-tabs{background:var(--surface-2)}
+:root[data-theme="daylight"] .tab.active{background:var(--surface);box-shadow:inset 0 -2.5px 0 var(--accent),0 1px 4px rgba(20,40,60,.08)}
+:root[data-theme="daylight"] .tab:hover:not(.active){background:rgba(20,30,45,.04)}
+
+/* Voltage: neon synthwave identity — faint grid canvas, accent glow, cyan second accent. */
+:root[data-theme="voltage"] .blocks-view{background-color:var(--canvas);background-image:linear-gradient(rgba(124,77,255,.11) 1px,transparent 1px),linear-gradient(90deg,rgba(124,77,255,.11) 1px,transparent 1px);background-size:26px 26px}
+:root[data-theme="voltage"] .tab.active{box-shadow:inset 0 -2px 0 var(--accent),0 0 14px -3px var(--accent)}
+:root[data-theme="voltage"] .winbar-mark,:root[data-theme="voltage"] .mark,:root[data-theme="voltage"] .agent-ava{box-shadow:0 0 12px rgba(255,46,151,.55)}
+:root[data-theme="voltage"] .bv-prompt,:root[data-theme="voltage"] .bvb-p{text-shadow:0 0 10px rgba(255,46,151,.5)}
+:root[data-theme="voltage"] .p-path{color:var(--accent-2)} /* cyan path, per artifact */
+:root[data-theme="voltage"] .tt-model,:root[data-theme="voltage"] .lib-pill{box-shadow:0 0 10px -2px var(--accent-line)}
 *{box-sizing:border-box}
 html,body,#app{height:100%;margin:0}
 body{background:var(--bg);color:var(--text);font-family:var(--sans);font-size:14px;-webkit-font-smoothing:antialiased;overflow:hidden}
