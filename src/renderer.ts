@@ -11,6 +11,7 @@ import { $, E, esc, uid, svgIcon } from './dom';
 import { ICON_SPRITE } from './icons';
 import { type Tab, state, activeTab, gTab, groupTabs } from './state';
 import { type PalAction, initPalette, openPalette, closePalette, renderPalette, palMove, palRun, palClick } from './palette';
+import { groupOf, addToList, reorderBookmark, removeGroup } from './bookmarks';
 import type { Settings, SavedSession, AgentEvent, ApprovalRequest, ChatTurn, OpenTab, Block, Bookmark, BookmarkGroup } from './shared/types';
 
 // TEMP DIAG: surface full stacks (minify is off) for the init crash.
@@ -1031,14 +1032,13 @@ function closeHistory() { $('#historyPanel').classList.remove('show'); }
 /* ----------------------------- bookmarks (saved command snippets, grouped) ----------------------------- */
 function bookmarks(): Bookmark[] { return state.settings.bookmarks || []; }
 function bookmarkGroups(): BookmarkGroup[] { return state.settings.bookmarkGroups || []; }
-// The group a bookmark effectively belongs to (undefined if none / group was deleted).
-function groupOf(b: Bookmark): string | undefined { return bookmarkGroups().some((g) => g.id === b.groupId) ? b.groupId : undefined; }
+// Pure list algebra (groupOf/addToList/reorderBookmark/removeGroup) lives in ./bookmarks — imported above.
 const collapsedGroups = new Set<string>(); // collapsed group ids ('' = the Ungrouped section)
 
 async function addBookmark(raw: string) {
   const text = raw.replace(/\s+$/, '').replace(/^\s+/, '');
   if (!text) { toast('Nothing selected'); return; }
-  const list = [{ id: uid(), text, createdAt: Date.now() }, ...bookmarks().filter((b) => b.text !== text)].slice(0, 300);
+  const list = addToList(bookmarks(), text, uid(), Date.now());
   state.settings = await relay.patchSettings({ bookmarks: list });
   renderBookmarks(); toast('Bookmarked ★', true);
 }
@@ -1049,20 +1049,9 @@ async function deleteBookmark(id: string) {
 // Move a bookmark to `gid` group and reorder it: drop `before`/after `beforeId` (a sibling),
 // or append to the group when no sibling target (dropped on empty group area).
 async function dropBookmark(id: string, gid: string | undefined, beforeId: string | null, before: boolean) {
-  const list = [...bookmarks()];
-  const di = list.findIndex((b) => b.id === id); if (di < 0) return;
-  const dragged = { ...list[di], groupId: gid };
-  list.splice(di, 1);
-  if (beforeId && beforeId !== id) {
-    let ti = list.findIndex((b) => b.id === beforeId);
-    if (ti < 0) ti = list.length; else if (!before) ti += 1;
-    list.splice(ti, 0, dragged);
-  } else {
-    // append after the last item already in the target group
-    let at = list.length;
-    for (let k = list.length - 1; k >= 0; k--) { if (groupOf(list[k]) === gid) { at = k + 1; break; } }
-    list.splice(at, 0, dragged);
-  }
+  const cur = bookmarks();
+  const list = reorderBookmark(cur, bookmarkGroups(), id, gid, beforeId, before);
+  if (list === cur) return; // dragged id not found — nothing moved
   state.settings = await relay.patchSettings({ bookmarks: list });
   renderBookmarks();
 }
@@ -1079,10 +1068,8 @@ async function renameBookmarkGroup(id: string, v: string) {
   renderBookmarks();
 }
 async function deleteBookmarkGroup(id: string) {
-  state.settings = await relay.patchSettings({
-    bookmarkGroups: bookmarkGroups().filter((g) => g.id !== id),
-    bookmarks: bookmarks().map((b) => b.groupId === id ? { ...b, groupId: undefined } : b), // orphans fall back to Ungrouped
-  });
+  const { groups, list } = removeGroup(bookmarkGroups(), bookmarks(), id); // orphans fall back to Ungrouped
+  state.settings = await relay.patchSettings({ bookmarkGroups: groups, bookmarks: list });
   renderBookmarks();
 }
 function runBookmark(text: string) {
@@ -1098,8 +1085,8 @@ function renderBookmarks() {
     <div class="bkm-text" title="Use Run to execute in the active terminal">${esc(b.text)}</div>
     <div class="bkm-actions"><button data-bact="run">Run</button><button data-bact="copy">Copy</button><button data-bact="del" title="Delete">✕</button></div>
   </div>`;
-  const count = (gid: string | undefined) => list.filter((b) => groupOf(b) === gid).length;
-  const sectionItems = (gid: string | undefined) => { const items = list.filter((b) => groupOf(b) === gid); return items.length ? items.map(itemHtml).join('') : '<div class="bkm-gempty">drop bookmarks here</div>'; };
+  const count = (gid: string | undefined) => list.filter((b) => groupOf(b, groups) === gid).length;
+  const sectionItems = (gid: string | undefined) => { const items = list.filter((b) => groupOf(b, groups) === gid); return items.length ? items.map(itemHtml).join('') : '<div class="bkm-gempty">drop bookmarks here</div>'; };
   const col = (gid: string) => collapsedGroups.has(gid) ? ' collapsed' : '';
   let html = '';
   for (const g of groups) {
