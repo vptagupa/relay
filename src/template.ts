@@ -140,7 +140,7 @@ export function appHtml(panes: string): string {
 
   <aside class="history bookmarks" id="bookmarksPanel" role="dialog" aria-label="Bookmarks">
     <div class="hist-head"><div class="hist-title">★ Bookmarks</div><button class="hist-x" id="btnBookmarksClose" aria-label="Close">✕</button></div>
-    <div class="hist-tools"><button class="hist-filter" id="bkmAddGroup" title="Add a group">＋ Group</button></div>
+    <div class="hist-tools"><button class="hist-filter" id="bkmNew" title="Add a bookmark manually">＋ Bookmark</button><button class="hist-filter" id="bkmAddGroup" title="Add a group">＋ Group</button></div>
     <div class="hist-list" id="bkmList"></div>
   </aside>
 

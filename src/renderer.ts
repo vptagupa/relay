@@ -812,6 +812,23 @@ async function renameBookmarkGroup(id: string, v: string) {
   state.settings = await relay.patchSettings({ bookmarkGroups: bookmarkGroups().map((g) => g.id === id ? { ...g, name } : g) });
   renderBookmarks();
 }
+// Manually add a bookmark (no selection needed): create an empty one at the top and edit it inline.
+async function addBookmarkManual() {
+  openBookmarks(); // ensure the panel is visible (also handles being triggered from the palette)
+  const b = { id: uid(), text: '', createdAt: Date.now() };
+  state.settings = await relay.patchSettings({ bookmarks: [b, ...bookmarks()] });
+  renderBookmarks();
+  const el = document.querySelector(`[data-bktext="${b.id}"]`) as HTMLElement | null;
+  // Commit saves the text; onDone (runs on commit OR cancel) drops the placeholder if it was left
+  // empty — read el.textContent (synchronous, reflects the just-typed/restored text) not async state.
+  if (el) makeEditable(el, (v) => renameBookmark(b.id, v), () => { if (!(el.textContent || '').trim()) deleteBookmark(b.id); });
+}
+async function renameBookmark(id: string, v: string) {
+  const text = v.trim();
+  if (!text) { await deleteBookmark(id); return; } // empty (e.g. cancelled placeholder) — drop it
+  state.settings = await relay.patchSettings({ bookmarks: bookmarks().map((b) => b.id === id ? { ...b, text } : b) });
+  renderBookmarks();
+}
 async function deleteBookmarkGroup(id: string) {
   const { groups, list } = removeGroup(bookmarkGroups(), bookmarks(), id); // orphans fall back to Ungrouped
   state.settings = await relay.patchSettings({ bookmarkGroups: groups, bookmarks: list });
@@ -824,10 +841,10 @@ function runBookmark(text: string) {
 }
 function renderBookmarks() {
   const el = $('#bkmList'); const list = bookmarks(); const groups = bookmarkGroups();
-  if (!list.length && !groups.length) { el.innerHTML = '<div class="hist-empty">No bookmarks yet.<br><span class="dim">Highlight a command in a block and click ★ Bookmark. Use ＋ Group to organize them.</span></div>'; return; }
+  if (!list.length && !groups.length) { el.innerHTML = '<div class="hist-empty">No bookmarks yet.<br><span class="dim">Highlight a command and click ★ Bookmark, or use ＋ Bookmark to add one manually. ＋ Group organizes them.</span></div>'; return; }
   const itemHtml = (b: Bookmark) => `<div class="bkm-item" data-bid="${b.id}" draggable="true">
     <span class="bkm-grip" title="Drag to reorder or move to a group">⠿</span>
-    <div class="bkm-text" title="Use Run to execute in the active terminal">${esc(b.text)}</div>
+    <div class="bkm-text" data-bktext="${b.id}" title="Double-click to edit — Run executes it">${esc(b.text)}</div>
     <div class="bkm-actions"><button data-bact="run">Run</button><button data-bact="copy">Copy</button><button data-bact="del" title="Delete">✕</button></div>
   </div>`;
   const count = (gid: string | undefined) => list.filter((b) => groupOf(b, groups) === gid).length;
@@ -1024,6 +1041,7 @@ function paletteActions(): PalAction[] {
     { g: 'View', t: 'Command history', run: openHistory },
     { g: 'View', t: 'Bookmarks', run: openBookmarks },
     { g: 'View', t: 'Bookmark highlighted text', run: bookmarkSelection },
+    { g: 'View', t: 'Add bookmark manually', run: addBookmarkManual },
     { g: 'View', t: 'Toggle Blocks / Classic terminal', run: toggleBlocksView },
     { g: 'View', t: 'Split right (clone terminal)', run: () => splitClone('row') },
     { g: 'View', t: 'Split down (clone terminal)', run: () => splitClone('col') },
@@ -1093,6 +1111,7 @@ document.addEventListener('mousemove', (e) => { lastMouse = { x: (e as MouseEven
 document.addEventListener('mouseup', (e) => { const m = e as MouseEvent; const inTerm = !!(m.target as HTMLElement)?.closest?.('.xterm, .term-host'); setTimeout(() => refreshPill(m.clientX, m.clientY, inTerm), 0); });
 document.addEventListener('mousedown', (e) => { if (!(e.target as HTMLElement).closest('#bkmPop')) hideBkmPop(); });
 $('#bkmAddGroup').onclick = addBookmarkGroup;
+$('#bkmNew').onclick = addBookmarkManual;
 $('#bkmList').addEventListener('click', (e) => {
   const el = e.target as HTMLElement;
   const gact = (el.closest('[data-gact]') as HTMLElement | null)?.dataset.gact;
@@ -1113,8 +1132,11 @@ $('#bkmList').addEventListener('click', (e) => {
   else if (act === 'del') deleteBookmark(b.id);
 });
 $('#bkmList').addEventListener('dblclick', (e) => {
-  const n = (e.target as HTMLElement).closest('[data-grename]') as HTMLElement | null; if (!n) return;
-  makeEditable(n, (v) => renameBookmarkGroup(n.dataset.grename!, v));
+  const t = e.target as HTMLElement;
+  const g = t.closest('[data-grename]') as HTMLElement | null;
+  if (g) { makeEditable(g, (v) => renameBookmarkGroup(g.dataset.grename!, v)); return; } // rename a group
+  const bt = t.closest('[data-bktext]') as HTMLElement | null;
+  if (bt) makeEditable(bt, (v) => renameBookmark(bt.dataset.bktext!, v)); // edit a bookmark's text
 });
 // Drag-and-drop: reorder bookmarks & move them between groups; reorder groups.
 let dragBkm: string | null = null;
