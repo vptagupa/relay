@@ -1515,7 +1515,8 @@ relay.onPtyData((id: string, data: string) => { state.tabs.find((t) => t.id === 
 // Final flush on close — synchronous so the latest scrollback reaches disk before teardown.
 // Wrapped so a failed flush can never throw mid-unload (which would abort a clean close).
 window.addEventListener('beforeunload', () => {
-  try { if (state.settings.autoSave) relay.flushWorkspace({ active: state.active, tabs: snapshotTabs(), gv: state.gv, focus: state.focus, layout: state.layout }); } catch { /* ignore */ }
+  // !booting: never let a close mid-restore flush a partial tab set over the full saved workspace.
+  try { if (state.settings.autoSave && !booting) relay.flushWorkspace({ active: state.active, tabs: snapshotTabs(), gv: state.gv, focus: state.focus, layout: state.layout }); } catch { /* ignore */ }
 });
 relay.onPtyExit((id: string) => { state.tabs.find((x) => x.id === id)?.term.write('\r\n\x1b[90m[process exited]\x1b[0m\r\n'); });
 relay.onApproval((req: ApprovalRequest) => showApproval(req));
