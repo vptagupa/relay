@@ -7,6 +7,7 @@ import { THEMES, themeById, DEFAULT_THEME, type Theme } from './themes';
 import { type LNode, type Split, isLeaf, leaves, replaceLeaf, removeLeaf, siblingLeaf, isValidLayout } from './layout';
 import { stripAnsi, collapseCR, ansiToHtml } from './ansi';
 import { type ExFmt, realBlock, cmdText, cmdRaw, buildExport } from './blocks-text';
+import { $, E, esc, uid, svgIcon } from './dom';
 import type { Settings, SavedSession, AgentEvent, ApprovalRequest, ChatTurn, OpenTab, Block, Bookmark, BookmarkGroup } from './shared/types';
 
 // TEMP DIAG: surface full stacks (minify is off) for the init crash.
@@ -14,10 +15,7 @@ window.addEventListener('error', (e) => console.error('WERR ' + ((e as ErrorEven
 window.addEventListener('unhandledrejection', (e) => console.error('WREJ ' + ((e as PromiseRejectionEvent).reason?.stack || String((e as PromiseRejectionEvent).reason))));
 
 const relay = (window as any).relay;
-const $ = <T extends HTMLElement = HTMLElement>(s: string) => document.querySelector(s) as T;
-const uid = () => (crypto as any).randomUUID();
-const esc = (s: string) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]!));
-const svgIcon = (id: string, sz = 16) => `<svg width="${sz}" height="${sz}" aria-hidden="true"><use href="#${id}"/></svg>`; // artifact line-icon set
+// $, E, esc, uid, svgIcon — shared DOM/render primitives — live in ./dom (imported above).
 
 interface Tab { id: string; name: string; model: string; cwd: string; libId?: string; term: Terminal; fit: FitAddon; ser: SerializeAddon; el: HTMLElement; lastCols?: number; lastRows?: number; tabBg?: string; tabFg?: string; bodyBg?: string; bodyFg?: string; chat: ChatTurn[]; blocks: Block[]; bkNonce: string; cmdHistory: string[]; histIdx: number; liveInteractive: boolean; group: number; }
 
@@ -63,11 +61,6 @@ function paneHtml(g: number): string {
     </div>
   </div>`;
 }
-// Persistent per-pane elements are reused as split leaves. Once a pane is removed from the
-// grid (during a layout rebuild) it's detached from the document, so querySelector can no
-// longer find it. Resolve each ONCE while still attached and cache the live reference.
-const _elCache: Record<string, HTMLElement> = {};
-const E = (sel: string): HTMLElement => (_elCache[sel] ??= document.querySelector(sel) as HTMLElement);
 
 // Apply the default theme's CSS vars synchronously BEFORE the template renders — no flash, and
 // no need for per-theme blocks in the stylesheet (boot() re-applies the persisted theme).
