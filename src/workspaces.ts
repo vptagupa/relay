@@ -113,6 +113,7 @@ function teardownAllTabs(kill = false): void {
   state.tabs = [];
   state.layout = { g: 0 }; state.gv = ['', '', '', '']; state.focus = 0; state.active = ''; state.maxG = null;
   deps.reconcilePanes(); // collapse the grid back to one empty pane (like closeTab's last-tab reset) before the rebuild
+  deps.renderTabs();     // clear the surviving pane's tab strip too: rebuilding into an EMPTY workspace takes restore's else-branch, which skips renderTabs — without this the previous workspace's tab buttons stay stranded in the strip
 }
 
 export async function switchWorkspace(id: string): Promise<void> {
