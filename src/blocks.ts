@@ -32,7 +32,8 @@ export interface TermBlock {
 export type BlockEvent =
   | { type: 'start'; block: TermBlock }
   | { type: 'update'; block: TermBlock }
-  | { type: 'end'; block: TermBlock };
+  | { type: 'end'; block: TermBlock }
+  | { type: 'cwd'; cwd: string };        // the shell's working directory changed (every prompt)
 
 const ESC = '\x1b';
 const BEL = '\x07';
@@ -86,6 +87,7 @@ export function createShellParser(emit: (e: BlockEvent) => void): { feed(chunk: 
     } else if (body.startsWith('633;P;Cwd=')) {
       lastCwd = body.slice('633;P;Cwd='.length);
       if (cur) cur.cwd = lastCwd;
+      emit({ type: 'cwd', cwd: lastCwd }); // let the renderer track the live cwd (drives cd autocomplete + status bar)
     } else if (body.startsWith('633;E;')) {
       startBlock(body.slice('633;E;'.length)); // the clean command line
       mode = 'idle'; // output starts at the following 133;C

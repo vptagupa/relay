@@ -724,8 +724,11 @@ let histQuery = '';
 // collapsedBlocks + fmtDur + the block renderers (blockHtml/bvBlockHtml) live in ./block-view.
 // ANSI text helpers live in ./ansi (renderer still uses stripAnsi/collapseCR directly).
 // Structured command blocks stream in from the shell-integration parser (main process).
-relay.onPtyBlock((id: string, ev: { type: 'start' | 'update' | 'end'; block: Block }) => {
+relay.onPtyBlock((id: string, ev: { type: 'start' | 'update' | 'end'; block: Block } | { type: 'cwd'; cwd: string }) => {
   const t = state.tabs.find((x) => x.id === id); if (!t) return;
+  // The shell reported its working directory (fires each prompt) — keep the tab's cwd live so the
+  // cd autocomplete lists the *current* folder and the status bar stays accurate after a `cd`.
+  if (ev.type === 'cwd') { if (ev.cwd && ev.cwd !== t.cwd) { t.cwd = ev.cwd; if (state.active === id) updateStatus(); } return; }
   // Namespace the parser's per-run ids (b1, b2, …) with a per-tab nonce so a fresh shell's
   // blocks never collide with blocks restored from a previous run of the same terminal.
   const bid = t.bkNonce + ':' + ev.block.id;
@@ -961,6 +964,14 @@ function paneSend(g: number) {
 // Shared keydown for a pane's command input.
 function bvKeydown(g: number, ev: KeyboardEvent) {
   const t = gTab(g); const inp = ev.target as HTMLTextAreaElement;
+  // While the cd-completion popup is open it owns the navigation/accept keys.
+  if (cdOpen() && cdc.g === g) {
+    if (ev.key === 'ArrowDown') { ev.preventDefault(); ev.stopPropagation(); cdMove(1); return; }
+    if (ev.key === 'ArrowUp')   { ev.preventDefault(); ev.stopPropagation(); cdMove(-1); return; }
+    if (ev.key === 'Enter')     { ev.preventDefault(); ev.stopPropagation(); cdAccept(g, false); return; }
+    if (ev.key === 'Tab')       { ev.preventDefault(); ev.stopPropagation(); cdAccept(g, true); return; } // Tab drills deeper
+    if (ev.key === 'Escape')    { ev.preventDefault(); ev.stopPropagation(); hideCdPop(); return; }
+  }
   if (ev.key === 'Enter' && !ev.shiftKey) { ev.preventDefault(); paneSend(g); }
   else if (ev.key === 'Enter') { requestAnimationFrame(() => bvGrow(inp)); }
   // History recall only when the caret is on the first/last line — otherwise arrows move within a multi-line command.
@@ -968,7 +979,80 @@ function bvKeydown(g: number, ev: KeyboardEvent) {
   else if (ev.key === 'ArrowDown' && t && t.cmdHistory.length && !inp.value.slice(inp.selectionEnd).includes('\n')) { ev.preventDefault(); t.histIdx = Math.min(t.cmdHistory.length, t.histIdx + 1); inp.value = t.cmdHistory[t.histIdx] || ''; bvGrow(inp); }
   // Ctrl+C interrupts the shell only when nothing is selected; with a selection, let the browser copy it.
   else if (ev.ctrlKey && ev.key.toLowerCase() === 'c') { if (t && inp.selectionStart === inp.selectionEnd) { relay.ptyWrite(t.id, '\x03'); inp.value = ''; bvGrow(inp); } }
-  else if (ev.key === 'Tab') ev.preventDefault();
+  else if (ev.key === 'Tab') { ev.preventDefault(); updateCdPop(g); } // Tab on a `cd …` line opens directory completion
+}
+
+/* ---- cd directory autocomplete (blocks-view command bar) --------------------------------------
+   When the line is `cd <partial>`, offer the matching subdirectories of the resolved directory
+   (the tab's live cwd + any path already typed). Auto-shows while typing; Tab opens/drills; ↑/↓
+   navigate; Enter/click fill; Esc dismisses. Only the bv-cmd input is Relay-owned, so this lives
+   here — the classic xterm relies on the shell's own Tab completion. */
+const cdc = { g: -1, items: [] as string[], sel: 0, dirPart: '', namePart: '', token: 0 };
+let cdCache: { dir: string; entries: { name: string; isDir: boolean }[] } = { dir: '', entries: [] };
+const CD_FI = `<svg class="fi" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M3 7a1 1 0 0 1 1-1h4.7l1.7 1.8H20a1 1 0 0 1 1 1V18a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1z"/></svg>`;
+
+// Split a `cd <arg>` line into the directory part (up to the last separator) and the name prefix.
+function cdParse(val: string): { dirPart: string; namePart: string } | null {
+  const m = /^\s*cd\s+(.*)$/i.exec(val);
+  if (!m) return null;
+  let arg = m[1];
+  if (arg.includes('\n')) return null;
+  if (arg[0] === '"' || arg[0] === "'") arg = arg.slice(1).replace(/["']$/, ''); // unwrap a quoted path
+  const sep = Math.max(arg.lastIndexOf('/'), arg.lastIndexOf('\\'));
+  return { dirPart: sep >= 0 ? arg.slice(0, sep + 1) : '', namePart: sep >= 0 ? arg.slice(sep + 1) : arg };
+}
+// The directory to list: an absolute path as-is, otherwise the tab's cwd joined with the typed part.
+function cdResolveDir(base: string, dirPart: string): string {
+  if (!dirPart) return base;
+  if (/^([a-zA-Z]:[\\/]|[\\/]{2}|[\\/])/.test(dirPart)) return dirPart; // C:\  \\unc  /abs
+  return base.replace(/[\\/]+$/, '') + '/' + dirPart; // main's fs.resolve normalizes mixed separators + ..
+}
+async function updateCdPop(g: number) {
+  const t = gTab(g); const inp = E(P_CMD[g]) as HTMLTextAreaElement;
+  const p = t && t.cwd ? cdParse(inp.value) : null;
+  if (!p || !t) { hideCdPop(); return; }
+  const dir = cdResolveDir(t.cwd, p.dirPart);
+  let entries: { name: string; isDir: boolean }[];
+  if (cdCache.dir === dir) entries = cdCache.entries; // still the same folder — re-filter without a new IPC
+  else {
+    const my = ++cdc.token;
+    const res = await relay.fsList(dir);
+    if (my !== cdc.token) return;            // a newer keystroke superseded this lookup
+    if (res.error) { hideCdPop(); return; }
+    entries = res.entries; cdCache = { dir, entries };
+  }
+  const q = p.namePart.toLowerCase();
+  const dirs = entries.filter((e) => e.isDir && e.name.toLowerCase().startsWith(q)).map((e) => e.name).slice(0, 200);
+  if (!dirs.length) { hideCdPop(); return; }
+  cdc.g = g; cdc.items = dirs; cdc.sel = 0; cdc.dirPart = p.dirPart; cdc.namePart = p.namePart;
+  renderCdPop(); positionCdPop(g); $('#cdPop').classList.add('show');
+}
+function renderCdPop() {
+  const n = cdc.namePart.length;
+  $('#cdList').innerHTML = cdc.items.map((name, i) => {
+    const label = n ? `<b>${esc(name.slice(0, n))}</b>${esc(name.slice(n))}` : esc(name); // bold the matched prefix
+    return `<div class="cd-item${i === cdc.sel ? ' sel' : ''}" data-i="${i}">${CD_FI}<span class="cd-nm">${label}</span></div>`;
+  }).join('');
+  ($('#cdList').querySelector('.cd-item.sel') as HTMLElement | null)?.scrollIntoView({ block: 'nearest' });
+}
+function positionCdPop(g: number) {
+  const r = (E(P_CMD[g]) as HTMLElement).getBoundingClientRect(); const pop = $('#cdPop');
+  pop.style.left = r.left + 'px'; pop.style.top = 'auto';
+  pop.style.bottom = (window.innerHeight - r.top + 6) + 'px'; // dropdown grows upward from just above the input
+  pop.style.minWidth = Math.min(Math.max(r.width * 0.55, 190), 460) + 'px';
+}
+function hideCdPop() { cdc.g = -1; cdc.items = []; $('#cdPop').classList.remove('show'); }
+function cdOpen(): boolean { return cdc.g >= 0 && $('#cdPop').classList.contains('show'); }
+function cdMove(d: number) { if (!cdc.items.length) return; cdc.sel = (cdc.sel + d + cdc.items.length) % cdc.items.length; renderCdPop(); }
+// Fill the selected directory into the command; `drill` appends a separator and re-lists to go deeper.
+function cdAccept(g: number, drill: boolean) {
+  if (cdc.g !== g || !cdc.items.length) return;
+  const inp = E(P_CMD[g]) as HTMLTextAreaElement;
+  let body = cdc.dirPart + cdc.items[cdc.sel];
+  if (drill) body += '/';
+  inp.value = 'cd ' + (/\s/.test(body) ? `"${body}"` : body);
+  inp.setSelectionRange(inp.value.length, inp.value.length); bvGrow(inp);
+  if (drill) updateCdPop(g); else hideCdPop();
 }
 // Block→text helpers and session export (ExFmt/realBlock/cmdText/cmdRaw/buildExport) live in
 // ./blocks-text — imported above. sendCommand stays here: it writes to the pty via relay.
@@ -1114,6 +1198,12 @@ document.addEventListener('selectionchange', () => { if (!$('#bkmPop').contains(
 document.addEventListener('mousemove', (e) => { lastMouse = { x: (e as MouseEvent).clientX, y: (e as MouseEvent).clientY }; });
 document.addEventListener('mouseup', (e) => { const m = e as MouseEvent; const inTerm = !!(m.target as HTMLElement)?.closest?.('.xterm, .term-host'); setTimeout(() => refreshPill(m.clientX, m.clientY, inTerm), 0); });
 document.addEventListener('mousedown', (e) => { if (!(e.target as HTMLElement).closest('#bkmPop')) hideBkmPop(); });
+// cd autocomplete popup: keep the command input focused on mousedown, accept the clicked directory.
+$('#cdPop').addEventListener('mousedown', (e) => e.preventDefault());
+$('#cdPop').addEventListener('click', (e) => {
+  const it = (e.target as HTMLElement).closest('.cd-item') as HTMLElement | null;
+  if (it && cdc.g >= 0) { cdc.sel = +it.dataset.i!; cdAccept(cdc.g, false); }
+});
 $('#bkmAddGroup').onclick = addBookmarkGroup;
 $('#bkmNew').onclick = addBookmarkManual;
 $('#bkmList').addEventListener('click', (e) => {
@@ -1235,7 +1325,8 @@ for (let g = 0; g < 4; g++) {
     reflectModel(); updateStatus();
   });
   (E(P_CMD[g]) as HTMLElement).addEventListener('keydown', (e) => bvKeydown(g, e as KeyboardEvent));
-  (E(P_CMD[g]) as HTMLElement).addEventListener('input', (e) => bvGrow(e.target as HTMLTextAreaElement));
+  (E(P_CMD[g]) as HTMLElement).addEventListener('input', (e) => { bvGrow(e.target as HTMLTextAreaElement); updateCdPop(g); });
+  (E(P_CMD[g]) as HTMLElement).addEventListener('blur', () => hideCdPop()); // dismiss cd popup on focus loss
   E(P_SCROLL[g]).addEventListener('click', onBlockAreaClick);
   // Drag-to-split zones for THIS pane's body — drop a tab on the right/bottom edge to split the
   // pane you're hovering (data-g identifies which). Created for every pane, not just pane 0.
@@ -1560,7 +1651,7 @@ document.addEventListener('keydown', (e) => {
   else if (mod && e.key.toLowerCase() === 's') { e.preventDefault(); saveActive(); }
   else if (mod && e.key.toLowerCase() === 'l') { e.preventDefault(); clearActive(); }
   else if (mod && e.key.toLowerCase() === 'w') { e.preventDefault(); state.active && closeTab(state.active); }
-  else if (e.key === 'Escape') { closeConfirm(false); closeModelMenu(); closePalette(); closeSettings(); closeTabMenu(); closeColorPop(); closeHistory(); closeBookmarks(); hideBkmPop(); }
+  else if (e.key === 'Escape') { closeConfirm(false); closeModelMenu(); closePalette(); closeSettings(); closeTabMenu(); closeColorPop(); closeHistory(); closeBookmarks(); hideBkmPop(); hideCdPop(); }
 });
 
 relay.onPtyData((id: string, data: string) => { state.tabs.find((t) => t.id === id)?.term.write(data); persistWorkspace(); });

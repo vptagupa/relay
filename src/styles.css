@@ -504,6 +504,17 @@ body.tabdrag .dz{display:block;pointer-events:auto}
 /* bookmarks */
 .bkm-pop{position:fixed;z-index:90;display:none}
 .bkm-pop.show{display:block}
+/* cd directory autocomplete popup (blocks-view command bar) */
+.cd-pop{position:fixed;z-index:88;display:none;background:var(--surface);border:1px solid var(--border-strong);border-radius:var(--r-lg);box-shadow:var(--shadow);padding:5px;max-width:460px}
+.cd-pop.show{display:block}
+.cd-hint{font:10px/1 var(--mono);color:var(--muted);letter-spacing:.02em;padding:5px 9px 7px}
+.cd-list{max-height:248px;overflow-y:auto;display:flex;flex-direction:column;gap:1px}
+.cd-item{display:flex;align-items:center;gap:8px;padding:6px 9px;border-radius:7px;cursor:pointer;font:12.5px/1.2 var(--mono);color:var(--text-dim);white-space:nowrap;overflow:hidden}
+.cd-item .fi{flex:none;color:var(--accent-2);opacity:.9}
+.cd-item .cd-nm{flex:1;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.cd-item .cd-nm b{color:var(--text);font-weight:700}
+.cd-item:hover{background:var(--surface-2)}
+.cd-item.sel{background:var(--accent-ghost);color:var(--text)}
 .bkm-pop button{background:var(--accent);color:var(--on-accent);border:none;border-radius:8px;padding:7px 12px;font:600 12px/1 var(--sans);cursor:pointer;box-shadow:var(--shadow)}
 .bkm-pop button:hover{filter:brightness(1.08)}
 #bkmList{gap:10px}

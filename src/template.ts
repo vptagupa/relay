@@ -152,6 +152,8 @@ export function appHtml(panes: string): string {
 
   <div class="bkm-pop" id="bkmPop"><button id="bkmAdd">★ Bookmark</button></div>
 
+  <div class="cd-pop" id="cdPop"><div class="cd-hint">cd — ↑↓ select · Tab drill · Enter fill</div><div class="cd-list" id="cdList"></div></div>
+
   <div class="confirm" id="confirmBox" role="alertdialog" aria-labelledby="cfTitle">
     <div class="a-title" id="cfTitle">Close terminal?</div>
     <div class="a-detail" id="cfDetail"></div>
