@@ -131,7 +131,7 @@ async function newTab(seed?: Partial<OpenTab> & { libId?: string }, activate = t
     if (el.parentElement !== host) host.appendChild(el);
     if (group > 0) (E(PANE[group]) as HTMLElement).style.display = '';
     for (const x of state.tabs) x.el.classList.toggle('hidden', x.id !== state.gv[x.group]);
-    fit.fit(); tab.lastCols = term.cols; tab.lastRows = term.rows;
+    fit.fit(); tab.lastCols = term.cols; tab.lastRows = term.rows; tab.fitted = term.cols > 0;
   }
   renderTabs();
   // Reattach to a live shell if one exists (replays its real output); otherwise spawn a
@@ -161,7 +161,12 @@ async function addFolderTab() {
 function applyResize(t: Tab) {
   t.fit.fit();
   const c = t.term.cols, r = t.term.rows;
-  if (c > 0 && r > 0 && (c !== t.lastCols || r !== t.lastRows)) { t.lastCols = c; t.lastRows = r; relay.ptyResize(t.id, c, r); }
+  if (c > 0 && r > 0) {
+    // First time this terminal has real dimensions (it was created in a hidden pane): it's now safe to
+    // write — flush any replay/output buffered while it had no measured size (see writeToTab).
+    if (!t.fitted) { t.fitted = true; if (t.replayQ) { t.term.write(t.replayQ); t.replayQ = undefined; } }
+    if (c !== t.lastCols || r !== t.lastRows) { t.lastCols = c; t.lastRows = r; relay.ptyResize(t.id, c, r); }
+  }
 }
 // Focus a tab — make it the visible tab of its group and give that group focus.
 function switchTab(id: string) {
@@ -175,6 +180,7 @@ function paneAftermath() {
   E('#termEmpty').style.display = state.tabs.length ? 'none' : 'grid';
   const t = activeTab();
   reconcilePanes();
+  if (t && !t.fitted) applyResize(t); // first time this (restored) tab is shown — fit it so its buffered replay flushes
   renderTabs(); updateStatus(); reflectModel(); persistWorkspace();
   state.browsePath = t?.cwd || state.settings.workspace || ''; renderFiles(); // Files follows the active terminal
   if ($('#agentPanel').classList.contains('show')) renderChat();
@@ -595,6 +601,7 @@ async function restoreWorkspaceSnapshot(ws: Workspace): Promise<void> {
     state.active = state.gv[state.focus] || activeId;
     E('#termEmpty').style.display = 'none';
     reconcilePanes(); renderTabs();
+    fitPanes(); // fit each pane's visible tab now, so its buffered replay flushes even if the ResizeObserver doesn't fire (same-layout switch)
   } else if (state.settings.workspace) {
     newTab();
   } else {
@@ -2212,14 +2219,23 @@ document.addEventListener('keydown', (e) => {
   else if (e.key === 'Escape') { closeConfirm(false); closeModelMenu(); closePalette(); closeSettings(); closeTabMenu(); closeColorPop(); closeHistory(); closeBookmarks(); hideBkmPop(); hideCdPop(); closeWsMenu(); }
 });
 
-relay.onPtyData((id: string, data: string) => { state.tabs.find((t) => t.id === id)?.term.write(data); persistWorkspace(); });
+// Write terminal output to a tab, or BUFFER it when the tab has no measured size yet (it was created in a
+// hidden/display:none pane during restore). Writing to an unmeasured xterm throws inside its viewport
+// (syncScrollArea → undefined `dimensions`); the buffer is bounded (newest kept) and flushed by applyResize
+// the first time the tab is fit while visible. A tab that was ever fit keeps cached dims, so this is a no-op.
+function writeToTab(id: string, data: string): void {
+  const t = state.tabs.find((x) => x.id === id); if (!t) return;
+  if (t.fitted) t.term.write(data);
+  else t.replayQ = ((t.replayQ ?? '') + data).slice(-512 * 1024);
+}
+relay.onPtyData((id: string, data: string) => { writeToTab(id, data); persistWorkspace(); });
 // Final flush on close — synchronous so the latest scrollback reaches disk before teardown.
 // Wrapped so a failed flush can never throw mid-unload (which would abort a clean close).
 window.addEventListener('beforeunload', () => {
   // !booting: never let a close mid-restore flush a partial tab set over the full saved workspace.
   try { if (state.settings.autoSave && !booting) relay.flushWorkspace({ active: state.active, tabs: snapshotTabs(), gv: state.gv, focus: state.focus, layout: state.layout }); } catch { /* ignore */ }
 });
-relay.onPtyExit((id: string) => { state.tabs.find((x) => x.id === id)?.term.write('\r\n\x1b[90m[process exited]\x1b[0m\r\n'); });
+relay.onPtyExit((id: string) => { writeToTab(id, '\r\n\x1b[90m[process exited]\x1b[0m\r\n'); });
 relay.onApproval((req: ApprovalRequest) => showApproval(req));
 relay.onDeeplink(handleDeeplink);
 let _roT: any;
