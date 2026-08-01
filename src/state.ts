@@ -20,6 +20,7 @@ export const state = {
   focus: 0,                              // which group has focus
   layout: { g: 0 } as LNode,             // nested split tree (leaves = pane indices)
   maxG: null as null | number,           // a group temporarily maximized (fills the pane grid)
+  booting: true,                         // suppress autosave until a workspace has finished restoring (shared by renderer + workspaces.ts)
   settings: { workspace: null, defaultModel: DEFAULT_MODEL, autoApprove: false, autoSave: true, theme: 'dark', template: 'graphite', sidebarCollapsed: false, toolbarShown: false, librarySort: 'recent', librarySplit: 0.4, sidebarWidth: 260, hasKey: {} } as Settings,
   library: [] as SavedSession[],
   history: [] as ChatTurn[],

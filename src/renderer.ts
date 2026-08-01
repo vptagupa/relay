@@ -18,7 +18,8 @@ import { toast, makeEditable } from './ui';
 import { filterHistory, railEntry } from './history';
 import { initFiles, renderFiles } from './files';
 import { initBlockView, blockHtml, bvBlockHtml, collapsedBlocks, fmtDur } from './block-view';
-import { initBlueprints, loadBlueprints, openTplMenu, saveAsTemplate, newFromBlueprint, findBlueprint, runStartupIfPending } from './blueprints';
+import { openTplMenu, saveAsTemplate, runStartupIfPending } from './blueprints';
+import { initWorkspaces, loadWorkspaceMeta, restoreWorkspaceSnapshot, settleDeeplink, createWorkspace, openWsMenu, closeWsMenu, handleDeeplink, setActiveWsRoot, setActiveWsTheme, getActiveWsId, duplicateWorkspace, exportWorkspace, importWorkspace, toggleTrust, copyWorkspaceLink, activeWorkspaceDef, isWorkspaceTrusted } from './workspaces';
 import type { Settings, SavedSession, AgentEvent, ApprovalRequest, ChatTurn, OpenTab, Workspace, WorkspaceDef, Block, Bookmark, BookmarkGroup } from './shared/types';
 
 // TEMP DIAG: surface full stacks (minify is off) for the init crash.
@@ -530,10 +531,11 @@ function snapshotTabs(): OpenTab[] {
 // session spent only WATCHING output (no keystrokes) still saves steadily, instead of
 // persisting nothing past the opening prompt. `immediate` bypasses it for the final
 // flush on window close.
-let booting = true; // suppress autosave until the workspace has finished restoring (else a mid-restore save corrupts relay.json)
+// `state.booting` (in state.ts) suppresses autosave until a workspace has finished restoring; it is
+// shared with workspaces.ts (which owns the switch/restore that sets it). See persistWorkspace below.
 function persistWorkspace(immediate = false) {
-  if (!state.settings.autoSave || booting) return;
-  const run = () => { wsT = null; relay.setWorkspace({ active: state.active, tabs: snapshotTabs(), gv: state.gv, focus: state.focus, layout: state.layout }); flashSaved(); };
+  if (!state.settings.autoSave || state.booting) return;
+  const run = () => { wsT = null; if (state.booting) return; relay.setWorkspace({ active: state.active, tabs: snapshotTabs(), gv: state.gv, focus: state.focus, layout: state.layout }); flashSaved(); }; // re-check booting: a timer scheduled before a switch must NOT fire mid-teardown (state emptied, store still on the old id) and overwrite the outgoing workspace with an empty snapshot
   if (immediate) { if (wsT) clearTimeout(wsT); run(); return; }
   if (wsT) return;              // a save is already scheduled — coalesce into it
   wsT = setTimeout(run, 800);
@@ -553,323 +555,6 @@ async function toggleAutosave() {
   reflectAutosave();
   if (state.settings.autoSave) { persistWorkspace(); toast('Auto-save enabled — terminals restore on relaunch', true); }
   else toast('Auto-save disabled');
-}
-
-/* ----------------------------- named workspaces ----------------------------- */
-// Renderer mirror of the store's workspace definitions + the active id. The active workspace's tab
-// snapshot is what boot/persist read & write (getWorkspace/setWorkspace). Switching saves the
-// current snapshot, tears the terminals down (cold — Phase 1), and rebuilds the target's.
-let wsDefs: WorkspaceDef[] = [];
-let wsActiveId = '';
-const WS_COLORS = ['#6e7bff', '#f2a93b', '#4ec46a', '#ff2e97', '#22d3ee', '#a78bfa', '#f0616a'];
-const nextWsColor = () => WS_COLORS[wsDefs.length % WS_COLORS.length];
-const activeWsDef = (): WorkspaceDef | undefined => wsDefs.find((w) => w.id === wsActiveId);
-const addWorkspaceDef = (def: WorkspaceDef): void => { wsDefs.push(def); }; // for blueprints.ts (spawn-from-template)
-
-// Keep-alive is bounded: at most WARM_CAP background workspaces keep their shells alive. Beyond that
-// the least-recently-used background workspace is evicted — its shells are killed (its snapshot stays,
-// so it cold-restores on next open). Prevents unbounded shells from piling up across many switches.
-const WARM_CAP = 4;
-let warmWs: string[] = []; // background workspaces with live detached shells, oldest first
-async function killWorkspaceShells(id: string): Promise<void> {
-  const snap = await relay.getWorkspaceSnapshot(id);
-  for (const t of snap.tabs) relay.ptyKill(t.id);
-}
-async function evictBeyondCap(): Promise<void> {
-  const over = warmWs.length - WARM_CAP;
-  if (over <= 0) return;
-  const evict = warmWs.splice(0, over); // remove the oldest synchronously (before any await) so a concurrent switch can't race the list
-  for (const id of evict) await killWorkspaceShells(id);
-}
-
-// Rebuild the pane layout + terminals from a saved snapshot. Shared by boot and workspace switch;
-// the caller must have `booting` set (autosave suspended) around it. Applies the split layout FIRST
-// so each tab lands in its real pane, then settles in one pass — mirrors the original boot restore.
-async function restoreWorkspaceSnapshot(ws: Workspace): Promise<void> {
-  if (state.settings.autoSave && ws.tabs.length) {
-    const activeId = ws.tabs.some((t) => t.id === ws.active) ? ws.active : ws.tabs[0].id;
-    const savedGroups = new Set<number>(ws.tabs.map((t) => (typeof t.group === 'number' ? t.group : 0)));
-    const validLayout = ws.layout != null && isValidLayout(ws.layout, savedGroups);
-    if (validLayout) {
-      state.layout = ws.layout as LNode;
-      for (const g of leaves(state.layout)) state.gv[g] = ws.gv?.[g] || '';
-      state.focus = leaves(state.layout).includes(ws.focus ?? 0) ? (ws.focus ?? 0) : leaves(state.layout)[0];
-    } else { state.layout = { g: 0 }; state.focus = 0; }
-    const lvs = leaves(state.layout);
-    for (const t of ws.tabs) { if (typeof t.group !== 'number' || !lvs.includes(t.group)) t.group = lvs[0]; await newTab(t, false); }
-    for (const g of lvs) { if (!state.tabs.some((t) => t.id === state.gv[g] && t.group === g)) state.gv[g] = groupTabs(g)[0]?.id || ''; }
-    if (!validLayout) state.gv[0] = state.tabs.some((t) => t.id === activeId) ? activeId : (groupTabs(0)[0]?.id || '');
-    state.active = state.gv[state.focus] || activeId;
-    E('#termEmpty').style.display = 'none';
-    reconcilePanes(); renderTabs();
-    fitPanes(); // fit each pane's visible tab now, so its buffered replay flushes even if the ResizeObserver doesn't fire (same-layout switch)
-  } else if (state.settings.workspace) {
-    newTab();
-  } else {
-    E('#termEmpty').style.display = 'grid';
-    E('#termEmpty').innerHTML = 'Open a project folder to start.<br>Press <b>Ctrl/⌘ K</b> → “Open folder”.';
-  }
-  // Refresh everything keyed off the active tab, consistently across every branch — otherwise a
-  // workspace switch leaves the agent panel showing the previous tab's chat and Files on the old folder.
-  state.browsePath = activeTab()?.cwd || state.settings.workspace || '';
-  updateStatus(); reflectModel();
-  if ($('#agentPanel').classList.contains('show')) renderChat();
-  // Focus the active pane's input so typing and Ctrl+C reach the shell immediately after a switch
-  // (or boot) — otherwise nothing is focused and a running command can't be interrupted until a click.
-  const foc = activeTab();
-  if (foc) requestAnimationFrame(() => { if (blocksMode(foc)) (E(P_CMD[foc.group]) as HTMLElement)?.focus(); else foc.term.focus(); });
-}
-
-// Teardown for a switch. Keep-alive (Phase 2): DETACH each shell — it keeps running and buffering in
-// the main process, so switching back REATTACHES via ptyCreate and replays the live output (a dev
-// server never dies on a switch). Pass `kill` only when the workspace is being deleted. Either way,
-// dispose the xterm renderers + drop the tab nodes (frees DOM/WebGL); pane DOM is reused so the E()
-// cache stays valid for the rebuild — only tab elements are dropped.
-function teardownAllTabs(kill = false): void {
-  for (const t of state.tabs) { if (kill) relay.ptyKill(t.id); else relay.ptyDetach(t.id); t.term.dispose(); t.el.remove(); }
-  state.tabs = [];
-  state.layout = { g: 0 }; state.gv = ['', '', '', '']; state.focus = 0; state.active = ''; state.maxG = null;
-  reconcilePanes(); // collapse the grid back to one empty pane (like closeTab's last-tab reset) before the rebuild
-}
-
-async function switchWorkspace(id: string): Promise<void> {
-  closeWsMenu();
-  if (booting || id === wsActiveId || !wsDefs.some((w) => w.id === id)) return; // a switch/boot in flight — ignore
-
-  const from = wsActiveId;
-  // Save the current workspace's snapshot so switching back restores it (scrollback serialized here).
-  relay.saveWorkspaceSnapshot(from, { active: state.active, tabs: snapshotTabs(), gv: state.gv, focus: state.focus, layout: state.layout });
-  booting = true;                 // suspend autosave across the teardown + rebuild (init-crash guard)
-  teardownAllTabs();              // detaches `from`'s shells (keep-alive)
-  warmWs = warmWs.filter((w) => w !== from && w !== id); warmWs.push(from); void evictBeyondCap(); // `from` is now warmest; `id` is going active
-  wsActiveId = id;
-  const def = wsDefs.find((w) => w.id === id)!; def.lastOpenedAt = Date.now();
-  // Per-workspace root + theme: adopt the target's folder + look BEFORE the rebuild, so new terminals
-  // spawn in its root and with its palette, and the chrome/Files reflect it. (settings.workspace/template
-  // are the live mirror the rest of the UI reads; adoptActiveWsEnv persists them so a later patchSettings
-  // can't clobber the effective folder/theme back to a stale value.)
-  await adoptActiveWsEnv();
-  relay.saveWorkspaceMeta(wsDefs, id);
-  const ws = await relay.getWorkspaceSnapshot(id);
-  await restoreWorkspaceSnapshot(ws);
-  renderFiles(); updateMainView(); renderWorkspaceChip(); reflectSettings();
-  booting = false; persistWorkspace(true);
-  toast(`Workspace: ${def.name}`, true);
-  settleDeeplink(); // a link that arrived mid-switch runs now
-}
-
-async function createWorkspace(): Promise<void> {
-  if (booting) return; // don't add + switch while a switch/boot is in flight
-  // A fresh workspace is a blank project: no folder (→ "Open a project folder to start") and no theme
-  // override (→ inherits the current look until one is picked). Its identity is a distinct root + look.
-  const def: WorkspaceDef = { id: 'ws_' + uid(), name: 'New workspace', color: nextWsColor(), root: null, themeId: null, trusted: false, createdAt: Date.now(), lastOpenedAt: Date.now() };
-  wsDefs.push(def);
-  await switchWorkspace(def.id); // saves the current snapshot, then rebuilds into the (empty) new one
-}
-
-function renderWorkspaceChip(): void {
-  const def = wsDefs.find((w) => w.id === wsActiveId);
-  const dot = $('#wsChip').querySelector('.ws-dot') as HTMLElement | null;
-  if (dot) dot.style.background = def?.color || 'var(--accent)';
-  $('#wsChipName').textContent = def?.name || 'Workspace';
-}
-function renderWsMenu(): void {
-  $('#wsMenu').innerHTML = wsDefs.map((w) => {
-    const trusted = wsTrusted(w);
-    const sub = (w.root ? shortCwd(w.root) : 'no folder') + (trusted ? '' : '  ·  🔒 untrusted');
-    return `<div class="ws-item${w.id === wsActiveId ? ' on' : ''}" data-ws="${w.id}">
-      <span class="ws-dot" data-wsrecolor="${w.id}" title="Cycle color" style="background:${esc(w.color)}"></span>
-      <span class="ws-col"><span class="ws-nm" data-wsname="${w.id}">${esc(w.name)}</span><span class="ws-pth">${esc(sub)}</span></span>
-      ${w.id === wsActiveId ? '<span class="ws-chk">✓</span>' : ''}
-      <span class="ws-acts"><button data-wstrust="${w.id}" title="${trusted ? 'Trusted — click to require agent approvals' : 'Untrusted — click to trust'}">${trusted ? '🔓' : '🔒'}</button><button data-wsdup="${w.id}" title="Duplicate">⧉</button><button data-wsexport="${w.id}" title="Export…">⤓</button><button data-wslink="${w.id}" title="Copy slayert:// link">🔗</button><button data-wsrename="${w.id}" title="Rename">✎</button><button data-wsdel="${w.id}" title="Delete">✕</button></span>
-    </div>`;
-  }).join('')
-    + `<div class="ws-sep"></div><div class="ws-act" data-wsnew><span class="g">＋</span> New workspace</div><div class="ws-act" data-wstpl><span class="g">▤</span> Templates…</div><div class="ws-act" data-wsimport><span class="g">⤒</span> Import workspace…</div>`;
-}
-function openWsMenu(): void {
-  renderWsMenu();
-  const r = $('#wsChip').getBoundingClientRect(); const m = $('#wsMenu');
-  m.style.left = r.left + 'px'; m.style.top = (r.bottom + 6) + 'px'; m.classList.add('show');
-}
-function closeWsMenu(): void { $('#wsMenu').classList.remove('show'); }
-function saveWsMeta(): void { relay.saveWorkspaceMeta(wsDefs, wsActiveId); }
-// Mirror the active workspace's persisted folder + theme into the live settings the rest of the UI reads.
-// Boot-only (in-memory): the values already equal what was persisted on the last switch/set, so no write.
-function syncEffectiveFromActiveWs(): void {
-  const def = activeWsDef(); if (!def) return;
-  state.settings.workspace = def.root ?? '';
-  if (def.themeId) state.settings.template = def.themeId as Settings['template']; // null = inherit the global default
-}
-// Adopt the ACTIVE workspace's folder + theme into the live settings (persisted mirror) and re-tint the
-// chrome. Call wherever wsActiveId changes to a workspace whose terminals are about to be (re)built — both
-// a switch AND a delete-of-the-active — so the newly-active workspace always opens in its own folder + look.
-// (Boot uses the in-memory syncEffectiveFromActiveWs instead; no persist needed there.)
-async function adoptActiveWsEnv(): Promise<void> {
-  const def = activeWsDef(); if (!def) return;
-  const effTpl = (def.themeId ?? state.settings.template) as Settings['template'];
-  state.settings = await relay.patchSettings({ workspace: def.root ?? '', template: effTpl });
-  applyTheme();
-}
-// Record a folder as the active workspace's root (persisted). '' collapses to null → shown as "no folder".
-function setActiveWsRoot(dir: string | null): void {
-  const def = activeWsDef(); if (!def) return;
-  def.root = dir || null; saveWsMeta();
-}
-
-/* ---- workspace management: trust, duplicate, export / import (Phase 3) ---- */
-const wsTrusted = (def: WorkspaceDef | undefined): boolean => !!def && def.trusted !== false; // undefined = trusted
-// Make a name unique within the current definition list ("Foo" → "Foo 2", "Foo 3", …).
-function uniqueWsName(base: string): string {
-  const names = new Set(wsDefs.map((w) => w.name));
-  if (!names.has(base)) return base;
-  for (let i = 2; ; i++) { const n = `${base} ${i}`; if (!names.has(n)) return n; }
-}
-// Snapshot of a workspace's live tabs — from renderer state for the active one (freshest), else the store.
-async function wsSnapshotOf(id: string): Promise<Workspace> {
-  return id === wsActiveId
-    ? { active: state.active, tabs: snapshotTabs(), gv: state.gv, focus: state.focus, layout: state.layout }
-    : await relay.getWorkspaceSnapshot(id);
-}
-// Clone a snapshot with FRESH terminal ids (so it never collides with the source's live/persisted shells),
-// dropping the heavy, machine-specific per-terminal state (scrollback, blocks, chat, Library link). The
-// result opens the same layout + terminals (folder / name / model / colors) as clean shells. Tolerant of
-// untrusted input (import): every field is validated/coerced, so a malformed file can't corrupt state.
-function cloneSnapshot(src: any): Workspace {
-  const idMap = new Map<string, string>();
-  const tabs: OpenTab[] = (Array.isArray(src?.tabs) ? src.tabs : [])
-    .filter((t: any) => t && typeof t === 'object')
-    .map((t: any) => {
-      const nid = uid();
-      if (typeof t.id === 'string') idMap.set(t.id, nid);
-      return {
-        id: nid,
-        name: typeof t.name === 'string' ? t.name : 'terminal',
-        model: typeof t.model === 'string' ? t.model : state.settings.defaultModel,
-        cwd: typeof t.cwd === 'string' ? t.cwd : '',
-        group: typeof t.group === 'number' ? t.group : 0,
-        tabBg: typeof t.tabBg === 'string' ? t.tabBg : undefined, tabFg: typeof t.tabFg === 'string' ? t.tabFg : undefined,
-        bodyBg: typeof t.bodyBg === 'string' ? t.bodyBg : undefined, bodyFg: typeof t.bodyFg === 'string' ? t.bodyFg : undefined,
-        bkNonce: uid(),
-      } as OpenTab;
-    });
-  const gv = (Array.isArray(src?.gv) ? src.gv : []).map((id: any) => (typeof id === 'string' && idMap.get(id)) || '');
-  const active = (typeof src?.active === 'string' && idMap.get(src.active)) || (tabs[0]?.id ?? '');
-  return { active, tabs, gv, focus: typeof src?.focus === 'number' ? src.focus : 0, layout: src?.layout };
-}
-function toggleTrust(id: string): void {
-  const def = wsDefs.find((w) => w.id === id); if (!def) return;
-  def.trusted = !wsTrusted(def); // trusted → untrusted, untrusted → trusted
-  saveWsMeta(); renderWsMenu();
-  if ($('#agentPanel').classList.contains('show')) renderChat(); // refresh the trust notice
-  toast(def.trusted ? `“${def.name}” trusted` : `“${def.name}” untrusted — the agent will ask`, true);
-}
-async function duplicateWorkspace(id: string): Promise<void> {
-  if (booting) return; // mid-switch: snapshotTabs() of the active workspace would be half-built
-  const src = wsDefs.find((w) => w.id === id); if (!src) return;
-  const nid = 'ws_' + uid();
-  const def: WorkspaceDef = { id: nid, name: uniqueWsName(`${src.name} copy`), color: nextWsColor(), root: src.root, themeId: src.themeId, trusted: src.trusted, createdAt: Date.now(), lastOpenedAt: Date.now() };
-  relay.saveWorkspaceSnapshot(nid, cloneSnapshot(await wsSnapshotOf(id)));
-  wsDefs.push(def); saveWsMeta(); renderWsMenu();
-  toast(`Duplicated “${src.name}”`);
-}
-async function exportWorkspace(id: string): Promise<void> {
-  if (booting) return; // mid-switch: don't capture a half-built active snapshot
-  const def = wsDefs.find((w) => w.id === id); if (!def) return;
-  // A portable TEMPLATE: identity + folder/theme + terminal layout, minus scrollback/blocks/chat.
-  const payload = { kind: 'slayer-t.workspace', version: 1,
-    workspace: { name: def.name, color: def.color, root: def.root, themeId: def.themeId },
-    snapshot: cloneSnapshot(await wsSnapshotOf(id)) };
-  const r = await relay.exportSession({ name: def.name, content: JSON.stringify(payload, null, 2), ext: 'json' });
-  if (r.ok) toast(`Exported “${def.name}”`); else if (r.error) toast(`Export failed: ${r.error}`);
-}
-async function importWorkspace(): Promise<void> {
-  const r = await relay.importWorkspace();
-  if (!r.ok) { if (r.error) toast(`Import failed: ${r.error}`); return; }
-  const d = r.data as any;
-  if (!d || d.kind !== 'slayer-t.workspace' || typeof d.workspace !== 'object' || !d.workspace) { toast('Not a Slayer T workspace file'); return; }
-  const w = d.workspace;
-  const nid = 'ws_' + uid();
-  const base = (typeof w.name === 'string' && w.name.trim()) ? w.name.trim() : 'Imported workspace';
-  const def: WorkspaceDef = {
-    id: nid, name: uniqueWsName(base),
-    color: (typeof w.color === 'string' && w.color) ? w.color : nextWsColor(),
-    root: typeof w.root === 'string' ? w.root : null,
-    themeId: (typeof w.themeId === 'string' && TEMPLATES.some((t) => t.id === w.themeId)) ? w.themeId : null,
-    trusted: false, // came from elsewhere → untrusted until the user trusts it
-    createdAt: Date.now(), lastOpenedAt: Date.now(),
-  };
-  relay.saveWorkspaceSnapshot(nid, cloneSnapshot(d.snapshot));
-  wsDefs.push(def); saveWsMeta(); renderWsMenu();
-  toast(`Imported “${def.name}”`);
-}
-function renameWorkspace(id: string, name: string): void {
-  const def = wsDefs.find((w) => w.id === id); if (!def) return;
-  const nm = name.trim(); if (nm) def.name = nm;
-  saveWsMeta(); renderWorkspaceChip(); renderWsMenu();
-}
-function startRenameWorkspace(id: string): void {
-  const el = $('#wsMenu').querySelector(`[data-wsname="${id}"]`) as HTMLElement | null;
-  if (el) makeEditable(el, (v) => renameWorkspace(id, v));
-}
-function recolorWorkspace(id: string): void {
-  const def = wsDefs.find((w) => w.id === id); if (!def) return;
-  def.color = WS_COLORS[(WS_COLORS.indexOf(def.color) + 1) % WS_COLORS.length];
-  saveWsMeta(); renderWorkspaceChip(); renderWsMenu();
-}
-async function deleteWorkspace(id: string): Promise<void> {
-  if (booting) return; // a switch/boot in flight
-  if (wsDefs.length <= 1) { toast('Can’t delete the only workspace'); return; }
-  const def = wsDefs.find((w) => w.id === id); if (!def) return;
-  if (!(await confirmDialog('Delete workspace?', `“${def.name}” and its saved terminals will be removed — this can’t be undone.`, 'Delete'))) return;
-  if (id === wsActiveId) {
-    // Drop the active session WITHOUT saving its snapshot (it's being deleted), then open the first remaining one.
-    booting = true; teardownAllTabs(true); // kill — this workspace's shells are gone for good
-    wsDefs = wsDefs.filter((w) => w.id !== id);
-    wsActiveId = wsDefs[0].id;
-    warmWs = warmWs.filter((w) => w !== id && w !== wsActiveId); // deleted gone; the new active is no longer background
-    await adoptActiveWsEnv(); // the surviving active workspace has its OWN folder + theme — adopt them before rebuilding
-    relay.saveWorkspaceMeta(wsDefs, wsActiveId); // prunes the deleted workspace's snapshot from byId
-    const ws = await relay.getWorkspaceSnapshot(wsActiveId);
-    await restoreWorkspaceSnapshot(ws);
-    renderFiles(); updateMainView(); reflectSettings();
-    booting = false; persistWorkspace(true); settleDeeplink(); // a link buffered during the delete runs now
-  } else {
-    if (warmWs.includes(id)) await killWorkspaceShells(id); // kill its background shells before dropping it
-    warmWs = warmWs.filter((w) => w !== id);
-    wsDefs = wsDefs.filter((w) => w.id !== id);
-    relay.saveWorkspaceMeta(wsDefs, wsActiveId); // prunes the snapshot; current session untouched
-  }
-  renderWorkspaceChip(); renderWsMenu();
-  toast(`Deleted “${def.name}”`);
-}
-
-/* ---- slayert:// deeplinks: switch to a workspace / spawn a template by name ---- */
-let pendingDeeplink: { kind: string; name: string } | null = null;
-function handleDeeplink(intent: { kind: string; name: string }): void {
-  if (booting) { pendingDeeplink = intent; return; } // defer until boot / an in-flight switch settles
-  const name = (intent.name || '').trim();
-  if (intent.kind === 'workspace') {
-    const def = wsDefs.find((w) => w.name === name);
-    if (!def) { toast(`No workspace named “${name}”`); return; }
-    if (def.id === wsActiveId) { toast(`Already in “${name}”`, true); return; }
-    switchWorkspace(def.id);
-  } else if (intent.kind === 'template') {
-    const bp = findBlueprint(name);
-    if (bp) newFromBlueprint(bp.id); else toast(`No template named “${name}”`);
-  } else {
-    toast(`Unknown link kind: ${intent.kind}`);
-  }
-}
-// Run a link buffered while booting / switching — called wherever `booting` returns to false.
-function settleDeeplink(): void {
-  if (!pendingDeeplink || booting) return;
-  const d = pendingDeeplink; pendingDeeplink = null; handleDeeplink(d);
-}
-function copyWorkspaceLink(id: string): void {
-  const def = wsDefs.find((w) => w.id === id); if (!def) return;
-  closeWsMenu();
-  relay.copyText('slayert://workspace/' + encodeURIComponent(def.name));
-  toast('Link copied', true);
 }
 
 /* ----------------------------- library ----------------------------- */
@@ -969,7 +654,7 @@ function applyTheme() {
   for (const t of state.tabs) { applyTermColors(t); t.term.refresh(0, t.term.rows - 1); } // re-tint every live terminal
 }
 async function setTemplate(id: string) {
-  const def = activeWsDef(); if (def) { def.themeId = id; saveWsMeta(); } // theme is per-workspace; the global setting is only the seed for new ones
+  setActiveWsTheme(id); // theme is per-workspace; the global setting is only the seed for new ones
   state.settings = await relay.patchSettings({ template: id as Settings['template'] });
   applyTheme(); reflectSettings();
 }
@@ -1009,8 +694,8 @@ function renderChat() {
 // When the active workspace isn't trusted, tell the user why the agent will keep asking, with a one-click
 // trust action. Shown above the chat/chips so it's visible whether or not a conversation exists yet.
 function renderTrustNotice() {
-  const def = activeWsDef();
-  if (wsTrusted(def) || !def) return;
+  const def = activeWorkspaceDef();
+  if (isWorkspaceTrusted(def) || !def) return;
   const div = document.createElement('div'); div.className = 'agent-trust';
   div.innerHTML = `<span class="lk">🔒</span><span><b>${esc(def.name)}</b> isn’t trusted — the agent will ask before each file change or command. <button class="trust-btn">Trust workspace</button></span>`;
   $('#agentBody').appendChild(div);
@@ -1482,11 +1167,11 @@ function paletteActions(): PalAction[] {
     { g: 'View', t: 'Choose theme…', run: () => { openSettings(); } },
     { g: 'View', t: 'New workspace', run: createWorkspace },
     { g: 'View', t: 'Switch workspace…', run: openWsMenu },
-    { g: 'View', t: 'Duplicate workspace', run: () => duplicateWorkspace(wsActiveId) },
-    { g: 'View', t: 'Export workspace…', run: () => exportWorkspace(wsActiveId) },
+    { g: 'View', t: 'Duplicate workspace', run: () => duplicateWorkspace(getActiveWsId()) },
+    { g: 'View', t: 'Export workspace…', run: () => exportWorkspace(getActiveWsId()) },
     { g: 'View', t: 'Import workspace…', run: importWorkspace },
-    { g: 'View', t: 'Trust / untrust workspace', run: () => toggleTrust(wsActiveId) },
-    { g: 'View', t: 'Copy workspace link', run: () => copyWorkspaceLink(wsActiveId) },
+    { g: 'View', t: 'Trust / untrust workspace', run: () => toggleTrust(getActiveWsId()) },
+    { g: 'View', t: 'Copy workspace link', run: () => copyWorkspaceLink(getActiveWsId()) },
     { g: 'View', t: 'Save workspace as template', run: saveAsTemplate },
     { g: 'View', t: 'New workspace from template…', run: openTplMenu },
     { g: 'View', t: 'Toggle library sidebar', run: toggleSidebar },
@@ -1716,24 +1401,6 @@ $('#themeGrid').addEventListener('click', (e) => { const b = (e.target as HTMLEl
 $('#btnPalette').onclick = openPalette;
 $('#winSearch').onclick = openPalette; // command-search box in the top window bar
 // workspace switcher
-$('#wsChip').onclick = () => ($('#wsMenu').classList.contains('show') ? closeWsMenu() : openWsMenu());
-$('#wsMenu').addEventListener('click', (e) => {
-  const t = e.target as HTMLElement;
-  const rc = t.closest('[data-wsrecolor]') as HTMLElement | null; if (rc) { recolorWorkspace(rc.dataset.wsrecolor!); return; }
-  const rn = t.closest('[data-wsrename]') as HTMLElement | null; if (rn) { startRenameWorkspace(rn.dataset.wsrename!); return; }
-  const tr = t.closest('[data-wstrust]') as HTMLElement | null; if (tr) { toggleTrust(tr.dataset.wstrust!); return; }
-  const dup = t.closest('[data-wsdup]') as HTMLElement | null; if (dup) { duplicateWorkspace(dup.dataset.wsdup!); return; }
-  const ex = t.closest('[data-wsexport]') as HTMLElement | null; if (ex) { closeWsMenu(); exportWorkspace(ex.dataset.wsexport!); return; }
-  const lk = t.closest('[data-wslink]') as HTMLElement | null; if (lk) { copyWorkspaceLink(lk.dataset.wslink!); return; }
-  const del = t.closest('[data-wsdel]') as HTMLElement | null; if (del) { deleteWorkspace(del.dataset.wsdel!); return; }
-  if (t.closest('[data-wsnew]')) { createWorkspace(); return; }
-  if (t.closest('[data-wstpl]')) { closeWsMenu(); openTplMenu(); return; }
-  if (t.closest('[data-wsimport]')) { closeWsMenu(); importWorkspace(); return; }
-  const it = t.closest('[data-ws]') as HTMLElement | null;
-  if (it) switchWorkspace(it.dataset.ws!);
-});
-// The Templates menu (#tplMenu) wires its own events in blueprints.ts (initBlueprints).
-document.addEventListener('mousedown', (e) => { const t = e.target as HTMLElement; if (!t.closest('#wsMenu') && !t.closest('#wsChip')) closeWsMenu(); });
 $('#btnOpen').onclick = addFolderTab;
 $('#stAutosave').onclick = toggleAutosave;
 $('#libSort').addEventListener('change', async (e) => { state.settings = await relay.patchSettings({ librarySort: (e.target as HTMLSelectElement).value as any }); renderLibrary(); });
@@ -2054,8 +1721,8 @@ relay.onPtyData((id: string, data: string) => { writeToTab(id, data); persistWor
 // Final flush on close — synchronous so the latest scrollback reaches disk before teardown.
 // Wrapped so a failed flush can never throw mid-unload (which would abort a clean close).
 window.addEventListener('beforeunload', () => {
-  // !booting: never let a close mid-restore flush a partial tab set over the full saved workspace.
-  try { if (state.settings.autoSave && !booting) relay.flushWorkspace({ active: state.active, tabs: snapshotTabs(), gv: state.gv, focus: state.focus, layout: state.layout }); } catch { /* ignore */ }
+  // !state.booting: never let a close mid-restore flush a partial tab set over the full saved workspace.
+  try { if (state.settings.autoSave && !state.booting) relay.flushWorkspace({ active: state.active, tabs: snapshotTabs(), gv: state.gv, focus: state.focus, layout: state.layout }); } catch { /* ignore */ }
 });
 relay.onPtyExit((id: string) => { writeToTab(id, '\r\n\x1b[90m[process exited]\x1b[0m\r\n'); });
 relay.onApproval((req: ApprovalRequest) => showApproval(req));
@@ -2067,20 +1734,21 @@ new ResizeObserver(() => { clearTimeout(_roT); _roT = setTimeout(() => { fitPane
 (async function boot() {
   state.settings = await relay.getSettings();
   state.library = await relay.listSessions();
-  const meta = await relay.getWorkspaceMeta();
-  wsDefs = meta.workspaces; wsActiveId = meta.activeWorkspaceId; renderWorkspaceChip();
-  initBlueprints({ switchWorkspace, addWorkspaceDef, uniqueWsName, nextWsColor, activeWorkspaceDef: activeWsDef, sendCommand, confirmDialog, shortCwd, isBooting: () => booting });
-  await loadBlueprints();
-  syncEffectiveFromActiveWs(); // mirror the active workspace's folder + theme into settings before first paint
+  initWorkspaces({ newTab, snapshotTabs, reconcilePanes, fitPanes, renderTabs, updateStatus, reflectModel, renderChat, updateMainView, reflectSettings, persistWorkspace, applyTheme, blocksMode, confirmDialog, shortCwd, sendCommand, pcmd: P_CMD });
+  await loadWorkspaceMeta(); // load workspace defs + blueprints, mirror the active workspace's folder + theme into settings before first paint
   ($('#libSort') as HTMLSelectElement).value = state.settings.librarySort || 'recent';
   applyTheme(); applySidebarWidth(); applySidebar(); applyToolbar(); applySplit(); reflectAutosave(); renderLibrary(); updateStatus(); reflectModel(); reflectSettings();
   ($('#storeText') as HTMLElement).textContent = 'Saved on this machine';
   tickClock(); setInterval(tickClock, 20000);
 
   const ws = await relay.getWorkspace(); // the active workspace's tab snapshot
-  await restoreWorkspaceSnapshot(ws);
-  renderFiles(); // populate the Files section even if no terminal is active yet
-  updateMainView(); // reflect Blocks/Classic choice (and the toggle button) on first paint
-  booting = false; persistWorkspace(true); // restore complete — resume autosave and write the settled state once
+  try {
+    await restoreWorkspaceSnapshot(ws);
+    renderFiles(); // populate the Files section even if no terminal is active yet
+    updateMainView(); // reflect Blocks/Classic choice (and the toggle button) on first paint
+  } finally {
+    state.booting = false; // always resume autosave, even if the restore threw — a stuck flag would deadlock every later switch/create/delete
+  }
+  persistWorkspace(true); // restore complete — write the settled state once
   settleDeeplink(); // deliver a slayert:// link this instance launched with, now that boot is done
 })();
