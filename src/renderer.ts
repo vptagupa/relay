@@ -1044,14 +1044,24 @@ function positionCdPop(g: number) {
 function hideCdPop() { cdc.g = -1; cdc.items = []; $('#cdPop').classList.remove('show'); }
 function cdOpen(): boolean { return cdc.g >= 0 && $('#cdPop').classList.contains('show'); }
 function cdMove(d: number) { if (!cdc.items.length) return; cdc.sel = (cdc.sel + d + cdc.items.length) % cdc.items.length; renderCdPop(); }
+// Quote a path when it holds anything the shell treats specially — spaces, but also (), [], {}, $,
+// &, ;, etc. (e.g. a Next.js `(dashboard)` route folder, which PowerShell would parse as a
+// subexpression). Single quotes are literal in PowerShell and POSIX shells; escape an embedded
+// single quote per shell (PowerShell doubles it, POSIX uses '\'').
+function cdQuote(s: string): string {
+  if (!/[^\w./\\:@~+-]/.test(s)) return s; // only safe path chars → no quoting needed
+  const esc = relay.platform === 'win32' ? s.replace(/'/g, "''") : s.replace(/'/g, "'\\''");
+  return `'${esc}'`;
+}
 // Fill the selected directory into the command; `drill` appends a separator and re-lists to go deeper.
 function cdAccept(g: number, drill: boolean) {
   if (cdc.g !== g || !cdc.items.length) return;
   const inp = E(P_CMD[g]) as HTMLTextAreaElement;
   let body = cdc.dirPart + cdc.items[cdc.sel];
   if (drill) body += '/';
-  inp.value = 'cd ' + (/\s/.test(body) ? `"${body}"` : body);
-  inp.setSelectionRange(inp.value.length, inp.value.length); bvGrow(inp);
+  inp.value = 'cd ' + cdQuote(body);
+  const caret = inp.value.endsWith("'") ? inp.value.length - 1 : inp.value.length; // stay inside the quotes so typing keeps filtering
+  inp.setSelectionRange(caret, caret); bvGrow(inp);
   if (drill) updateCdPop(g); else hideCdPop();
 }
 // Block→text helpers and session export (ExFmt/realBlock/cmdText/cmdRaw/buildExport) live in
