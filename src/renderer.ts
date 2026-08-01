@@ -636,12 +636,10 @@ async function switchWorkspace(id: string): Promise<void> {
   wsActiveId = id;
   const def = wsDefs.find((w) => w.id === id)!; def.lastOpenedAt = Date.now();
   // Per-workspace root + theme: adopt the target's folder + look BEFORE the rebuild, so new terminals
-  // spawn in its root and with its palette, and the chrome/Files reflect it. settings.workspace/template
-  // are the live mirror the rest of the UI reads; persisting them keeps main's copy in step so a later
-  // patchSettings (autosave toggle, etc.) can't clobber the effective folder/theme back to a stale value.
-  const effTpl = (def.themeId ?? state.settings.template) as Settings['template'];
-  state.settings = await relay.patchSettings({ workspace: def.root ?? '', template: effTpl });
-  applyTheme();                   // re-tint chrome now; terminals are (re)created below with the new palette
+  // spawn in its root and with its palette, and the chrome/Files reflect it. (settings.workspace/template
+  // are the live mirror the rest of the UI reads; adoptActiveWsEnv persists them so a later patchSettings
+  // can't clobber the effective folder/theme back to a stale value.)
+  await adoptActiveWsEnv();
   relay.saveWorkspaceMeta(wsDefs, id);
   const ws = await relay.getWorkspaceSnapshot(id);
   await restoreWorkspaceSnapshot(ws);
@@ -691,6 +689,16 @@ function syncEffectiveFromActiveWs(): void {
   const def = activeWsDef(); if (!def) return;
   state.settings.workspace = def.root ?? '';
   if (def.themeId) state.settings.template = def.themeId as Settings['template']; // null = inherit the global default
+}
+// Adopt the ACTIVE workspace's folder + theme into the live settings (persisted mirror) and re-tint the
+// chrome. Call wherever wsActiveId changes to a workspace whose terminals are about to be (re)built — both
+// a switch AND a delete-of-the-active — so the newly-active workspace always opens in its own folder + look.
+// (Boot uses the in-memory syncEffectiveFromActiveWs instead; no persist needed there.)
+async function adoptActiveWsEnv(): Promise<void> {
+  const def = activeWsDef(); if (!def) return;
+  const effTpl = (def.themeId ?? state.settings.template) as Settings['template'];
+  state.settings = await relay.patchSettings({ workspace: def.root ?? '', template: effTpl });
+  applyTheme();
 }
 // Record a folder as the active workspace's root (persisted). '' collapses to null → shown as "no folder".
 function setActiveWsRoot(dir: string | null): void {
@@ -746,6 +754,7 @@ function toggleTrust(id: string): void {
   toast(def.trusted ? `“${def.name}” trusted` : `“${def.name}” untrusted — the agent will ask`, true);
 }
 async function duplicateWorkspace(id: string): Promise<void> {
+  if (booting) return; // mid-switch: snapshotTabs() of the active workspace would be half-built
   const src = wsDefs.find((w) => w.id === id); if (!src) return;
   const nid = 'ws_' + uid();
   const def: WorkspaceDef = { id: nid, name: uniqueWsName(`${src.name} copy`), color: nextWsColor(), root: src.root, themeId: src.themeId, trusted: src.trusted, createdAt: Date.now(), lastOpenedAt: Date.now() };
@@ -754,6 +763,7 @@ async function duplicateWorkspace(id: string): Promise<void> {
   toast(`Duplicated “${src.name}”`);
 }
 async function exportWorkspace(id: string): Promise<void> {
+  if (booting) return; // mid-switch: don't capture a half-built active snapshot
   const def = wsDefs.find((w) => w.id === id); if (!def) return;
   // A portable TEMPLATE: identity + folder/theme + terminal layout, minus scrollback/blocks/chat.
   const payload = { kind: 'slayer-t.workspace', version: 1,
@@ -807,10 +817,11 @@ async function deleteWorkspace(id: string): Promise<void> {
     wsDefs = wsDefs.filter((w) => w.id !== id);
     wsActiveId = wsDefs[0].id;
     warmWs = warmWs.filter((w) => w !== id && w !== wsActiveId); // deleted gone; the new active is no longer background
+    await adoptActiveWsEnv(); // the surviving active workspace has its OWN folder + theme — adopt them before rebuilding
     relay.saveWorkspaceMeta(wsDefs, wsActiveId); // prunes the deleted workspace's snapshot from byId
     const ws = await relay.getWorkspaceSnapshot(wsActiveId);
     await restoreWorkspaceSnapshot(ws);
-    renderFiles(); updateMainView();
+    renderFiles(); updateMainView(); reflectSettings();
     booting = false; persistWorkspace(true);
   } else {
     if (warmWs.includes(id)) await killWorkspaceShells(id); // kill its background shells before dropping it
