@@ -654,7 +654,7 @@ async function createWorkspace(): Promise<void> {
   if (booting) return; // don't add + switch while a switch/boot is in flight
   // A fresh workspace is a blank project: no folder (→ "Open a project folder to start") and no theme
   // override (→ inherits the current look until one is picked). Its identity is a distinct root + look.
-  const def: WorkspaceDef = { id: 'ws_' + uid(), name: 'New workspace', color: nextWsColor(), root: null, themeId: null, createdAt: Date.now(), lastOpenedAt: Date.now() };
+  const def: WorkspaceDef = { id: 'ws_' + uid(), name: 'New workspace', color: nextWsColor(), root: null, themeId: null, trusted: false, createdAt: Date.now(), lastOpenedAt: Date.now() };
   wsDefs.push(def);
   await switchWorkspace(def.id); // saves the current snapshot, then rebuilds into the (empty) new one
 }
@@ -666,13 +666,17 @@ function renderWorkspaceChip(): void {
   $('#wsChipName').textContent = def?.name || 'Workspace';
 }
 function renderWsMenu(): void {
-  $('#wsMenu').innerHTML = wsDefs.map((w) => `<div class="ws-item${w.id === wsActiveId ? ' on' : ''}" data-ws="${w.id}">
+  $('#wsMenu').innerHTML = wsDefs.map((w) => {
+    const trusted = wsTrusted(w);
+    const sub = (w.root ? shortCwd(w.root) : 'no folder') + (trusted ? '' : '  ·  🔒 untrusted');
+    return `<div class="ws-item${w.id === wsActiveId ? ' on' : ''}" data-ws="${w.id}">
       <span class="ws-dot" data-wsrecolor="${w.id}" title="Cycle color" style="background:${esc(w.color)}"></span>
-      <span class="ws-col"><span class="ws-nm" data-wsname="${w.id}">${esc(w.name)}</span><span class="ws-pth">${esc(w.root ? shortCwd(w.root) : 'no folder')}</span></span>
+      <span class="ws-col"><span class="ws-nm" data-wsname="${w.id}">${esc(w.name)}</span><span class="ws-pth">${esc(sub)}</span></span>
       ${w.id === wsActiveId ? '<span class="ws-chk">✓</span>' : ''}
-      <span class="ws-acts"><button data-wsrename="${w.id}" title="Rename">✎</button><button data-wsdel="${w.id}" title="Delete">✕</button></span>
-    </div>`).join('')
-    + `<div class="ws-sep"></div><div class="ws-act" data-wsnew><span class="g">＋</span> New workspace</div>`;
+      <span class="ws-acts"><button data-wstrust="${w.id}" title="${trusted ? 'Trusted — click to require agent approvals' : 'Untrusted — click to trust'}">${trusted ? '🔓' : '🔒'}</button><button data-wsdup="${w.id}" title="Duplicate">⧉</button><button data-wsexport="${w.id}" title="Export…">⤓</button><button data-wsrename="${w.id}" title="Rename">✎</button><button data-wsdel="${w.id}" title="Delete">✕</button></span>
+    </div>`;
+  }).join('')
+    + `<div class="ws-sep"></div><div class="ws-act" data-wsnew><span class="g">＋</span> New workspace</div><div class="ws-act" data-wsimport><span class="g">⤒</span> Import workspace…</div>`;
 }
 function openWsMenu(): void {
   renderWsMenu();
@@ -692,6 +696,91 @@ function syncEffectiveFromActiveWs(): void {
 function setActiveWsRoot(dir: string | null): void {
   const def = activeWsDef(); if (!def) return;
   def.root = dir || null; saveWsMeta();
+}
+
+/* ---- workspace management: trust, duplicate, export / import (Phase 3) ---- */
+const wsTrusted = (def: WorkspaceDef | undefined): boolean => !!def && def.trusted !== false; // undefined = trusted
+// Make a name unique within the current definition list ("Foo" → "Foo 2", "Foo 3", …).
+function uniqueWsName(base: string): string {
+  const names = new Set(wsDefs.map((w) => w.name));
+  if (!names.has(base)) return base;
+  for (let i = 2; ; i++) { const n = `${base} ${i}`; if (!names.has(n)) return n; }
+}
+// Snapshot of a workspace's live tabs — from renderer state for the active one (freshest), else the store.
+async function wsSnapshotOf(id: string): Promise<Workspace> {
+  return id === wsActiveId
+    ? { active: state.active, tabs: snapshotTabs(), gv: state.gv, focus: state.focus, layout: state.layout }
+    : await relay.getWorkspaceSnapshot(id);
+}
+// Clone a snapshot with FRESH terminal ids (so it never collides with the source's live/persisted shells),
+// dropping the heavy, machine-specific per-terminal state (scrollback, blocks, chat, Library link). The
+// result opens the same layout + terminals (folder / name / model / colors) as clean shells. Tolerant of
+// untrusted input (import): every field is validated/coerced, so a malformed file can't corrupt state.
+function cloneSnapshot(src: any): Workspace {
+  const idMap = new Map<string, string>();
+  const tabs: OpenTab[] = (Array.isArray(src?.tabs) ? src.tabs : [])
+    .filter((t: any) => t && typeof t === 'object')
+    .map((t: any) => {
+      const nid = uid();
+      if (typeof t.id === 'string') idMap.set(t.id, nid);
+      return {
+        id: nid,
+        name: typeof t.name === 'string' ? t.name : 'terminal',
+        model: typeof t.model === 'string' ? t.model : state.settings.defaultModel,
+        cwd: typeof t.cwd === 'string' ? t.cwd : '',
+        group: typeof t.group === 'number' ? t.group : 0,
+        tabBg: typeof t.tabBg === 'string' ? t.tabBg : undefined, tabFg: typeof t.tabFg === 'string' ? t.tabFg : undefined,
+        bodyBg: typeof t.bodyBg === 'string' ? t.bodyBg : undefined, bodyFg: typeof t.bodyFg === 'string' ? t.bodyFg : undefined,
+        bkNonce: uid(),
+      } as OpenTab;
+    });
+  const gv = (Array.isArray(src?.gv) ? src.gv : []).map((id: any) => (typeof id === 'string' && idMap.get(id)) || '');
+  const active = (typeof src?.active === 'string' && idMap.get(src.active)) || (tabs[0]?.id ?? '');
+  return { active, tabs, gv, focus: typeof src?.focus === 'number' ? src.focus : 0, layout: src?.layout };
+}
+function toggleTrust(id: string): void {
+  const def = wsDefs.find((w) => w.id === id); if (!def) return;
+  def.trusted = !wsTrusted(def); // trusted → untrusted, untrusted → trusted
+  saveWsMeta(); renderWsMenu();
+  if ($('#agentPanel').classList.contains('show')) renderChat(); // refresh the trust notice
+  toast(def.trusted ? `“${def.name}” trusted` : `“${def.name}” untrusted — the agent will ask`, true);
+}
+async function duplicateWorkspace(id: string): Promise<void> {
+  const src = wsDefs.find((w) => w.id === id); if (!src) return;
+  const nid = 'ws_' + uid();
+  const def: WorkspaceDef = { id: nid, name: uniqueWsName(`${src.name} copy`), color: nextWsColor(), root: src.root, themeId: src.themeId, trusted: src.trusted, createdAt: Date.now(), lastOpenedAt: Date.now() };
+  relay.saveWorkspaceSnapshot(nid, cloneSnapshot(await wsSnapshotOf(id)));
+  wsDefs.push(def); saveWsMeta(); renderWsMenu();
+  toast(`Duplicated “${src.name}”`);
+}
+async function exportWorkspace(id: string): Promise<void> {
+  const def = wsDefs.find((w) => w.id === id); if (!def) return;
+  // A portable TEMPLATE: identity + folder/theme + terminal layout, minus scrollback/blocks/chat.
+  const payload = { kind: 'slayer-t.workspace', version: 1,
+    workspace: { name: def.name, color: def.color, root: def.root, themeId: def.themeId },
+    snapshot: cloneSnapshot(await wsSnapshotOf(id)) };
+  const r = await relay.exportSession({ name: def.name, content: JSON.stringify(payload, null, 2), ext: 'json' });
+  if (r.ok) toast(`Exported “${def.name}”`); else if (r.error) toast(`Export failed: ${r.error}`);
+}
+async function importWorkspace(): Promise<void> {
+  const r = await relay.importWorkspace();
+  if (!r.ok) { if (r.error) toast(`Import failed: ${r.error}`); return; }
+  const d = r.data as any;
+  if (!d || d.kind !== 'slayer-t.workspace' || typeof d.workspace !== 'object' || !d.workspace) { toast('Not a Slayer T workspace file'); return; }
+  const w = d.workspace;
+  const nid = 'ws_' + uid();
+  const base = (typeof w.name === 'string' && w.name.trim()) ? w.name.trim() : 'Imported workspace';
+  const def: WorkspaceDef = {
+    id: nid, name: uniqueWsName(base),
+    color: (typeof w.color === 'string' && w.color) ? w.color : nextWsColor(),
+    root: typeof w.root === 'string' ? w.root : null,
+    themeId: (typeof w.themeId === 'string' && TEMPLATES.some((t) => t.id === w.themeId)) ? w.themeId : null,
+    trusted: false, // came from elsewhere → untrusted until the user trusts it
+    createdAt: Date.now(), lastOpenedAt: Date.now(),
+  };
+  relay.saveWorkspaceSnapshot(nid, cloneSnapshot(d.snapshot));
+  wsDefs.push(def); saveWsMeta(); renderWsMenu();
+  toast(`Imported “${def.name}”`);
 }
 function renameWorkspace(id: string, name: string): void {
   const def = wsDefs.find((w) => w.id === id); if (!def) return;
@@ -863,8 +952,19 @@ let agentBusy = false;
 function chat(): ChatTurn[] { const t = activeTab(); return t ? t.chat : state.history; }
 function renderChat() {
   $('#agentBody').innerHTML = '';
+  renderTrustNotice();
   if (!chat().length) { renderChips(); return; }
   for (const turn of chat()) addMsg(turn.role, turn.content);
+}
+// When the active workspace isn't trusted, tell the user why the agent will keep asking, with a one-click
+// trust action. Shown above the chat/chips so it's visible whether or not a conversation exists yet.
+function renderTrustNotice() {
+  const def = activeWsDef();
+  if (wsTrusted(def) || !def) return;
+  const div = document.createElement('div'); div.className = 'agent-trust';
+  div.innerHTML = `<span class="lk">🔒</span><span><b>${esc(def.name)}</b> isn’t trusted — the agent will ask before each file change or command. <button class="trust-btn">Trust workspace</button></span>`;
+  $('#agentBody').appendChild(div);
+  div.querySelector('.trust-btn')?.addEventListener('click', () => toggleTrust(def.id));
 }
 function renderChips() {
   if (chat().length) return;
@@ -1328,6 +1428,10 @@ function paletteActions(): PalAction[] {
     { g: 'View', t: 'Choose theme…', run: () => { openSettings(); } },
     { g: 'View', t: 'New workspace', run: createWorkspace },
     { g: 'View', t: 'Switch workspace…', run: openWsMenu },
+    { g: 'View', t: 'Duplicate workspace', run: () => duplicateWorkspace(wsActiveId) },
+    { g: 'View', t: 'Export workspace…', run: () => exportWorkspace(wsActiveId) },
+    { g: 'View', t: 'Import workspace…', run: importWorkspace },
+    { g: 'View', t: 'Trust / untrust workspace', run: () => toggleTrust(wsActiveId) },
     { g: 'View', t: 'Toggle library sidebar', run: toggleSidebar },
     { g: 'View', t: 'Toggle top toolbar', run: toggleToolbar },
     { g: 'View', t: 'Toggle auto-save', run: toggleAutosave },
@@ -1560,8 +1664,12 @@ $('#wsMenu').addEventListener('click', (e) => {
   const t = e.target as HTMLElement;
   const rc = t.closest('[data-wsrecolor]') as HTMLElement | null; if (rc) { recolorWorkspace(rc.dataset.wsrecolor!); return; }
   const rn = t.closest('[data-wsrename]') as HTMLElement | null; if (rn) { startRenameWorkspace(rn.dataset.wsrename!); return; }
+  const tr = t.closest('[data-wstrust]') as HTMLElement | null; if (tr) { toggleTrust(tr.dataset.wstrust!); return; }
+  const dup = t.closest('[data-wsdup]') as HTMLElement | null; if (dup) { duplicateWorkspace(dup.dataset.wsdup!); return; }
+  const ex = t.closest('[data-wsexport]') as HTMLElement | null; if (ex) { closeWsMenu(); exportWorkspace(ex.dataset.wsexport!); return; }
   const del = t.closest('[data-wsdel]') as HTMLElement | null; if (del) { deleteWorkspace(del.dataset.wsdel!); return; }
   if (t.closest('[data-wsnew]')) { createWorkspace(); return; }
+  if (t.closest('[data-wsimport]')) { closeWsMenu(); importWorkspace(); return; }
   const it = t.closest('[data-ws]') as HTMLElement | null;
   if (it) switchWorkspace(it.dataset.ws!);
 });

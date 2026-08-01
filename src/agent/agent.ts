@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { providerOf, modelById } from '../shared/models';
 import type { AgentEvent, ApprovalRequest, ChatTurn } from '../shared/types';
-import { getSettings } from '../store';
+import { getSettings, getActiveWorkspaceDef } from '../store';
 import { getKey } from '../keys';
 import type { ToolContext } from './tools';
 import { runAnthropic, runOpenAI, runGoogle, type RunArgs } from './providers';
@@ -29,9 +29,15 @@ export async function runAgent(args: OrchestrateArgs): Promise<void> {
   // optional there. Other providers still need a stored key.
   if (!apiKey && provider !== 'anthropic') return args.emit({ type: 'error', message: `No API key set for ${provider}. Add one in Settings to use ${modelById(args.model).name}.` });
 
+  // Per-workspace agent trust: an untrusted workspace forces approvals even when global auto-approve is
+  // on (undefined trusted = trusted, so migrated/default workspaces are unaffected). Enforced here in the
+  // main process so the renderer can't bypass the gate. See ToolContext.autoApprove.
+  const wsDef = await getActiveWorkspaceDef();
+  const trusted = wsDef?.trusted !== false;
+
   const ctx: ToolContext = {
     workspace: settings.workspace,
-    autoApprove: settings.autoApprove,
+    autoApprove: settings.autoApprove && trusted,
     approve: args.approve,
     newId: () => randomUUID(),
   };

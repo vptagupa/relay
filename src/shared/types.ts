@@ -72,6 +72,10 @@ export interface WorkspaceDef {
   color: string;                    // switcher orientation cue
   root: string | null;              // absolute project folder (null = none)
   themeId: string | null;           // per-workspace theme override; null = inherit the global theme
+  // Agent trust (VS Code-style): when false, the agent ALWAYS asks before a file write/edit or command
+  // in this workspace, even if global auto-approve is on. undefined = trusted (so migrated/older defs and
+  // the default workspace are unaffected); new workspaces start untrusted until the user trusts them.
+  trusted?: boolean;
   createdAt: number;
   lastOpenedAt: number;
 }

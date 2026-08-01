@@ -203,6 +203,18 @@ ipcMain.handle('session:export', async (_e, { name, content, ext }: { name: stri
   try { await fsp.writeFile(r.filePath, content, 'utf8'); return { ok: true, path: r.filePath }; }
   catch (e: any) { return { ok: false, error: e?.message || String(e) }; }
 });
+// Import a workspace: read a user-picked JSON file and hand the raw parsed payload back to the renderer,
+// which validates the shape and builds a fresh def + snapshot. (Treated as untrusted content — the
+// renderer sanitizes; imported workspaces start untrusted for the agent.)
+ipcMain.handle('workspace:import', async () => {
+  const r = await dialog.showOpenDialog(win!, {
+    properties: ['openFile'],
+    filters: [{ name: 'Slayer T workspace', extensions: ['json'] }, { name: 'All files', extensions: ['*'] }],
+  });
+  if (r.canceled || !r.filePaths[0]) return { ok: false };
+  try { return { ok: true, data: JSON.parse(await fsp.readFile(r.filePaths[0], 'utf8')) }; }
+  catch (e: any) { return { ok: false, error: e?.message || String(e) }; }
+});
 
 /* -------------------- file browser -------------------- */
 const CODE_EXTS = new Set(['.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs', '.json', '.jsonc', '.html', '.htm', '.css', '.scss', '.sass', '.less', '.md', '.markdown', '.py', '.rb', '.go', '.rs', '.java', '.kt', '.kts', '.c', '.h', '.cpp', '.cc', '.hpp', '.cs', '.php', '.swift', '.sh', '.bash', '.zsh', '.fish', '.ps1', '.yml', '.yaml', '.toml', '.ini', '.cfg', '.conf', '.env', '.xml', '.sql', '.vue', '.svelte', '.astro', '.txt', '.log', '.gradle', '.r', '.lua', '.dart', '.pl', '.ex', '.exs', '.clj', '.tf', '.graphql', '.proto']);

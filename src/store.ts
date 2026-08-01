@@ -197,6 +197,12 @@ export async function getWorkspaceMeta(): Promise<{ workspaces: WorkspaceDef[]; 
   return { workspaces: db.workspaces, activeWorkspaceId: db.activeWorkspaceId };
 }
 
+// The active workspace's definition — used by the agent (main process) to resolve per-workspace trust.
+export async function getActiveWorkspaceDef(): Promise<WorkspaceDef | undefined> {
+  const db = await load();
+  return db.workspaces.find((w) => w.id === db.activeWorkspaceId);
+}
+
 // Persist the definition list + active id; prune snapshots for workspaces that no longer exist.
 export async function saveWorkspaceMeta(workspaces: WorkspaceDef[], activeWorkspaceId: string): Promise<void> {
   const db = await load();
