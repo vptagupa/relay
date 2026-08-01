@@ -48,6 +48,9 @@ export interface OpenTab extends TermColors {
   blocks?: Block[];                 // command history as structured blocks
   chat?: ChatTurn[];                // this terminal's agent conversation
   group?: number;                   // which split group (pane) this tab belongs to
+  // block-id namespace; preserved across a keep-alive reattach so the live shell's continuing block
+  // ids match the restored blocks (updates in place, no duplicate). A fresh nonce on a cold restart.
+  bkNonce?: string;
 }
 
 // A workspace's live tab snapshot (its split layout + open terminals), stored by workspace id in

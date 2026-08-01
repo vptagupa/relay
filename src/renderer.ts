@@ -98,7 +98,7 @@ async function newTab(seed?: Partial<OpenTab> & { libId?: string }, activate = t
   // Open into the focused pane (or the tab's saved group on restore); never a stale/hidden pane.
   let group = (seed as { group?: number })?.group ?? state.focus;
   if (activate && !leaves(state.layout).includes(group)) group = state.focus;
-  const tab: Tab = { id, name: seed?.name || (n > 1 ? `terminal ${n}` : 'terminal'), model: seed?.model || state.settings.defaultModel, cwd, libId: seed?.libId, term, fit, ser, el, tabBg: seed?.tabBg, tabFg: seed?.tabFg, bodyBg: seed?.bodyBg, bodyFg: seed?.bodyFg, chat: seed?.chat ? [...seed.chat] : [], blocks: seed?.blocks ? [...seed.blocks] : [], bkNonce: uid(), cmdHistory: [], histIdx: 0, liveInteractive: false, group };
+  const tab: Tab = { id, name: seed?.name || (n > 1 ? `terminal ${n}` : 'terminal'), model: seed?.model || state.settings.defaultModel, cwd, libId: seed?.libId, term, fit, ser, el, tabBg: seed?.tabBg, tabFg: seed?.tabFg, bodyBg: seed?.bodyBg, bodyFg: seed?.bodyFg, chat: seed?.chat ? [...seed.chat] : [], blocks: seed?.blocks ? [...seed.blocks] : [], bkNonce: seed?.bkNonce || uid(), cmdHistory: [], histIdx: 0, liveInteractive: false, group };
   state.tabs.push(tab);
   applyTermColors(tab); // honor any restored per-terminal body/text colors
   term.onData((d) => relay.ptyWrite(id, d));
@@ -136,7 +136,11 @@ async function newTab(seed?: Partial<OpenTab> & { libId?: string }, activate = t
   renderTabs();
   // Reattach to a live shell if one exists (replays its real output); otherwise spawn a
   // fresh shell, seeded with the saved snapshot as scrollback (main handles ordering).
-  await relay.ptyCreate(id, cwd, term.cols || 80, term.rows || 24, seed?.scrollback);
+  const reattached = await relay.ptyCreate(id, cwd, term.cols || 80, term.rows || 24, seed?.scrollback);
+  // A restored tab whose shell was NOT reattached (cold restart) gets a fresh block-id namespace so the
+  // new shell's blocks can't collide with the restored ones. A reattached (keep-alive) shell keeps the
+  // saved nonce, so its continuing/flushed block ids line up with the restored blocks.
+  if (seed?.bkNonce && !reattached) tab.bkNonce = uid();
   if (activate) switchTab(id);
   renderTabs(); persistWorkspace();
   return tab;
@@ -511,7 +515,7 @@ function slimBlocks(blocks: Block[]): Block[] {
   return blocks.slice(-120).map((b) => ({ ...b, output: b.output.length > 4000 ? '…' + b.output.slice(-4000) : b.output }));
 }
 function snapshotTabs(): OpenTab[] {
-  return state.tabs.map((t) => ({ id: t.id, name: t.name, model: t.model, libId: t.libId, cwd: t.cwd, group: t.group, scrollback: t.ser.serialize({ scrollback: 800 }), tabBg: t.tabBg, tabFg: t.tabFg, bodyBg: t.bodyBg, bodyFg: t.bodyFg, chat: t.chat.slice(-100), blocks: slimBlocks(t.blocks) }));
+  return state.tabs.map((t) => ({ id: t.id, name: t.name, model: t.model, libId: t.libId, cwd: t.cwd, group: t.group, bkNonce: t.bkNonce, scrollback: t.ser.serialize({ scrollback: 800 }), tabBg: t.tabBg, tabFg: t.tabFg, bodyBg: t.bodyBg, bodyFg: t.bodyFg, chat: t.chat.slice(-100), blocks: slimBlocks(t.blocks) }));
 }
 // Persist the open tabs + their scrollback. Coalescing throttle: the first trigger
 // schedules a save ~800ms out and any triggers within that window are folded in — so a
