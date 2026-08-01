@@ -152,6 +152,7 @@ async function addFolderTab() {
   const dir = await relay.pickFolder();
   if (!dir) return; // dialog cancelled
   state.settings = await relay.patchSettings({ workspace: dir });
+  setActiveWsRoot(dir); // this folder is now the active workspace's root
   updateStatus(); reflectSettings();
   await newTab({ cwd: dir, name: baseName(dir) });
 }
@@ -555,6 +556,7 @@ let wsDefs: WorkspaceDef[] = [];
 let wsActiveId = '';
 const WS_COLORS = ['#6e7bff', '#f2a93b', '#4ec46a', '#ff2e97', '#22d3ee', '#a78bfa', '#f0616a'];
 const nextWsColor = () => WS_COLORS[wsDefs.length % WS_COLORS.length];
+const activeWsDef = (): WorkspaceDef | undefined => wsDefs.find((w) => w.id === wsActiveId);
 
 // Keep-alive is bounded: at most WARM_CAP background workspaces keep their shells alive. Beyond that
 // the least-recently-used background workspace is evicted — its shells are killed (its snapshot stays,
@@ -633,17 +635,26 @@ async function switchWorkspace(id: string): Promise<void> {
   warmWs = warmWs.filter((w) => w !== from && w !== id); warmWs.push(from); void evictBeyondCap(); // `from` is now warmest; `id` is going active
   wsActiveId = id;
   const def = wsDefs.find((w) => w.id === id)!; def.lastOpenedAt = Date.now();
+  // Per-workspace root + theme: adopt the target's folder + look BEFORE the rebuild, so new terminals
+  // spawn in its root and with its palette, and the chrome/Files reflect it. settings.workspace/template
+  // are the live mirror the rest of the UI reads; persisting them keeps main's copy in step so a later
+  // patchSettings (autosave toggle, etc.) can't clobber the effective folder/theme back to a stale value.
+  const effTpl = (def.themeId ?? state.settings.template) as Settings['template'];
+  state.settings = await relay.patchSettings({ workspace: def.root ?? '', template: effTpl });
+  applyTheme();                   // re-tint chrome now; terminals are (re)created below with the new palette
   relay.saveWorkspaceMeta(wsDefs, id);
   const ws = await relay.getWorkspaceSnapshot(id);
   await restoreWorkspaceSnapshot(ws);
-  renderFiles(); updateMainView(); renderWorkspaceChip();
+  renderFiles(); updateMainView(); renderWorkspaceChip(); reflectSettings();
   booting = false; persistWorkspace(true);
   toast(`Workspace: ${def.name}`, true);
 }
 
 async function createWorkspace(): Promise<void> {
   if (booting) return; // don't add + switch while a switch/boot is in flight
-  const def: WorkspaceDef = { id: 'ws_' + uid(), name: 'New workspace', color: nextWsColor(), root: state.settings.workspace ?? null, themeId: null, createdAt: Date.now(), lastOpenedAt: Date.now() };
+  // A fresh workspace is a blank project: no folder (→ "Open a project folder to start") and no theme
+  // override (→ inherits the current look until one is picked). Its identity is a distinct root + look.
+  const def: WorkspaceDef = { id: 'ws_' + uid(), name: 'New workspace', color: nextWsColor(), root: null, themeId: null, createdAt: Date.now(), lastOpenedAt: Date.now() };
   wsDefs.push(def);
   await switchWorkspace(def.id); // saves the current snapshot, then rebuilds into the (empty) new one
 }
@@ -670,6 +681,18 @@ function openWsMenu(): void {
 }
 function closeWsMenu(): void { $('#wsMenu').classList.remove('show'); }
 function saveWsMeta(): void { relay.saveWorkspaceMeta(wsDefs, wsActiveId); }
+// Mirror the active workspace's persisted folder + theme into the live settings the rest of the UI reads.
+// Boot-only (in-memory): the values already equal what was persisted on the last switch/set, so no write.
+function syncEffectiveFromActiveWs(): void {
+  const def = activeWsDef(); if (!def) return;
+  state.settings.workspace = def.root ?? '';
+  if (def.themeId) state.settings.template = def.themeId as Settings['template']; // null = inherit the global default
+}
+// Record a folder as the active workspace's root (persisted). '' collapses to null → shown as "no folder".
+function setActiveWsRoot(dir: string | null): void {
+  const def = activeWsDef(); if (!def) return;
+  def.root = dir || null; saveWsMeta();
+}
 function renameWorkspace(id: string, name: string): void {
   const def = wsDefs.find((w) => w.id === id); if (!def) return;
   const nm = name.trim(); if (nm) def.name = nm;
@@ -806,7 +829,11 @@ function applyTheme() {
   applyThemeVars(activeTheme());
   for (const t of state.tabs) { applyTermColors(t); t.term.refresh(0, t.term.rows - 1); } // re-tint every live terminal
 }
-async function setTemplate(id: string) { state.settings = await relay.patchSettings({ template: id as Settings['template'] }); applyTheme(); reflectSettings(); }
+async function setTemplate(id: string) {
+  const def = activeWsDef(); if (def) { def.themeId = id; saveWsMeta(); } // theme is per-workspace; the global setting is only the seed for new ones
+  state.settings = await relay.patchSettings({ template: id as Settings['template'] });
+  applyTheme(); reflectSettings();
+}
 async function cycleTemplate() { const i = TEMPLATES.findIndex((t) => t.id === curTemplate()); await setTemplate(TEMPLATES[(i + 1) % TEMPLATES.length].id); }
 function applySidebar() { $('#main').classList.toggle('collapsed', state.settings.sidebarCollapsed); const t = activeTab(); if (t) setTimeout(() => { t.fit.fit(); relay.ptyResize(t.id, t.term.cols, t.term.rows); }, 210); }
 function applyToolbar() { document.querySelector('.titlebar')?.classList.toggle('shown', state.settings.toolbarShown); }
@@ -1794,7 +1821,7 @@ $('#settingsClose').onclick = closeSettings;
 $('#cfOk').onclick = () => closeConfirm(true);
 $('#cfCancel').onclick = () => closeConfirm(false);
 $('#scrim').onclick = () => { closeConfirm(false); closeSettings(); closePalette(); };
-$('#setWsBtn').onclick = async () => { state.settings = await relay.openWorkspace(); updateStatus(); reflectSettings(); };
+$('#setWsBtn').onclick = async () => { state.settings = await relay.openWorkspace(); setActiveWsRoot(state.settings.workspace || null); updateStatus(); reflectSettings(); };
 $('#autoApprove').addEventListener('change', async (e) => { state.settings = await relay.patchSettings({ autoApprove: (e.target as HTMLInputElement).checked }); });
 document.querySelectorAll('.set[data-key]').forEach((b) => b.addEventListener('click', async () => {
   const p = (b as HTMLElement).dataset.key!;
@@ -1864,6 +1891,7 @@ new ResizeObserver(() => { clearTimeout(_roT); _roT = setTimeout(() => { fitPane
   state.library = await relay.listSessions();
   const meta = await relay.getWorkspaceMeta();
   wsDefs = meta.workspaces; wsActiveId = meta.activeWorkspaceId; renderWorkspaceChip();
+  syncEffectiveFromActiveWs(); // mirror the active workspace's folder + theme into settings before first paint
   ($('#libSort') as HTMLSelectElement).value = state.settings.librarySort || 'recent';
   applyTheme(); applySidebarWidth(); applySidebar(); applyToolbar(); applySplit(); reflectAutosave(); renderLibrary(); updateStatus(); reflectModel(); reflectSettings();
   ($('#storeText') as HTMLElement).textContent = 'Saved on this machine';
