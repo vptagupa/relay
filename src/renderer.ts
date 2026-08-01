@@ -535,7 +535,7 @@ function snapshotTabs(): OpenTab[] {
 // shared with workspaces.ts (which owns the switch/restore that sets it). See persistWorkspace below.
 function persistWorkspace(immediate = false) {
   if (!state.settings.autoSave || state.booting) return;
-  const run = () => { wsT = null; relay.setWorkspace({ active: state.active, tabs: snapshotTabs(), gv: state.gv, focus: state.focus, layout: state.layout }); flashSaved(); };
+  const run = () => { wsT = null; if (state.booting) return; relay.setWorkspace({ active: state.active, tabs: snapshotTabs(), gv: state.gv, focus: state.focus, layout: state.layout }); flashSaved(); }; // re-check booting: a timer scheduled before a switch must NOT fire mid-teardown (state emptied, store still on the old id) and overwrite the outgoing workspace with an empty snapshot
   if (immediate) { if (wsT) clearTimeout(wsT); run(); return; }
   if (wsT) return;              // a save is already scheduled — coalesce into it
   wsT = setTimeout(run, 800);
@@ -1742,9 +1742,13 @@ new ResizeObserver(() => { clearTimeout(_roT); _roT = setTimeout(() => { fitPane
   tickClock(); setInterval(tickClock, 20000);
 
   const ws = await relay.getWorkspace(); // the active workspace's tab snapshot
-  await restoreWorkspaceSnapshot(ws);
-  renderFiles(); // populate the Files section even if no terminal is active yet
-  updateMainView(); // reflect Blocks/Classic choice (and the toggle button) on first paint
-  state.booting = false; persistWorkspace(true); // restore complete — resume autosave and write the settled state once
+  try {
+    await restoreWorkspaceSnapshot(ws);
+    renderFiles(); // populate the Files section even if no terminal is active yet
+    updateMainView(); // reflect Blocks/Classic choice (and the toggle button) on first paint
+  } finally {
+    state.booting = false; // always resume autosave, even if the restore threw — a stuck flag would deadlock every later switch/create/delete
+  }
+  persistWorkspace(true); // restore complete — write the settled state once
   settleDeeplink(); // deliver a slayert:// link this instance launched with, now that boot is done
 })();

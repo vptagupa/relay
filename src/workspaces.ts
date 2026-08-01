@@ -48,7 +48,6 @@ const nextWsColor = () => WS_COLORS[wsDefs.length % WS_COLORS.length];
 const activeWsDef = (): WorkspaceDef | undefined => wsDefs.find((w) => w.id === wsActiveId);
 const addWorkspaceDef = (def: WorkspaceDef): void => { wsDefs.push(def); }; // for blueprints.ts (spawn-from-template)
 export const getActiveWsId = (): string => wsActiveId;
-export { activeWsDef as activeWorkspaceDef, wsTrusted as isWorkspaceTrusted }; // for the renderer's agent-panel trust notice
 
 // Keep-alive is bounded: at most WARM_CAP background workspaces keep their shells alive. Beyond that the
 // least-recently-used background workspace is evicted — its shells are killed (its snapshot stays, so it
@@ -69,8 +68,11 @@ async function evictBeyondCap(): Promise<void> {
 // Rebuild the pane layout + terminals from a saved snapshot. Shared by boot and workspace switch;
 // the caller must have `state.booting` set (autosave suspended) around it. Applies the split layout FIRST
 // so each tab lands in its real pane, then settles in one pass — mirrors the original boot restore.
-export async function restoreWorkspaceSnapshot(ws: Workspace): Promise<void> {
-  if (state.settings.autoSave && ws.tabs.length) {
+// `alwaysRestore` forces the tab rebuild even when autoSave is off: correct for an in-session switch/delete
+// (the tabs are live state the user expects preserved, and their keep-alive shells must be reattached, not
+// orphaned); boot omits it so an autoSave-off relaunch still starts clean.
+export async function restoreWorkspaceSnapshot(ws: Workspace, alwaysRestore = false): Promise<void> {
+  if ((alwaysRestore || state.settings.autoSave) && ws.tabs.length) {
     const activeId = ws.tabs.some((t) => t.id === ws.active) ? ws.active : ws.tabs[0].id;
     const savedGroups = new Set<number>(ws.tabs.map((t) => (typeof t.group === 'number' ? t.group : 0)));
     const validLayout = ws.layout != null && isValidLayout(ws.layout, savedGroups);
@@ -121,21 +123,26 @@ export async function switchWorkspace(id: string): Promise<void> {
   if (state.booting || id === wsActiveId || !wsDefs.some((w) => w.id === id)) return; // a switch/boot in flight — ignore
 
   const from = wsActiveId;
+  const def = wsDefs.find((w) => w.id === id)!;
   // Save the current workspace's snapshot so switching back restores it (scrollback serialized here).
   relay.saveWorkspaceSnapshot(from, { active: state.active, tabs: deps.snapshotTabs(), gv: state.gv, focus: state.focus, layout: state.layout });
   state.booting = true;           // suspend autosave across the teardown + rebuild (init-crash guard)
-  teardownAllTabs();              // detaches `from`'s shells (keep-alive)
-  warmWs = warmWs.filter((w) => w !== from && w !== id); warmWs.push(from); void evictBeyondCap(); // `from` is now warmest; `id` is going active
-  wsActiveId = id;
-  const def = wsDefs.find((w) => w.id === id)!; def.lastOpenedAt = Date.now();
-  // Per-workspace root + theme: adopt the target's folder + look BEFORE the rebuild, so new terminals spawn
-  // in its root and with its palette, and the chrome/Files reflect it.
-  await adoptActiveWsEnv();
-  relay.saveWorkspaceMeta(wsDefs, id);
-  const ws = await relay.getWorkspaceSnapshot(id);
-  await restoreWorkspaceSnapshot(ws);
-  renderFiles(); deps.updateMainView(); renderWorkspaceChip(); deps.reflectSettings();
-  state.booting = false; deps.persistWorkspace(true);
+  try {
+    teardownAllTabs();            // detaches `from`'s shells (keep-alive)
+    warmWs = warmWs.filter((w) => w !== from && w !== id); warmWs.push(from); void evictBeyondCap(); // `from` is now warmest; `id` is going active
+    wsActiveId = id;
+    def.lastOpenedAt = Date.now();
+    // Per-workspace root + theme: adopt the target's folder + look BEFORE the rebuild, so new terminals spawn
+    // in its root and with its palette, and the chrome/Files reflect it.
+    await adoptActiveWsEnv();
+    relay.saveWorkspaceMeta(wsDefs, id);
+    const ws = await relay.getWorkspaceSnapshot(id);
+    await restoreWorkspaceSnapshot(ws, true); // in-session switch: rebuild the target's tabs even if autoSave is off (the gate is for boot/relaunch only)
+    renderFiles(); deps.updateMainView(); renderWorkspaceChip(); deps.reflectSettings();
+  } finally {
+    state.booting = false; // always resume autosave, even if the rebuild threw — a stuck flag would deadlock every later switch/create/delete and freeze autosave
+  }
+  deps.persistWorkspace(true);
   toast(`Workspace: ${def.name}`, true);
   settleDeeplink(); // a link that arrived mid-switch runs now
 }
@@ -205,6 +212,7 @@ export function setActiveWsTheme(themeId: string): void {
 
 /* ---- management: trust, duplicate, export / import (Phase 3) ---- */
 const wsTrusted = (def: WorkspaceDef | undefined): boolean => !!def && def.trusted !== false; // undefined = trusted
+export { activeWsDef as activeWorkspaceDef, wsTrusted as isWorkspaceTrusted }; // public accessors for the renderer's agent-panel trust notice (declared after wsTrusted so there's no forward-ref)
 // Make a name unique within the current definition list ("Foo" → "Foo 2", "Foo 3", …).
 function uniqueWsName(base: string): string {
   const names = new Set(wsDefs.map((w) => w.name));
@@ -278,7 +286,7 @@ export async function importWorkspace(): Promise<void> {
   const base = (typeof w.name === 'string' && w.name.trim()) ? w.name.trim() : 'Imported workspace';
   const def: WorkspaceDef = {
     id: nid, name: uniqueWsName(base),
-    color: (typeof w.color === 'string' && w.color) ? w.color : nextWsColor(),
+    color: (typeof w.color === 'string' && /^#[0-9a-fA-F]{6}$/.test(w.color)) ? w.color : nextWsColor(), // must be #rrggbb — a raw string would inject CSS into the swatch's inline style
     root: typeof w.root === 'string' ? w.root : null,
     themeId: (typeof w.themeId === 'string' && TEMPLATES.some((t) => t.id === w.themeId)) ? w.themeId : null,
     trusted: false, // came from elsewhere → untrusted until the user trusts it
@@ -309,16 +317,21 @@ export async function deleteWorkspace(id: string): Promise<void> {
   if (!(await deps.confirmDialog('Delete workspace?', `“${def.name}” and its saved terminals will be removed — this can’t be undone.`, 'Delete'))) return;
   if (id === wsActiveId) {
     // Drop the active session WITHOUT saving its snapshot (it's being deleted), then open the first remaining one.
-    state.booting = true; teardownAllTabs(true); // kill — this workspace's shells are gone for good
-    wsDefs = wsDefs.filter((w) => w.id !== id);
-    wsActiveId = wsDefs[0].id;
-    warmWs = warmWs.filter((w) => w !== id && w !== wsActiveId); // deleted gone; the new active is no longer background
-    await adoptActiveWsEnv(); // the surviving active workspace has its OWN folder + theme — adopt them before rebuilding
-    relay.saveWorkspaceMeta(wsDefs, wsActiveId); // prunes the deleted workspace's snapshot from byId
-    const ws = await relay.getWorkspaceSnapshot(wsActiveId);
-    await restoreWorkspaceSnapshot(ws);
-    renderFiles(); deps.updateMainView(); deps.reflectSettings();
-    state.booting = false; deps.persistWorkspace(true); settleDeeplink(); // a link buffered during the delete runs now
+    state.booting = true;
+    try {
+      teardownAllTabs(true); // kill — this workspace's shells are gone for good
+      wsDefs = wsDefs.filter((w) => w.id !== id);
+      wsActiveId = wsDefs[0].id;
+      warmWs = warmWs.filter((w) => w !== id && w !== wsActiveId); // deleted gone; the new active is no longer background
+      await adoptActiveWsEnv(); // the surviving active workspace has its OWN folder + theme — adopt them before rebuilding
+      relay.saveWorkspaceMeta(wsDefs, wsActiveId); // prunes the deleted workspace's snapshot from byId
+      const ws = await relay.getWorkspaceSnapshot(wsActiveId);
+      await restoreWorkspaceSnapshot(ws, true); // rebuild the survivor's tabs regardless of autoSave (in-session, like a switch)
+      renderFiles(); deps.updateMainView(); deps.reflectSettings();
+    } finally {
+      state.booting = false; // always resume autosave, even if the rebuild threw
+    }
+    deps.persistWorkspace(true); settleDeeplink(); // a link buffered during the delete runs now
   } else {
     if (warmWs.includes(id)) await killWorkspaceShells(id); // kill its background shells before dropping it
     warmWs = warmWs.filter((w) => w !== id);
@@ -330,9 +343,9 @@ export async function deleteWorkspace(id: string): Promise<void> {
 }
 
 /* ---- slayert:// deeplinks: switch to a workspace / spawn a template by name ---- */
-let pendingDeeplink: { kind: string; name: string } | null = null;
+const pendingDeeplinks: { kind: string; name: string }[] = []; // FIFO buffer for links that land mid-boot/switch (don't drop a second one)
 export function handleDeeplink(intent: { kind: string; name: string }): void {
-  if (state.booting) { pendingDeeplink = intent; return; } // defer until boot / an in-flight switch settles
+  if (state.booting) { pendingDeeplinks.push(intent); return; } // defer until boot / an in-flight switch settles
   const name = (intent.name || '').trim();
   if (intent.kind === 'workspace') {
     const def = wsDefs.find((w) => w.name === name);
@@ -346,10 +359,14 @@ export function handleDeeplink(intent: { kind: string; name: string }): void {
     toast(`Unknown link kind: ${intent.kind}`);
   }
 }
-// Run a link buffered while state.booting / switching — called wherever `state.booting` returns to false.
+// Drain links buffered while state.booting / switching — called wherever `state.booting` returns to false.
+// Draining a 'workspace' link starts a switch that re-sets state.booting synchronously, so any links still
+// unprocessed in this pass re-buffer (handleDeeplink pushes them back) and settle at the end of that switch —
+// the queue drains one switch at a time, in order, and always terminates.
 export function settleDeeplink(): void {
-  if (!pendingDeeplink || state.booting) return;
-  const d = pendingDeeplink; pendingDeeplink = null; handleDeeplink(d);
+  if (state.booting || !pendingDeeplinks.length) return;
+  const queue = pendingDeeplinks.splice(0); // take the current batch; re-entrant handlers push into the now-empty queue
+  for (const d of queue) handleDeeplink(d);
 }
 export function copyWorkspaceLink(id: string): void {
   const def = wsDefs.find((w) => w.id === id); if (!def) return;
@@ -367,8 +384,11 @@ export async function loadWorkspaceMeta(): Promise<void> {
 }
 
 // Wire dependencies, drive blueprints (this module owns switchWorkspace etc.), and wire the switcher menu.
+let wired = false; // one-time listener + blueprint wiring; guard against a double-init re-registering handlers
 export function initWorkspaces(d: WsDeps): void {
   deps = d;
+  if (wired) return;
+  wired = true;
   initBlueprints({ switchWorkspace, addWorkspaceDef, activeWorkspaceDef: activeWsDef, uniqueWsName, nextWsColor, sendCommand: d.sendCommand, confirmDialog: d.confirmDialog, shortCwd: d.shortCwd, isBooting: () => state.booting });
   $('#wsChip').onclick = () => ($('#wsMenu').classList.contains('show') ? closeWsMenu() : openWsMenu());
   $('#wsMenu').addEventListener('click', (e) => {
