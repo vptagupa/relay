@@ -18,7 +18,7 @@ import { toast, makeEditable } from './ui';
 import { filterHistory, railEntry } from './history';
 import { initFiles, renderFiles } from './files';
 import { initBlockView, blockHtml, bvBlockHtml, collapsedBlocks, fmtDur } from './block-view';
-import type { Settings, SavedSession, AgentEvent, ApprovalRequest, ChatTurn, OpenTab, Block, Bookmark, BookmarkGroup } from './shared/types';
+import type { Settings, SavedSession, AgentEvent, ApprovalRequest, ChatTurn, OpenTab, Workspace, WorkspaceDef, Block, Bookmark, BookmarkGroup } from './shared/types';
 
 // TEMP DIAG: surface full stacks (minify is off) for the init crash.
 window.addEventListener('error', (e) => console.error('WERR ' + ((e as ErrorEvent).error?.stack || (e as ErrorEvent).message)));
@@ -542,6 +542,96 @@ async function toggleAutosave() {
   if (state.settings.autoSave) { persistWorkspace(); toast('Auto-save enabled — terminals restore on relaunch', true); }
   else toast('Auto-save disabled');
 }
+
+/* ----------------------------- named workspaces ----------------------------- */
+// Renderer mirror of the store's workspace definitions + the active id. The active workspace's tab
+// snapshot is what boot/persist read & write (getWorkspace/setWorkspace). Switching saves the
+// current snapshot, tears the terminals down (cold — Phase 1), and rebuilds the target's.
+let wsDefs: WorkspaceDef[] = [];
+let wsActiveId = '';
+const WS_COLORS = ['#6e7bff', '#f2a93b', '#4ec46a', '#ff2e97', '#22d3ee', '#a78bfa', '#f0616a'];
+const nextWsColor = () => WS_COLORS[wsDefs.length % WS_COLORS.length];
+
+// Rebuild the pane layout + terminals from a saved snapshot. Shared by boot and workspace switch;
+// the caller must have `booting` set (autosave suspended) around it. Applies the split layout FIRST
+// so each tab lands in its real pane, then settles in one pass — mirrors the original boot restore.
+async function restoreWorkspaceSnapshot(ws: Workspace): Promise<void> {
+  if (state.settings.autoSave && ws.tabs.length) {
+    const activeId = ws.tabs.some((t) => t.id === ws.active) ? ws.active : ws.tabs[0].id;
+    const savedGroups = new Set<number>(ws.tabs.map((t) => (typeof t.group === 'number' ? t.group : 0)));
+    const validLayout = ws.layout != null && isValidLayout(ws.layout, savedGroups);
+    if (validLayout) {
+      state.layout = ws.layout as LNode;
+      for (const g of leaves(state.layout)) state.gv[g] = ws.gv?.[g] || '';
+      state.focus = leaves(state.layout).includes(ws.focus ?? 0) ? (ws.focus ?? 0) : leaves(state.layout)[0];
+    } else { state.layout = { g: 0 }; state.focus = 0; }
+    const lvs = leaves(state.layout);
+    for (const t of ws.tabs) { if (typeof t.group !== 'number' || !lvs.includes(t.group)) t.group = lvs[0]; await newTab(t, false); }
+    for (const g of lvs) { if (!state.tabs.some((t) => t.id === state.gv[g] && t.group === g)) state.gv[g] = groupTabs(g)[0]?.id || ''; }
+    if (!validLayout) state.gv[0] = state.tabs.some((t) => t.id === activeId) ? activeId : (groupTabs(0)[0]?.id || '');
+    state.active = state.gv[state.focus] || activeId;
+    E('#termEmpty').style.display = 'none';
+    reconcilePanes(); renderTabs(); updateStatus(); reflectModel();
+  } else if (state.settings.workspace) {
+    newTab();
+  } else {
+    E('#termEmpty').style.display = 'grid';
+    E('#termEmpty').innerHTML = 'Open a project folder to start.<br>Press <b>Ctrl/⌘ K</b> → “Open folder”.';
+  }
+}
+
+// Cold teardown for a switch: kill every terminal's shell, dispose its renderer, drop its tab node,
+// and reset to a single empty pane. Pane DOM elements are reused (never removed) so the E() cache
+// stays valid for the rebuild — only tab elements are dropped.
+function teardownAllTabs(): void {
+  for (const t of state.tabs) { relay.ptyKill(t.id); t.term.dispose(); t.el.remove(); }
+  state.tabs = [];
+  state.layout = { g: 0 }; state.gv = ['', '', '', '']; state.focus = 0; state.active = ''; state.maxG = null;
+  reconcilePanes(); // collapse the grid back to one empty pane (like closeTab's last-tab reset) before the rebuild
+}
+
+async function switchWorkspace(id: string): Promise<void> {
+  closeWsMenu();
+  if (id === wsActiveId || !wsDefs.some((w) => w.id === id)) return;
+  // Save the current workspace's snapshot so switching back restores it (scrollback serialized here).
+  relay.saveWorkspaceSnapshot(wsActiveId, { active: state.active, tabs: snapshotTabs(), gv: state.gv, focus: state.focus, layout: state.layout });
+  booting = true;                 // suspend autosave across the teardown + rebuild (init-crash guard)
+  teardownAllTabs();
+  wsActiveId = id;
+  const def = wsDefs.find((w) => w.id === id)!; def.lastOpenedAt = Date.now();
+  relay.saveWorkspaceMeta(wsDefs, id);
+  const ws = await relay.getWorkspaceSnapshot(id);
+  await restoreWorkspaceSnapshot(ws);
+  renderFiles(); updateMainView(); renderWorkspaceChip();
+  booting = false; persistWorkspace(true);
+  toast(`Workspace: ${def.name}`, true);
+}
+
+async function createWorkspace(): Promise<void> {
+  const def: WorkspaceDef = { id: 'ws_' + uid(), name: 'New workspace', color: nextWsColor(), root: state.settings.workspace ?? null, themeId: null, createdAt: Date.now(), lastOpenedAt: Date.now() };
+  wsDefs.push(def);
+  await switchWorkspace(def.id); // saves the current snapshot, then rebuilds into the (empty) new one
+}
+
+function renderWorkspaceChip(): void {
+  const def = wsDefs.find((w) => w.id === wsActiveId);
+  const dot = $('#wsChip').querySelector('.ws-dot') as HTMLElement | null;
+  if (dot) dot.style.background = def?.color || 'var(--accent)';
+  $('#wsChipName').textContent = def?.name || 'Workspace';
+}
+function renderWsMenu(): void {
+  $('#wsMenu').innerHTML = wsDefs.map((w) => `<div class="ws-item${w.id === wsActiveId ? ' on' : ''}" data-ws="${w.id}">
+      <span class="ws-dot" style="background:${esc(w.color)}"></span>
+      <span class="ws-col"><span class="ws-nm">${esc(w.name)}</span><span class="ws-pth">${esc(w.root ? shortCwd(w.root) : 'no folder')}</span></span>
+      ${w.id === wsActiveId ? '<span class="ws-chk">✓</span>' : ''}</div>`).join('')
+    + `<div class="ws-sep"></div><div class="ws-act" data-wsnew><span class="g">＋</span> New workspace</div>`;
+}
+function openWsMenu(): void {
+  renderWsMenu();
+  const r = $('#wsChip').getBoundingClientRect(); const m = $('#wsMenu');
+  m.style.left = r.left + 'px'; m.style.top = (r.bottom + 6) + 'px'; m.classList.add('show');
+}
+function closeWsMenu(): void { $('#wsMenu').classList.remove('show'); }
 
 /* ----------------------------- library ----------------------------- */
 // Pure sort lives in ./library; this reads the current list + mode from state.
@@ -1358,6 +1448,15 @@ $('#btnTheme').onclick = cycleTemplate; // quick-cycle through the five template
 $('#themeGrid').addEventListener('click', (e) => { const b = (e.target as HTMLElement).closest('[data-tpl]') as HTMLElement | null; if (b) setTemplate(b.dataset.tpl!); });
 $('#btnPalette').onclick = openPalette;
 $('#winSearch').onclick = openPalette; // command-search box in the top window bar
+// workspace switcher
+$('#wsChip').onclick = () => ($('#wsMenu').classList.contains('show') ? closeWsMenu() : openWsMenu());
+$('#wsMenu').addEventListener('click', (e) => {
+  const t = e.target as HTMLElement;
+  if (t.closest('[data-wsnew]')) { createWorkspace(); return; }
+  const it = t.closest('[data-ws]') as HTMLElement | null;
+  if (it) switchWorkspace(it.dataset.ws!);
+});
+document.addEventListener('mousedown', (e) => { const t = e.target as HTMLElement; if (!t.closest('#wsMenu') && !t.closest('#wsChip')) closeWsMenu(); });
 $('#btnOpen').onclick = addFolderTab;
 $('#stAutosave').onclick = toggleAutosave;
 $('#libSort').addEventListener('change', async (e) => { state.settings = await relay.patchSettings({ librarySort: (e.target as HTMLSelectElement).value as any }); renderLibrary(); });
@@ -1661,7 +1760,7 @@ document.addEventListener('keydown', (e) => {
   else if (mod && e.key.toLowerCase() === 's') { e.preventDefault(); saveActive(); }
   else if (mod && e.key.toLowerCase() === 'l') { e.preventDefault(); clearActive(); }
   else if (mod && e.key.toLowerCase() === 'w') { e.preventDefault(); state.active && closeTab(state.active); }
-  else if (e.key === 'Escape') { closeConfirm(false); closeModelMenu(); closePalette(); closeSettings(); closeTabMenu(); closeColorPop(); closeHistory(); closeBookmarks(); hideBkmPop(); hideCdPop(); }
+  else if (e.key === 'Escape') { closeConfirm(false); closeModelMenu(); closePalette(); closeSettings(); closeTabMenu(); closeColorPop(); closeHistory(); closeBookmarks(); hideBkmPop(); hideCdPop(); closeWsMenu(); }
 });
 
 relay.onPtyData((id: string, data: string) => { state.tabs.find((t) => t.id === id)?.term.write(data); persistWorkspace(); });
@@ -1680,37 +1779,15 @@ new ResizeObserver(() => { clearTimeout(_roT); _roT = setTimeout(() => { fitPane
 (async function boot() {
   state.settings = await relay.getSettings();
   state.library = await relay.listSessions();
+  const meta = await relay.getWorkspaceMeta();
+  wsDefs = meta.workspaces; wsActiveId = meta.activeWorkspaceId; renderWorkspaceChip();
   ($('#libSort') as HTMLSelectElement).value = state.settings.librarySort || 'recent';
   applyTheme(); applySidebarWidth(); applySidebar(); applyToolbar(); applySplit(); reflectAutosave(); renderLibrary(); updateStatus(); reflectModel(); reflectSettings();
   ($('#storeText') as HTMLElement).textContent = 'Saved on this machine';
   tickClock(); setInterval(tickClock, 20000);
 
-  const ws = await relay.getWorkspace();
-  if (state.settings.autoSave && ws.tabs.length) {
-    const activeId = ws.tabs.some((t: OpenTab) => t.id === ws.active) ? ws.active : ws.tabs[0].id;
-    // Apply the saved split layout FIRST, so each tab restores into its real pane. (If we created
-    // tabs first, reconcilePanes would flatten every group to 0 while the layout is still {g:0}.)
-    const savedGroups = new Set<number>(ws.tabs.map((t: OpenTab) => (typeof t.group === 'number' ? t.group : 0)));
-    const validLayout = ws.layout != null && isValidLayout(ws.layout, savedGroups);
-    if (validLayout) {
-      state.layout = ws.layout as LNode;
-      for (const g of leaves(state.layout)) state.gv[g] = ws.gv?.[g] || '';
-      state.focus = leaves(state.layout).includes(ws.focus ?? 0) ? (ws.focus ?? 0) : leaves(state.layout)[0];
-    } else { state.layout = { g: 0 }; state.focus = 0; }
-    // Create every tab WITHOUT activating (no mid-loop reconcile); pin each to a real leaf.
-    const lvs = leaves(state.layout);
-    for (const t of ws.tabs) { if (typeof t.group !== 'number' || !lvs.includes(t.group)) t.group = lvs[0]; await newTab(t, false); }
-    // Repair each pane's visible tab, then settle the whole layout in one pass.
-    for (const g of lvs) { if (!state.tabs.some((t) => t.id === state.gv[g] && t.group === g)) state.gv[g] = groupTabs(g)[0]?.id || ''; }
-    if (!validLayout) state.gv[0] = state.tabs.some((t) => t.id === activeId) ? activeId : (groupTabs(0)[0]?.id || '');
-    state.active = state.gv[state.focus] || activeId;
-    E('#termEmpty').style.display = 'none';
-    reconcilePanes(); renderTabs(); updateStatus(); reflectModel();
-  } else if (state.settings.workspace) {
-    newTab();
-  } else {
-    E('#termEmpty').innerHTML = 'Open a project folder to start.<br>Press <b>Ctrl/⌘ K</b> → “Open folder”.';
-  }
+  const ws = await relay.getWorkspace(); // the active workspace's tab snapshot
+  await restoreWorkspaceSnapshot(ws);
   renderFiles(); // populate the Files section even if no terminal is active yet
   updateMainView(); // reflect Blocks/Classic choice (and the toggle button) on first paint
   booting = false; persistWorkspace(true); // restore complete — resume autosave and write the settled state once

@@ -12,6 +12,7 @@ export function appHtml(panes: string): string {
   <div class="app">
     <div class="winbar">
       <div class="winbar-brand"><span class="winbar-mark"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5.3 8l3.1 4-3.1 4"/><path d="M11.6 8.4h7.2"/><path d="M15.2 8.4v7.6"/></svg></span><span class="winbar-title">Slayer T</span></div>
+      <button class="ws-chip" id="wsChip" title="Switch workspace"><span class="ws-dot"></span><span class="ws-name" id="wsChipName">Workspace</span><span class="ws-car">▾</span></button>
       <div class="winbar-ctx">
         <button class="winbar-search" id="winSearch" title="Search commands & sessions (⌘K)">
           <span class="winbar-search-ic">⌕</span>
@@ -110,6 +111,7 @@ export function appHtml(panes: string): string {
   </aside>
 
   <div class="model-menu" id="modelMenu" role="listbox"></div>
+  <div class="ws-menu" id="wsMenu" role="listbox"></div>
   <div class="ctx-menu" id="tabMenu" role="menu"></div>
   <div class="ctx-menu" id="tabsMenu" role="menu"></div>
   <div class="color-pop" id="colorPop"></div>
