@@ -112,6 +112,7 @@ export function appHtml(panes: string): string {
 
   <div class="model-menu" id="modelMenu" role="listbox"></div>
   <div class="ws-menu" id="wsMenu" role="listbox"></div>
+  <div class="ws-menu" id="tplMenu" role="listbox"></div>
   <div class="ctx-menu" id="tabMenu" role="menu"></div>
   <div class="ctx-menu" id="tabsMenu" role="menu"></div>
   <div class="color-pop" id="colorPop"></div>

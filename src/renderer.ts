@@ -18,7 +18,7 @@ import { toast, makeEditable } from './ui';
 import { filterHistory, railEntry } from './history';
 import { initFiles, renderFiles } from './files';
 import { initBlockView, blockHtml, bvBlockHtml, collapsedBlocks, fmtDur } from './block-view';
-import type { Settings, SavedSession, AgentEvent, ApprovalRequest, ChatTurn, OpenTab, Workspace, WorkspaceDef, Block, Bookmark, BookmarkGroup } from './shared/types';
+import type { Settings, SavedSession, AgentEvent, ApprovalRequest, ChatTurn, OpenTab, Workspace, WorkspaceDef, WorkspaceBlueprint, BlueprintTab, Block, Bookmark, BookmarkGroup } from './shared/types';
 
 // TEMP DIAG: surface full stacks (minify is off) for the init crash.
 window.addEventListener('error', (e) => console.error('WERR ' + ((e as ErrorEvent).error?.stack || (e as ErrorEvent).message)));
@@ -554,6 +554,7 @@ async function toggleAutosave() {
 // current snapshot, tears the terminals down (cold — Phase 1), and rebuilds the target's.
 let wsDefs: WorkspaceDef[] = [];
 let wsActiveId = '';
+let blueprints: WorkspaceBlueprint[] = []; // reusable workspace templates (Phase 4)
 const WS_COLORS = ['#6e7bff', '#f2a93b', '#4ec46a', '#ff2e97', '#22d3ee', '#a78bfa', '#f0616a'];
 const nextWsColor = () => WS_COLORS[wsDefs.length % WS_COLORS.length];
 const activeWsDef = (): WorkspaceDef | undefined => wsDefs.find((w) => w.id === wsActiveId);
@@ -674,7 +675,7 @@ function renderWsMenu(): void {
       <span class="ws-acts"><button data-wstrust="${w.id}" title="${trusted ? 'Trusted — click to require agent approvals' : 'Untrusted — click to trust'}">${trusted ? '🔓' : '🔒'}</button><button data-wsdup="${w.id}" title="Duplicate">⧉</button><button data-wsexport="${w.id}" title="Export…">⤓</button><button data-wsrename="${w.id}" title="Rename">✎</button><button data-wsdel="${w.id}" title="Delete">✕</button></span>
     </div>`;
   }).join('')
-    + `<div class="ws-sep"></div><div class="ws-act" data-wsnew><span class="g">＋</span> New workspace</div><div class="ws-act" data-wsimport><span class="g">⤒</span> Import workspace…</div>`;
+    + `<div class="ws-sep"></div><div class="ws-act" data-wsnew><span class="g">＋</span> New workspace</div><div class="ws-act" data-wstpl><span class="g">▤</span> Templates…</div><div class="ws-act" data-wsimport><span class="g">⤒</span> Import workspace…</div>`;
 }
 function openWsMenu(): void {
   renderWsMenu();
@@ -832,6 +833,72 @@ async function deleteWorkspace(id: string): Promise<void> {
   renderWorkspaceChip(); renderWsMenu();
   toast(`Deleted “${def.name}”`);
 }
+
+/* ---- workspace blueprints ("Templates", Phase 4): save current + spawn new ---- */
+function saveBlueprints(): void { relay.saveBlueprints(blueprints); }
+function uniqueBlueprintName(base: string): string {
+  const names = new Set(blueprints.map((b) => b.name));
+  if (!names.has(base)) return base;
+  for (let i = 2; ; i++) { const n = `${base} ${i}`; if (!names.has(n)) return n; }
+}
+// Capture the ACTIVE workspace (folder, theme, colour, split layout, terminals) as a reusable template.
+function saveAsTemplate(): void {
+  if (booting) return;
+  const def = activeWsDef(); if (!def) return;
+  const tabs: BlueprintTab[] = state.tabs.map((t) => ({ name: t.name, cwd: t.cwd, group: t.group }));
+  const bp: WorkspaceBlueprint = {
+    id: 'bp_' + uid(), name: uniqueBlueprintName(def.name),
+    root: def.root, themeId: def.themeId, color: def.color,
+    tabs, layout: state.layout, createdAt: Date.now(),
+  };
+  blueprints.push(bp); saveBlueprints();
+  toast(`Saved template “${bp.name}”`, true);
+}
+// Build a fresh tab snapshot from a blueprint: new ids, terminals in their cwds (or the workspace root),
+// visible tab per group = the first in that group. Layout is re-validated by restoreWorkspaceSnapshot.
+function snapshotFromBlueprint(bp: WorkspaceBlueprint): Workspace {
+  const tabs: OpenTab[] = bp.tabs.map((bt) => ({
+    id: uid(), name: bt.name || 'terminal', model: state.settings.defaultModel,
+    cwd: bt.cwd || bp.root || '', group: typeof bt.group === 'number' ? bt.group : 0, bkNonce: uid(),
+  }));
+  const gv: string[] = ['', '', '', ''];
+  for (const t of tabs) { const g = t.group ?? 0; if (g >= 0 && g < gv.length && !gv[g]) gv[g] = t.id; }
+  return { active: tabs[0]?.id ?? '', tabs, gv, focus: 0, layout: bp.layout };
+}
+// Spawn a new workspace from a template and switch to it.
+async function newFromBlueprint(id: string): Promise<void> {
+  if (booting) return;
+  const bp = blueprints.find((b) => b.id === id); if (!bp) return;
+  const nid = 'ws_' + uid();
+  const def: WorkspaceDef = { id: nid, name: uniqueWsName(bp.name), color: bp.color || nextWsColor(), root: bp.root, themeId: bp.themeId, trusted: false, createdAt: Date.now(), lastOpenedAt: Date.now() };
+  relay.saveWorkspaceSnapshot(nid, snapshotFromBlueprint(bp)); // persist BEFORE switch reads it back
+  wsDefs.push(def);
+  await switchWorkspace(nid); // adopts root/theme, rebuilds the terminals, persists meta
+  toast(`New workspace from “${bp.name}”`, true);
+}
+function deleteBlueprint(id: string): void {
+  blueprints = blueprints.filter((b) => b.id !== id); saveBlueprints(); renderTplMenu();
+}
+function renameBlueprint(id: string, name: string): void {
+  const bp = blueprints.find((b) => b.id === id); if (!bp) return;
+  const nm = name.trim(); if (nm) bp.name = nm; saveBlueprints(); renderTplMenu();
+}
+function renderTplMenu(): void {
+  const rows = blueprints.length
+    ? blueprints.map((b) => `<div class="ws-item" data-tpl="${b.id}" title="New workspace from this template">
+        <span class="ws-dot" style="background:${esc(b.color)}"></span>
+        <span class="ws-col"><span class="ws-nm" data-tplname="${b.id}">${esc(b.name)}</span><span class="ws-pth">${esc(b.root ? shortCwd(b.root) : 'no folder')} · ${b.tabs.length} tab${b.tabs.length === 1 ? '' : 's'}</span></span>
+        <span class="ws-acts"><button data-tplrename="${b.id}" title="Rename">✎</button><button data-tpldel="${b.id}" title="Delete">✕</button></span>
+      </div>`).join('')
+    : '<div class="ws-empty">No templates yet.<br>Set up a workspace, then “Save current as template”.</div>';
+  $('#tplMenu').innerHTML = rows + `<div class="ws-sep"></div><div class="ws-act" data-tplsave><span class="g">＋</span> Save current as template</div>`;
+}
+function openTplMenu(): void {
+  renderTplMenu();
+  const r = $('#wsChip').getBoundingClientRect(); const m = $('#tplMenu');
+  m.style.left = r.left + 'px'; m.style.top = (r.bottom + 6) + 'px'; m.classList.add('show');
+}
+function closeTplMenu(): void { $('#tplMenu').classList.remove('show'); }
 
 /* ----------------------------- library ----------------------------- */
 // Pure sort lives in ./library; this reads the current list + mode from state.
@@ -1443,6 +1510,8 @@ function paletteActions(): PalAction[] {
     { g: 'View', t: 'Export workspace…', run: () => exportWorkspace(wsActiveId) },
     { g: 'View', t: 'Import workspace…', run: importWorkspace },
     { g: 'View', t: 'Trust / untrust workspace', run: () => toggleTrust(wsActiveId) },
+    { g: 'View', t: 'Save workspace as template', run: saveAsTemplate },
+    { g: 'View', t: 'New workspace from template…', run: openTplMenu },
     { g: 'View', t: 'Toggle library sidebar', run: toggleSidebar },
     { g: 'View', t: 'Toggle top toolbar', run: toggleToolbar },
     { g: 'View', t: 'Toggle auto-save', run: toggleAutosave },
@@ -1680,10 +1749,21 @@ $('#wsMenu').addEventListener('click', (e) => {
   const ex = t.closest('[data-wsexport]') as HTMLElement | null; if (ex) { closeWsMenu(); exportWorkspace(ex.dataset.wsexport!); return; }
   const del = t.closest('[data-wsdel]') as HTMLElement | null; if (del) { deleteWorkspace(del.dataset.wsdel!); return; }
   if (t.closest('[data-wsnew]')) { createWorkspace(); return; }
+  if (t.closest('[data-wstpl]')) { closeWsMenu(); openTplMenu(); return; }
   if (t.closest('[data-wsimport]')) { closeWsMenu(); importWorkspace(); return; }
   const it = t.closest('[data-ws]') as HTMLElement | null;
   if (it) switchWorkspace(it.dataset.ws!);
 });
+$('#tplMenu').addEventListener('click', (e) => {
+  const t = e.target as HTMLElement;
+  const rn = t.closest('[data-tplrename]') as HTMLElement | null;
+  if (rn) { const el = $('#tplMenu').querySelector(`[data-tplname="${rn.dataset.tplrename}"]`) as HTMLElement | null; if (el) makeEditable(el, (v) => renameBlueprint(rn.dataset.tplrename!, v)); return; }
+  const del = t.closest('[data-tpldel]') as HTMLElement | null; if (del) { deleteBlueprint(del.dataset.tpldel!); return; }
+  if (t.closest('[data-tplsave]')) { closeTplMenu(); saveAsTemplate(); return; }
+  const it = t.closest('[data-tpl]') as HTMLElement | null;
+  if (it) { closeTplMenu(); newFromBlueprint(it.dataset.tpl!); }
+});
+document.addEventListener('mousedown', (e) => { if (!(e.target as HTMLElement).closest('#tplMenu')) closeTplMenu(); });
 document.addEventListener('mousedown', (e) => { const t = e.target as HTMLElement; if (!t.closest('#wsMenu') && !t.closest('#wsChip')) closeWsMenu(); });
 $('#btnOpen').onclick = addFolderTab;
 $('#stAutosave').onclick = toggleAutosave;
@@ -2010,6 +2090,7 @@ new ResizeObserver(() => { clearTimeout(_roT); _roT = setTimeout(() => { fitPane
   state.library = await relay.listSessions();
   const meta = await relay.getWorkspaceMeta();
   wsDefs = meta.workspaces; wsActiveId = meta.activeWorkspaceId; renderWorkspaceChip();
+  blueprints = await relay.getBlueprints();
   syncEffectiveFromActiveWs(); // mirror the active workspace's folder + theme into settings before first paint
   ($('#libSort') as HTMLSelectElement).value = state.settings.librarySort || 'recent';
   applyTheme(); applySidebarWidth(); applySidebar(); applyToolbar(); applySplit(); reflectAutosave(); renderLibrary(); updateStatus(); reflectModel(); reflectSettings();

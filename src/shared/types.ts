@@ -80,6 +80,28 @@ export interface WorkspaceDef {
   lastOpenedAt: number;
 }
 
+// A terminal spec inside a workspace blueprint — structure only, no live state.
+export interface BlueprintTab {
+  name: string;
+  cwd?: string;                     // absolute path; omitted = the spawned workspace's root
+  command?: string;                 // optional startup command run on spawn (may hold [param] tokens — Phase 4.2)
+  group?: number;                   // which split group (pane)
+}
+
+// A reusable workspace blueprint — the "Template" in the UI. Saved in-app (relay.json); "New from
+// template" spawns a fresh workspace from it. Named "blueprint" in code to avoid colliding with
+// Settings.template (the THEME id), which is an unrelated string.
+export interface WorkspaceBlueprint {
+  id: string;
+  name: string;
+  root: string | null;              // default folder for spawned workspaces
+  themeId: string | null;           // theme for spawned workspaces (null = inherit)
+  color: string;                    // switcher orientation cue for spawned workspaces
+  tabs: BlueprintTab[];
+  layout?: unknown;                 // split-tree layout (opaque; group indices)
+  createdAt: number;
+}
+
 // A saved command snippet — created by highlighting text in a block and bookmarking it.
 export interface Bookmark {
   id: string;

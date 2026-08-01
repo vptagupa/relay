@@ -271,6 +271,8 @@ ipcMain.handle('workspaces:meta', () => store.getWorkspaceMeta());
 ipcMain.on('workspaces:save-meta', (_e, { workspaces, activeWorkspaceId }) => { void store.saveWorkspaceMeta(workspaces, activeWorkspaceId); });
 ipcMain.handle('workspace:get-snapshot', (_e, id: string) => store.getWorkspaceSnapshot(id));
 ipcMain.on('workspace:save-snapshot', (_e, { id, ws }) => { void store.saveWorkspaceSnapshot(id, ws); });
+ipcMain.handle('blueprints:get', () => store.getBlueprints());
+ipcMain.on('blueprints:save', (_e, blueprints) => { void store.saveBlueprints(blueprints); });
 
 /* -------------------- agent (with approval round-trip) -------------------- */
 const pendingApprovals = new Map<string, (ok: boolean) => void>();

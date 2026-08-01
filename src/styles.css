@@ -104,6 +104,7 @@ button{font-family:inherit;color:inherit;cursor:pointer;border:none;background:n
 .ws-act{display:flex;align-items:center;gap:9px;padding:8px 9px;border-radius:8px;color:var(--text-dim);font:12.5px/1 var(--sans);cursor:pointer}
 .ws-act:hover{background:var(--surface-2);color:var(--text)}
 .ws-act .g{color:var(--accent-2);font-family:var(--mono)}
+.ws-empty{padding:14px 11px;color:var(--muted);font:12px/1.5 var(--sans);text-align:center}
 /* agent panel: untrusted-workspace notice */
 .agent-trust{display:flex;gap:8px;align-items:flex-start;margin:0 0 11px;padding:9px 11px;border:1px solid var(--border-strong);border-radius:9px;background:var(--surface-2);color:var(--text-dim);font:12px/1.5 var(--sans)}
 .agent-trust .lk{flex:none}

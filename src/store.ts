@@ -1,7 +1,7 @@
 import { app } from 'electron';
 import { promises as fs, writeFileSync, renameSync } from 'node:fs';
 import path from 'node:path';
-import type { SavedSession, Settings, Workspace, WorkspaceDef } from './shared/types';
+import type { SavedSession, Settings, Workspace, WorkspaceDef, WorkspaceBlueprint } from './shared/types';
 import { DEFAULT_MODEL } from './shared/models';
 
 // Simple JSON persistence for saved sessions (the "Library"), named workspaces (each a split-layout
@@ -18,6 +18,7 @@ interface DB {
   settings: Settings;
   workspaces: WorkspaceDef[];          // definitions (relay.json)
   activeWorkspaceId: string;           // which workspace is open (relay.json)
+  blueprints: WorkspaceBlueprint[];    // reusable workspace templates (relay.json)
   wsById: Record<string, Workspace>;   // per-workspace tab snapshots (workspace.json)
 }
 
@@ -26,6 +27,7 @@ const defaults = (): DB => ({
   settings: { workspace: null, defaultModel: DEFAULT_MODEL, autoApprove: false, autoSave: true, theme: 'dark', template: 'graphite', sidebarCollapsed: false, toolbarShown: false, librarySort: 'recent', librarySplit: 0.4, sidebarWidth: 260, shellIntegration: true, blocksView: true, notifications: true, bookmarks: [], bookmarkGroups: [], hasKey: {} },
   workspaces: [],
   activeWorkspaceId: '',
+  blueprints: [],
   wsById: {},
 });
 
@@ -76,7 +78,9 @@ async function doLoad(): Promise<DB> {
 
   cache = {
     sessions: Array.isArray(main?.sessions) ? (main!.sessions as SavedSession[]) : d.sessions,
-    settings, workspaces, activeWorkspaceId, wsById,
+    settings, workspaces, activeWorkspaceId,
+    blueprints: Array.isArray(main?.blueprints) ? (main!.blueprints as WorkspaceBlueprint[]) : d.blueprints,
+    wsById,
   };
   return cache!;
 }
@@ -98,7 +102,7 @@ async function atomicWrite(f: string, data: string): Promise<void> {
 // relay.json — sessions + settings + workspace definitions (the tab snapshots live in their own file).
 async function flushMain(): Promise<void> {
   if (!cache || readFailed) return;
-  const data = JSON.stringify({ sessions: cache.sessions, settings: cache.settings, workspaces: cache.workspaces, activeWorkspaceId: cache.activeWorkspaceId });
+  const data = JSON.stringify({ sessions: cache.sessions, settings: cache.settings, workspaces: cache.workspaces, activeWorkspaceId: cache.activeWorkspaceId, blueprints: cache.blueprints });
   if (data === lastMain) return;
   lastMain = data;
   writeChain = writeChain.then(() => atomicWrite(file(), data)).catch(() => { lastMain = null; });
@@ -201,6 +205,16 @@ export async function getWorkspaceMeta(): Promise<{ workspaces: WorkspaceDef[]; 
 export async function getActiveWorkspaceDef(): Promise<WorkspaceDef | undefined> {
   const db = await load();
   return db.workspaces.find((w) => w.id === db.activeWorkspaceId);
+}
+
+// --- workspace blueprints (reusable "Templates") ---
+export async function getBlueprints(): Promise<WorkspaceBlueprint[]> {
+  return (await load()).blueprints;
+}
+export async function saveBlueprints(blueprints: WorkspaceBlueprint[]): Promise<void> {
+  const db = await load();
+  db.blueprints = blueprints;
+  await flushMain();
 }
 
 // Persist the definition list + active id; prune snapshots for workspaces that no longer exist.
