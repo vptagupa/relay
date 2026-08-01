@@ -571,13 +571,18 @@ async function restoreWorkspaceSnapshot(ws: Workspace): Promise<void> {
     if (!validLayout) state.gv[0] = state.tabs.some((t) => t.id === activeId) ? activeId : (groupTabs(0)[0]?.id || '');
     state.active = state.gv[state.focus] || activeId;
     E('#termEmpty').style.display = 'none';
-    reconcilePanes(); renderTabs(); updateStatus(); reflectModel();
+    reconcilePanes(); renderTabs();
   } else if (state.settings.workspace) {
     newTab();
   } else {
     E('#termEmpty').style.display = 'grid';
     E('#termEmpty').innerHTML = 'Open a project folder to start.<br>Press <b>Ctrl/⌘ K</b> → “Open folder”.';
   }
+  // Refresh everything keyed off the active tab, consistently across every branch — otherwise a
+  // workspace switch leaves the agent panel showing the previous tab's chat and Files on the old folder.
+  state.browsePath = activeTab()?.cwd || state.settings.workspace || '';
+  updateStatus(); reflectModel();
+  if ($('#agentPanel').classList.contains('show')) renderChat();
 }
 
 // Cold teardown for a switch: kill every terminal's shell, dispose its renderer, drop its tab node,
@@ -592,7 +597,8 @@ function teardownAllTabs(): void {
 
 async function switchWorkspace(id: string): Promise<void> {
   closeWsMenu();
-  if (id === wsActiveId || !wsDefs.some((w) => w.id === id)) return;
+  if (booting || id === wsActiveId || !wsDefs.some((w) => w.id === id)) return; // a switch/boot in flight — ignore
+
   // Save the current workspace's snapshot so switching back restores it (scrollback serialized here).
   relay.saveWorkspaceSnapshot(wsActiveId, { active: state.active, tabs: snapshotTabs(), gv: state.gv, focus: state.focus, layout: state.layout });
   booting = true;                 // suspend autosave across the teardown + rebuild (init-crash guard)
@@ -608,6 +614,7 @@ async function switchWorkspace(id: string): Promise<void> {
 }
 
 async function createWorkspace(): Promise<void> {
+  if (booting) return; // don't add + switch while a switch/boot is in flight
   const def: WorkspaceDef = { id: 'ws_' + uid(), name: 'New workspace', color: nextWsColor(), root: state.settings.workspace ?? null, themeId: null, createdAt: Date.now(), lastOpenedAt: Date.now() };
   wsDefs.push(def);
   await switchWorkspace(def.id); // saves the current snapshot, then rebuilds into the (empty) new one
@@ -650,6 +657,7 @@ function recolorWorkspace(id: string): void {
   saveWsMeta(); renderWorkspaceChip(); renderWsMenu();
 }
 async function deleteWorkspace(id: string): Promise<void> {
+  if (booting) return; // a switch/boot in flight
   if (wsDefs.length <= 1) { toast('Can’t delete the only workspace'); return; }
   const def = wsDefs.find((w) => w.id === id); if (!def) return;
   if (!(await confirmDialog('Delete workspace?', `“${def.name}” and its saved terminals will be removed — this can’t be undone.`, 'Delete'))) return;
@@ -1260,6 +1268,8 @@ function paletteActions(): PalAction[] {
     { g: 'Terminal', t: 'Close all terminals', run: () => closeAll() },
     { g: 'View', t: 'Next theme', run: cycleTemplate },
     { g: 'View', t: 'Choose theme…', run: () => { openSettings(); } },
+    { g: 'View', t: 'New workspace', run: createWorkspace },
+    { g: 'View', t: 'Switch workspace…', run: openWsMenu },
     { g: 'View', t: 'Toggle library sidebar', run: toggleSidebar },
     { g: 'View', t: 'Toggle top toolbar', run: toggleToolbar },
     { g: 'View', t: 'Toggle auto-save', run: toggleAutosave },
@@ -1784,6 +1794,7 @@ document.addEventListener('keydown', (e) => {
   else if (mod && e.shiftKey && e.key.toLowerCase() === 'c') { e.preventDefault(); const t = (window.getSelection()?.toString().trim() || '') || xtermSelection(); if (t) { navigator.clipboard?.writeText(t); toast('Copied', true); } } // terminal copy (was: launch Claude)
   else if (mod && e.shiftKey && e.key.toLowerCase() === 'l') { e.preventDefault(); newClaudeTab(); } // launch Claude Code (moved off Ctrl+Shift+C)
   else if (mod && e.shiftKey && e.key.toLowerCase() === 'h') { e.preventDefault(); $('#historyPanel').classList.contains('show') ? closeHistory() : openHistory(); }
+  else if (mod && e.shiftKey && e.key.toLowerCase() === 'w') { e.preventDefault(); $('#wsMenu').classList.contains('show') ? closeWsMenu() : openWsMenu(); } // workspace switcher
   else if (mod && e.shiftKey && e.key.toLowerCase() === 'b') { e.preventDefault(); toggleBlocksView(); }
   else if (mod && !e.shiftKey && e.key.toLowerCase() === 'b') { e.preventDefault(); toggleSidebar(); } // toggle the left sidebar
   else if (mod && e.shiftKey && e.key.toLowerCase() === 'e') { e.preventDefault(); splitClone('row'); }
