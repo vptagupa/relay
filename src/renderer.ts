@@ -552,6 +552,19 @@ let wsActiveId = '';
 const WS_COLORS = ['#6e7bff', '#f2a93b', '#4ec46a', '#ff2e97', '#22d3ee', '#a78bfa', '#f0616a'];
 const nextWsColor = () => WS_COLORS[wsDefs.length % WS_COLORS.length];
 
+// Keep-alive is bounded: at most WARM_CAP background workspaces keep their shells alive. Beyond that
+// the least-recently-used background workspace is evicted — its shells are killed (its snapshot stays,
+// so it cold-restores on next open). Prevents unbounded shells from piling up across many switches.
+const WARM_CAP = 4;
+let warmWs: string[] = []; // background workspaces with live detached shells, oldest first
+async function killWorkspaceShells(id: string): Promise<void> {
+  const snap = await relay.getWorkspaceSnapshot(id);
+  for (const t of snap.tabs) relay.ptyKill(t.id);
+}
+async function evictBeyondCap(): Promise<void> {
+  while (warmWs.length > WARM_CAP) await killWorkspaceShells(warmWs.shift()!);
+}
+
 // Rebuild the pane layout + terminals from a saved snapshot. Shared by boot and workspace switch;
 // the caller must have `booting` set (autosave suspended) around it. Applies the split layout FIRST
 // so each tab lands in its real pane, then settles in one pass — mirrors the original boot restore.
@@ -583,6 +596,10 @@ async function restoreWorkspaceSnapshot(ws: Workspace): Promise<void> {
   state.browsePath = activeTab()?.cwd || state.settings.workspace || '';
   updateStatus(); reflectModel();
   if ($('#agentPanel').classList.contains('show')) renderChat();
+  // Focus the active pane's input so typing and Ctrl+C reach the shell immediately after a switch
+  // (or boot) — otherwise nothing is focused and a running command can't be interrupted until a click.
+  const foc = activeTab();
+  if (foc) requestAnimationFrame(() => { if (blocksMode(foc)) (E(P_CMD[foc.group]) as HTMLElement)?.focus(); else foc.term.focus(); });
 }
 
 // Teardown for a switch. Keep-alive (Phase 2): DETACH each shell — it keeps running and buffering in
@@ -601,10 +618,12 @@ async function switchWorkspace(id: string): Promise<void> {
   closeWsMenu();
   if (booting || id === wsActiveId || !wsDefs.some((w) => w.id === id)) return; // a switch/boot in flight — ignore
 
+  const from = wsActiveId;
   // Save the current workspace's snapshot so switching back restores it (scrollback serialized here).
-  relay.saveWorkspaceSnapshot(wsActiveId, { active: state.active, tabs: snapshotTabs(), gv: state.gv, focus: state.focus, layout: state.layout });
+  relay.saveWorkspaceSnapshot(from, { active: state.active, tabs: snapshotTabs(), gv: state.gv, focus: state.focus, layout: state.layout });
   booting = true;                 // suspend autosave across the teardown + rebuild (init-crash guard)
-  teardownAllTabs();
+  teardownAllTabs();              // detaches `from`'s shells (keep-alive)
+  warmWs = warmWs.filter((w) => w !== from && w !== id); warmWs.push(from); void evictBeyondCap(); // `from` is now warmest; `id` is going active
   wsActiveId = id;
   const def = wsDefs.find((w) => w.id === id)!; def.lastOpenedAt = Date.now();
   relay.saveWorkspaceMeta(wsDefs, id);
@@ -668,12 +687,15 @@ async function deleteWorkspace(id: string): Promise<void> {
     booting = true; teardownAllTabs(true); // kill — this workspace's shells are gone for good
     wsDefs = wsDefs.filter((w) => w.id !== id);
     wsActiveId = wsDefs[0].id;
+    warmWs = warmWs.filter((w) => w !== id && w !== wsActiveId); // deleted gone; the new active is no longer background
     relay.saveWorkspaceMeta(wsDefs, wsActiveId); // prunes the deleted workspace's snapshot from byId
     const ws = await relay.getWorkspaceSnapshot(wsActiveId);
     await restoreWorkspaceSnapshot(ws);
     renderFiles(); updateMainView();
     booting = false; persistWorkspace(true);
   } else {
+    if (warmWs.includes(id)) await killWorkspaceShells(id); // kill its background shells before dropping it
+    warmWs = warmWs.filter((w) => w !== id);
     wsDefs = wsDefs.filter((w) => w.id !== id);
     relay.saveWorkspaceMeta(wsDefs, wsActiveId); // prunes the snapshot; current session untouched
   }
