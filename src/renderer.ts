@@ -647,6 +647,7 @@ async function switchWorkspace(id: string): Promise<void> {
   renderFiles(); updateMainView(); renderWorkspaceChip(); reflectSettings();
   booting = false; persistWorkspace(true);
   toast(`Workspace: ${def.name}`, true);
+  settleDeeplink(); // a link that arrived mid-switch runs now
 }
 
 async function createWorkspace(): Promise<void> {
@@ -672,7 +673,7 @@ function renderWsMenu(): void {
       <span class="ws-dot" data-wsrecolor="${w.id}" title="Cycle color" style="background:${esc(w.color)}"></span>
       <span class="ws-col"><span class="ws-nm" data-wsname="${w.id}">${esc(w.name)}</span><span class="ws-pth">${esc(sub)}</span></span>
       ${w.id === wsActiveId ? '<span class="ws-chk">✓</span>' : ''}
-      <span class="ws-acts"><button data-wstrust="${w.id}" title="${trusted ? 'Trusted — click to require agent approvals' : 'Untrusted — click to trust'}">${trusted ? '🔓' : '🔒'}</button><button data-wsdup="${w.id}" title="Duplicate">⧉</button><button data-wsexport="${w.id}" title="Export…">⤓</button><button data-wsrename="${w.id}" title="Rename">✎</button><button data-wsdel="${w.id}" title="Delete">✕</button></span>
+      <span class="ws-acts"><button data-wstrust="${w.id}" title="${trusted ? 'Trusted — click to require agent approvals' : 'Untrusted — click to trust'}">${trusted ? '🔓' : '🔒'}</button><button data-wsdup="${w.id}" title="Duplicate">⧉</button><button data-wsexport="${w.id}" title="Export…">⤓</button><button data-wslink="${w.id}" title="Copy slayert:// link">🔗</button><button data-wsrename="${w.id}" title="Rename">✎</button><button data-wsdel="${w.id}" title="Delete">✕</button></span>
     </div>`;
   }).join('')
     + `<div class="ws-sep"></div><div class="ws-act" data-wsnew><span class="g">＋</span> New workspace</div><div class="ws-act" data-wstpl><span class="g">▤</span> Templates…</div><div class="ws-act" data-wsimport><span class="g">⤒</span> Import workspace…</div>`;
@@ -1004,6 +1005,35 @@ function openTplMenu(): void {
   m.style.left = r.left + 'px'; m.style.top = (r.bottom + 6) + 'px'; m.classList.add('show');
 }
 function closeTplMenu(): void { $('#tplMenu').classList.remove('show'); }
+
+/* ---- slayert:// deeplinks: switch to a workspace / spawn a template by name ---- */
+let pendingDeeplink: { kind: string; name: string } | null = null;
+function handleDeeplink(intent: { kind: string; name: string }): void {
+  if (booting) { pendingDeeplink = intent; return; } // defer until boot / an in-flight switch settles
+  const name = (intent.name || '').trim();
+  if (intent.kind === 'workspace') {
+    const def = wsDefs.find((w) => w.name === name);
+    if (!def) { toast(`No workspace named “${name}”`); return; }
+    if (def.id === wsActiveId) { toast(`Already in “${name}”`, true); return; }
+    switchWorkspace(def.id);
+  } else if (intent.kind === 'template') {
+    const bp = blueprints.find((b) => b.name === name);
+    if (bp) newFromBlueprint(bp.id); else toast(`No template named “${name}”`);
+  } else {
+    toast(`Unknown link kind: ${intent.kind}`);
+  }
+}
+// Run a link buffered while booting / switching — called wherever `booting` returns to false.
+function settleDeeplink(): void {
+  if (!pendingDeeplink || booting) return;
+  const d = pendingDeeplink; pendingDeeplink = null; handleDeeplink(d);
+}
+function copyWorkspaceLink(id: string): void {
+  const def = wsDefs.find((w) => w.id === id); if (!def) return;
+  closeWsMenu();
+  relay.copyText('slayert://workspace/' + encodeURIComponent(def.name));
+  toast('Link copied', true);
+}
 
 /* ----------------------------- library ----------------------------- */
 // Pure sort lives in ./library; this reads the current list + mode from state.
@@ -1619,6 +1649,7 @@ function paletteActions(): PalAction[] {
     { g: 'View', t: 'Export workspace…', run: () => exportWorkspace(wsActiveId) },
     { g: 'View', t: 'Import workspace…', run: importWorkspace },
     { g: 'View', t: 'Trust / untrust workspace', run: () => toggleTrust(wsActiveId) },
+    { g: 'View', t: 'Copy workspace link', run: () => copyWorkspaceLink(wsActiveId) },
     { g: 'View', t: 'Save workspace as template', run: saveAsTemplate },
     { g: 'View', t: 'New workspace from template…', run: openTplMenu },
     { g: 'View', t: 'Toggle library sidebar', run: toggleSidebar },
@@ -1856,6 +1887,7 @@ $('#wsMenu').addEventListener('click', (e) => {
   const tr = t.closest('[data-wstrust]') as HTMLElement | null; if (tr) { toggleTrust(tr.dataset.wstrust!); return; }
   const dup = t.closest('[data-wsdup]') as HTMLElement | null; if (dup) { duplicateWorkspace(dup.dataset.wsdup!); return; }
   const ex = t.closest('[data-wsexport]') as HTMLElement | null; if (ex) { closeWsMenu(); exportWorkspace(ex.dataset.wsexport!); return; }
+  const lk = t.closest('[data-wslink]') as HTMLElement | null; if (lk) { copyWorkspaceLink(lk.dataset.wslink!); return; }
   const del = t.closest('[data-wsdel]') as HTMLElement | null; if (del) { deleteWorkspace(del.dataset.wsdel!); return; }
   if (t.closest('[data-wsnew]')) { createWorkspace(); return; }
   if (t.closest('[data-wstpl]')) { closeWsMenu(); openTplMenu(); return; }
@@ -2189,6 +2221,7 @@ window.addEventListener('beforeunload', () => {
 });
 relay.onPtyExit((id: string) => { state.tabs.find((x) => x.id === id)?.term.write('\r\n\x1b[90m[process exited]\x1b[0m\r\n'); });
 relay.onApproval((req: ApprovalRequest) => showApproval(req));
+relay.onDeeplink(handleDeeplink);
 let _roT: any;
 new ResizeObserver(() => { clearTimeout(_roT); _roT = setTimeout(() => { fitPanes(); updateTabOverflow(); }, 80); }).observe($('#paneGrid'));
 
@@ -2210,4 +2243,5 @@ new ResizeObserver(() => { clearTimeout(_roT); _roT = setTimeout(() => { fitPane
   renderFiles(); // populate the Files section even if no terminal is active yet
   updateMainView(); // reflect Blocks/Classic choice (and the toggle button) on first paint
   booting = false; persistWorkspace(true); // restore complete — resume autosave and write the settled state once
+  settleDeeplink(); // deliver a slayert:// link this instance launched with, now that boot is done
 })();

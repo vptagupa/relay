@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from 'electron';
+import { contextBridge, ipcRenderer, clipboard } from 'electron';
 import * as os from 'node:os';
 import type { Settings, SavedSession, AgentEvent, ApprovalRequest, ChatTurn, Workspace, WorkspaceDef, WorkspaceBlueprint, Block } from './shared/types';
 
@@ -101,6 +101,16 @@ const api = {
     const h = (_: unknown, max: boolean) => cb(max);
     ipcRenderer.on('win:state', h);
     return () => ipcRenderer.off('win:state', h);
+  },
+
+  // Write text to the OS clipboard via Electron (no focus / user-gesture requirement, unlike navigator.clipboard).
+  copyText: (text: string): void => clipboard.writeText(text),
+
+  // --- slayert:// deeplinks (main → renderer) ---
+  onDeeplink: (cb: (intent: { kind: string; name: string }) => void) => {
+    const h = (_: unknown, intent: { kind: string; name: string }) => cb(intent);
+    ipcRenderer.on('deeplink', h);
+    return () => ipcRenderer.off('deeplink', h);
   },
 };
 
