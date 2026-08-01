@@ -621,9 +621,11 @@ function renderWorkspaceChip(): void {
 }
 function renderWsMenu(): void {
   $('#wsMenu').innerHTML = wsDefs.map((w) => `<div class="ws-item${w.id === wsActiveId ? ' on' : ''}" data-ws="${w.id}">
-      <span class="ws-dot" style="background:${esc(w.color)}"></span>
-      <span class="ws-col"><span class="ws-nm">${esc(w.name)}</span><span class="ws-pth">${esc(w.root ? shortCwd(w.root) : 'no folder')}</span></span>
-      ${w.id === wsActiveId ? '<span class="ws-chk">✓</span>' : ''}</div>`).join('')
+      <span class="ws-dot" data-wsrecolor="${w.id}" title="Cycle color" style="background:${esc(w.color)}"></span>
+      <span class="ws-col"><span class="ws-nm" data-wsname="${w.id}">${esc(w.name)}</span><span class="ws-pth">${esc(w.root ? shortCwd(w.root) : 'no folder')}</span></span>
+      ${w.id === wsActiveId ? '<span class="ws-chk">✓</span>' : ''}
+      <span class="ws-acts"><button data-wsrename="${w.id}" title="Rename">✎</button><button data-wsdel="${w.id}" title="Delete">✕</button></span>
+    </div>`).join('')
     + `<div class="ws-sep"></div><div class="ws-act" data-wsnew><span class="g">＋</span> New workspace</div>`;
 }
 function openWsMenu(): void {
@@ -632,6 +634,42 @@ function openWsMenu(): void {
   m.style.left = r.left + 'px'; m.style.top = (r.bottom + 6) + 'px'; m.classList.add('show');
 }
 function closeWsMenu(): void { $('#wsMenu').classList.remove('show'); }
+function saveWsMeta(): void { relay.saveWorkspaceMeta(wsDefs, wsActiveId); }
+function renameWorkspace(id: string, name: string): void {
+  const def = wsDefs.find((w) => w.id === id); if (!def) return;
+  const nm = name.trim(); if (nm) def.name = nm;
+  saveWsMeta(); renderWorkspaceChip(); renderWsMenu();
+}
+function startRenameWorkspace(id: string): void {
+  const el = $('#wsMenu').querySelector(`[data-wsname="${id}"]`) as HTMLElement | null;
+  if (el) makeEditable(el, (v) => renameWorkspace(id, v));
+}
+function recolorWorkspace(id: string): void {
+  const def = wsDefs.find((w) => w.id === id); if (!def) return;
+  def.color = WS_COLORS[(WS_COLORS.indexOf(def.color) + 1) % WS_COLORS.length];
+  saveWsMeta(); renderWorkspaceChip(); renderWsMenu();
+}
+async function deleteWorkspace(id: string): Promise<void> {
+  if (wsDefs.length <= 1) { toast('Can’t delete the only workspace'); return; }
+  const def = wsDefs.find((w) => w.id === id); if (!def) return;
+  if (!(await confirmDialog('Delete workspace?', `“${def.name}” and its saved terminals will be removed — this can’t be undone.`, 'Delete'))) return;
+  if (id === wsActiveId) {
+    // Drop the active session WITHOUT saving its snapshot (it's being deleted), then open the first remaining one.
+    booting = true; teardownAllTabs();
+    wsDefs = wsDefs.filter((w) => w.id !== id);
+    wsActiveId = wsDefs[0].id;
+    relay.saveWorkspaceMeta(wsDefs, wsActiveId); // prunes the deleted workspace's snapshot from byId
+    const ws = await relay.getWorkspaceSnapshot(wsActiveId);
+    await restoreWorkspaceSnapshot(ws);
+    renderFiles(); updateMainView();
+    booting = false; persistWorkspace(true);
+  } else {
+    wsDefs = wsDefs.filter((w) => w.id !== id);
+    relay.saveWorkspaceMeta(wsDefs, wsActiveId); // prunes the snapshot; current session untouched
+  }
+  renderWorkspaceChip(); renderWsMenu();
+  toast(`Deleted “${def.name}”`);
+}
 
 /* ----------------------------- library ----------------------------- */
 // Pure sort lives in ./library; this reads the current list + mode from state.
@@ -1452,6 +1490,9 @@ $('#winSearch').onclick = openPalette; // command-search box in the top window b
 $('#wsChip').onclick = () => ($('#wsMenu').classList.contains('show') ? closeWsMenu() : openWsMenu());
 $('#wsMenu').addEventListener('click', (e) => {
   const t = e.target as HTMLElement;
+  const rc = t.closest('[data-wsrecolor]') as HTMLElement | null; if (rc) { recolorWorkspace(rc.dataset.wsrecolor!); return; }
+  const rn = t.closest('[data-wsrename]') as HTMLElement | null; if (rn) { startRenameWorkspace(rn.dataset.wsrename!); return; }
+  const del = t.closest('[data-wsdel]') as HTMLElement | null; if (del) { deleteWorkspace(del.dataset.wsdel!); return; }
   if (t.closest('[data-wsnew]')) { createWorkspace(); return; }
   const it = t.closest('[data-ws]') as HTMLElement | null;
   if (it) switchWorkspace(it.dataset.ws!);
