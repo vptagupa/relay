@@ -48,14 +48,58 @@ export interface OpenTab extends TermColors {
   blocks?: Block[];                 // command history as structured blocks
   chat?: ChatTurn[];                // this terminal's agent conversation
   group?: number;                   // which split group (pane) this tab belongs to
+  // block-id namespace; preserved across a keep-alive reattach so the live shell's continuing block
+  // ids match the restored blocks (updates in place, no duplicate). A fresh nonce on a cold restart.
+  bkNonce?: string;
 }
 
+// A workspace's live tab snapshot (its split layout + open terminals), stored by workspace id in
+// workspace.json (frequent writes). One per WorkspaceDef.
 export interface Workspace {
   active: string;
   tabs: OpenTab[];
   gv?: string[];                    // visible tab id per group (split-layout restore)
   focus?: number;
   layout?: unknown;                 // nested split-tree layout (opaque; renderer-owned shape)
+}
+
+// A named workspace: identity + root folder + scoped overrides (the "definition"; rare writes →
+// relay.json). Kept separate from the Workspace snapshot so a definition edit doesn't re-serialize
+// the whole tab state, and a snapshot autosave doesn't touch the definition.
+export interface WorkspaceDef {
+  id: string;
+  name: string;
+  color: string;                    // switcher orientation cue
+  root: string | null;              // absolute project folder (null = none)
+  themeId: string | null;           // per-workspace theme override; null = inherit the global theme
+  // Agent trust (VS Code-style): when false, the agent ALWAYS asks before a file write/edit or command
+  // in this workspace, even if global auto-approve is on. undefined = trusted (so migrated/older defs and
+  // the default workspace are unaffected); new workspaces start untrusted until the user trusts them.
+  trusted?: boolean;
+  createdAt: number;
+  lastOpenedAt: number;
+}
+
+// A terminal spec inside a workspace blueprint — structure only, no live state.
+export interface BlueprintTab {
+  name: string;
+  cwd?: string;                     // absolute path; omitted = the spawned workspace's root
+  command?: string;                 // optional startup command run on spawn (may hold [param] tokens — Phase 4.2)
+  group?: number;                   // which split group (pane)
+}
+
+// A reusable workspace blueprint — the "Template" in the UI. Saved in-app (relay.json); "New from
+// template" spawns a fresh workspace from it. Named "blueprint" in code to avoid colliding with
+// Settings.template (the THEME id), which is an unrelated string.
+export interface WorkspaceBlueprint {
+  id: string;
+  name: string;
+  root: string | null;              // default folder for spawned workspaces
+  themeId: string | null;           // theme for spawned workspaces (null = inherit)
+  color: string;                    // switcher orientation cue for spawned workspaces
+  tabs: BlueprintTab[];
+  layout?: unknown;                 // split-tree layout (opaque; group indices)
+  createdAt: number;
 }
 
 // A saved command snippet — created by highlighting text in a block and bookmarking it.

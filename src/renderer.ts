@@ -18,7 +18,7 @@ import { toast, makeEditable } from './ui';
 import { filterHistory, railEntry } from './history';
 import { initFiles, renderFiles } from './files';
 import { initBlockView, blockHtml, bvBlockHtml, collapsedBlocks, fmtDur } from './block-view';
-import type { Settings, SavedSession, AgentEvent, ApprovalRequest, ChatTurn, OpenTab, Block, Bookmark, BookmarkGroup } from './shared/types';
+import type { Settings, SavedSession, AgentEvent, ApprovalRequest, ChatTurn, OpenTab, Workspace, WorkspaceDef, WorkspaceBlueprint, BlueprintTab, Block, Bookmark, BookmarkGroup } from './shared/types';
 
 // TEMP DIAG: surface full stacks (minify is off) for the init crash.
 window.addEventListener('error', (e) => console.error('WERR ' + ((e as ErrorEvent).error?.stack || (e as ErrorEvent).message)));
@@ -98,7 +98,7 @@ async function newTab(seed?: Partial<OpenTab> & { libId?: string }, activate = t
   // Open into the focused pane (or the tab's saved group on restore); never a stale/hidden pane.
   let group = (seed as { group?: number })?.group ?? state.focus;
   if (activate && !leaves(state.layout).includes(group)) group = state.focus;
-  const tab: Tab = { id, name: seed?.name || (n > 1 ? `terminal ${n}` : 'terminal'), model: seed?.model || state.settings.defaultModel, cwd, libId: seed?.libId, term, fit, ser, el, tabBg: seed?.tabBg, tabFg: seed?.tabFg, bodyBg: seed?.bodyBg, bodyFg: seed?.bodyFg, chat: seed?.chat ? [...seed.chat] : [], blocks: seed?.blocks ? [...seed.blocks] : [], bkNonce: uid(), cmdHistory: [], histIdx: 0, liveInteractive: false, group };
+  const tab: Tab = { id, name: seed?.name || (n > 1 ? `terminal ${n}` : 'terminal'), model: seed?.model || state.settings.defaultModel, cwd, libId: seed?.libId, term, fit, ser, el, tabBg: seed?.tabBg, tabFg: seed?.tabFg, bodyBg: seed?.bodyBg, bodyFg: seed?.bodyFg, chat: seed?.chat ? [...seed.chat] : [], blocks: seed?.blocks ? [...seed.blocks] : [], bkNonce: seed?.bkNonce || uid(), cmdHistory: [], histIdx: 0, liveInteractive: false, group };
   state.tabs.push(tab);
   applyTermColors(tab); // honor any restored per-terminal body/text colors
   term.onData((d) => relay.ptyWrite(id, d));
@@ -131,12 +131,16 @@ async function newTab(seed?: Partial<OpenTab> & { libId?: string }, activate = t
     if (el.parentElement !== host) host.appendChild(el);
     if (group > 0) (E(PANE[group]) as HTMLElement).style.display = '';
     for (const x of state.tabs) x.el.classList.toggle('hidden', x.id !== state.gv[x.group]);
-    fit.fit(); tab.lastCols = term.cols; tab.lastRows = term.rows;
+    fit.fit(); tab.lastCols = term.cols; tab.lastRows = term.rows; tab.fitted = term.cols > 0;
   }
   renderTabs();
   // Reattach to a live shell if one exists (replays its real output); otherwise spawn a
   // fresh shell, seeded with the saved snapshot as scrollback (main handles ordering).
-  await relay.ptyCreate(id, cwd, term.cols || 80, term.rows || 24, seed?.scrollback);
+  const reattached = await relay.ptyCreate(id, cwd, term.cols || 80, term.rows || 24, seed?.scrollback);
+  // A restored tab whose shell was NOT reattached (cold restart) gets a fresh block-id namespace so the
+  // new shell's blocks can't collide with the restored ones. A reattached (keep-alive) shell keeps the
+  // saved nonce, so its continuing/flushed block ids line up with the restored blocks.
+  if (seed?.bkNonce && !reattached) tab.bkNonce = uid();
   if (activate) switchTab(id);
   renderTabs(); persistWorkspace();
   return tab;
@@ -148,6 +152,7 @@ async function addFolderTab() {
   const dir = await relay.pickFolder();
   if (!dir) return; // dialog cancelled
   state.settings = await relay.patchSettings({ workspace: dir });
+  setActiveWsRoot(dir); // this folder is now the active workspace's root
   updateStatus(); reflectSettings();
   await newTab({ cwd: dir, name: baseName(dir) });
 }
@@ -156,7 +161,12 @@ async function addFolderTab() {
 function applyResize(t: Tab) {
   t.fit.fit();
   const c = t.term.cols, r = t.term.rows;
-  if (c > 0 && r > 0 && (c !== t.lastCols || r !== t.lastRows)) { t.lastCols = c; t.lastRows = r; relay.ptyResize(t.id, c, r); }
+  if (c > 0 && r > 0) {
+    // First time this terminal has real dimensions (it was created in a hidden pane): it's now safe to
+    // write — flush any replay/output buffered while it had no measured size (see writeToTab).
+    if (!t.fitted) { t.fitted = true; if (t.replayQ) { t.term.write(t.replayQ); t.replayQ = undefined; } }
+    if (c !== t.lastCols || r !== t.lastRows) { t.lastCols = c; t.lastRows = r; relay.ptyResize(t.id, c, r); }
+  }
 }
 // Focus a tab — make it the visible tab of its group and give that group focus.
 function switchTab(id: string) {
@@ -170,6 +180,7 @@ function paneAftermath() {
   E('#termEmpty').style.display = state.tabs.length ? 'none' : 'grid';
   const t = activeTab();
   reconcilePanes();
+  if (t && !t.fitted) applyResize(t); // first time this (restored) tab is shown — fit it so its buffered replay flushes
   renderTabs(); updateStatus(); reflectModel(); persistWorkspace();
   state.browsePath = t?.cwd || state.settings.workspace || ''; renderFiles(); // Files follows the active terminal
   if ($('#agentPanel').classList.contains('show')) renderChat();
@@ -511,7 +522,7 @@ function slimBlocks(blocks: Block[]): Block[] {
   return blocks.slice(-120).map((b) => ({ ...b, output: b.output.length > 4000 ? '…' + b.output.slice(-4000) : b.output }));
 }
 function snapshotTabs(): OpenTab[] {
-  return state.tabs.map((t) => ({ id: t.id, name: t.name, model: t.model, libId: t.libId, cwd: t.cwd, group: t.group, scrollback: t.ser.serialize({ scrollback: 800 }), tabBg: t.tabBg, tabFg: t.tabFg, bodyBg: t.bodyBg, bodyFg: t.bodyFg, chat: t.chat.slice(-100), blocks: slimBlocks(t.blocks) }));
+  return state.tabs.map((t) => ({ id: t.id, name: t.name, model: t.model, libId: t.libId, cwd: t.cwd, group: t.group, bkNonce: t.bkNonce, scrollback: t.ser.serialize({ scrollback: 800 }), tabBg: t.tabBg, tabFg: t.tabFg, bodyBg: t.bodyBg, bodyFg: t.bodyFg, chat: t.chat.slice(-100), blocks: slimBlocks(t.blocks) }));
 }
 // Persist the open tabs + their scrollback. Coalescing throttle: the first trigger
 // schedules a save ~800ms out and any triggers within that window are folded in — so a
@@ -541,6 +552,494 @@ async function toggleAutosave() {
   reflectAutosave();
   if (state.settings.autoSave) { persistWorkspace(); toast('Auto-save enabled — terminals restore on relaunch', true); }
   else toast('Auto-save disabled');
+}
+
+/* ----------------------------- named workspaces ----------------------------- */
+// Renderer mirror of the store's workspace definitions + the active id. The active workspace's tab
+// snapshot is what boot/persist read & write (getWorkspace/setWorkspace). Switching saves the
+// current snapshot, tears the terminals down (cold — Phase 1), and rebuilds the target's.
+let wsDefs: WorkspaceDef[] = [];
+let wsActiveId = '';
+let blueprints: WorkspaceBlueprint[] = []; // reusable workspace templates (Phase 4)
+const WS_COLORS = ['#6e7bff', '#f2a93b', '#4ec46a', '#ff2e97', '#22d3ee', '#a78bfa', '#f0616a'];
+const nextWsColor = () => WS_COLORS[wsDefs.length % WS_COLORS.length];
+const activeWsDef = (): WorkspaceDef | undefined => wsDefs.find((w) => w.id === wsActiveId);
+
+// Keep-alive is bounded: at most WARM_CAP background workspaces keep their shells alive. Beyond that
+// the least-recently-used background workspace is evicted — its shells are killed (its snapshot stays,
+// so it cold-restores on next open). Prevents unbounded shells from piling up across many switches.
+const WARM_CAP = 4;
+let warmWs: string[] = []; // background workspaces with live detached shells, oldest first
+async function killWorkspaceShells(id: string): Promise<void> {
+  const snap = await relay.getWorkspaceSnapshot(id);
+  for (const t of snap.tabs) relay.ptyKill(t.id);
+}
+async function evictBeyondCap(): Promise<void> {
+  const over = warmWs.length - WARM_CAP;
+  if (over <= 0) return;
+  const evict = warmWs.splice(0, over); // remove the oldest synchronously (before any await) so a concurrent switch can't race the list
+  for (const id of evict) await killWorkspaceShells(id);
+}
+
+// Rebuild the pane layout + terminals from a saved snapshot. Shared by boot and workspace switch;
+// the caller must have `booting` set (autosave suspended) around it. Applies the split layout FIRST
+// so each tab lands in its real pane, then settles in one pass — mirrors the original boot restore.
+async function restoreWorkspaceSnapshot(ws: Workspace): Promise<void> {
+  if (state.settings.autoSave && ws.tabs.length) {
+    const activeId = ws.tabs.some((t) => t.id === ws.active) ? ws.active : ws.tabs[0].id;
+    const savedGroups = new Set<number>(ws.tabs.map((t) => (typeof t.group === 'number' ? t.group : 0)));
+    const validLayout = ws.layout != null && isValidLayout(ws.layout, savedGroups);
+    if (validLayout) {
+      state.layout = ws.layout as LNode;
+      for (const g of leaves(state.layout)) state.gv[g] = ws.gv?.[g] || '';
+      state.focus = leaves(state.layout).includes(ws.focus ?? 0) ? (ws.focus ?? 0) : leaves(state.layout)[0];
+    } else { state.layout = { g: 0 }; state.focus = 0; }
+    const lvs = leaves(state.layout);
+    for (const t of ws.tabs) { if (typeof t.group !== 'number' || !lvs.includes(t.group)) t.group = lvs[0]; await newTab(t, false); }
+    for (const g of lvs) { if (!state.tabs.some((t) => t.id === state.gv[g] && t.group === g)) state.gv[g] = groupTabs(g)[0]?.id || ''; }
+    if (!validLayout) state.gv[0] = state.tabs.some((t) => t.id === activeId) ? activeId : (groupTabs(0)[0]?.id || '');
+    state.active = state.gv[state.focus] || activeId;
+    E('#termEmpty').style.display = 'none';
+    reconcilePanes(); renderTabs();
+    fitPanes(); // fit each pane's visible tab now, so its buffered replay flushes even if the ResizeObserver doesn't fire (same-layout switch)
+  } else if (state.settings.workspace) {
+    newTab();
+  } else {
+    E('#termEmpty').style.display = 'grid';
+    E('#termEmpty').innerHTML = 'Open a project folder to start.<br>Press <b>Ctrl/⌘ K</b> → “Open folder”.';
+  }
+  // Refresh everything keyed off the active tab, consistently across every branch — otherwise a
+  // workspace switch leaves the agent panel showing the previous tab's chat and Files on the old folder.
+  state.browsePath = activeTab()?.cwd || state.settings.workspace || '';
+  updateStatus(); reflectModel();
+  if ($('#agentPanel').classList.contains('show')) renderChat();
+  // Focus the active pane's input so typing and Ctrl+C reach the shell immediately after a switch
+  // (or boot) — otherwise nothing is focused and a running command can't be interrupted until a click.
+  const foc = activeTab();
+  if (foc) requestAnimationFrame(() => { if (blocksMode(foc)) (E(P_CMD[foc.group]) as HTMLElement)?.focus(); else foc.term.focus(); });
+}
+
+// Teardown for a switch. Keep-alive (Phase 2): DETACH each shell — it keeps running and buffering in
+// the main process, so switching back REATTACHES via ptyCreate and replays the live output (a dev
+// server never dies on a switch). Pass `kill` only when the workspace is being deleted. Either way,
+// dispose the xterm renderers + drop the tab nodes (frees DOM/WebGL); pane DOM is reused so the E()
+// cache stays valid for the rebuild — only tab elements are dropped.
+function teardownAllTabs(kill = false): void {
+  for (const t of state.tabs) { if (kill) relay.ptyKill(t.id); else relay.ptyDetach(t.id); t.term.dispose(); t.el.remove(); }
+  state.tabs = [];
+  state.layout = { g: 0 }; state.gv = ['', '', '', '']; state.focus = 0; state.active = ''; state.maxG = null;
+  reconcilePanes(); // collapse the grid back to one empty pane (like closeTab's last-tab reset) before the rebuild
+}
+
+async function switchWorkspace(id: string): Promise<void> {
+  closeWsMenu();
+  if (booting || id === wsActiveId || !wsDefs.some((w) => w.id === id)) return; // a switch/boot in flight — ignore
+
+  const from = wsActiveId;
+  // Save the current workspace's snapshot so switching back restores it (scrollback serialized here).
+  relay.saveWorkspaceSnapshot(from, { active: state.active, tabs: snapshotTabs(), gv: state.gv, focus: state.focus, layout: state.layout });
+  booting = true;                 // suspend autosave across the teardown + rebuild (init-crash guard)
+  teardownAllTabs();              // detaches `from`'s shells (keep-alive)
+  warmWs = warmWs.filter((w) => w !== from && w !== id); warmWs.push(from); void evictBeyondCap(); // `from` is now warmest; `id` is going active
+  wsActiveId = id;
+  const def = wsDefs.find((w) => w.id === id)!; def.lastOpenedAt = Date.now();
+  // Per-workspace root + theme: adopt the target's folder + look BEFORE the rebuild, so new terminals
+  // spawn in its root and with its palette, and the chrome/Files reflect it. (settings.workspace/template
+  // are the live mirror the rest of the UI reads; adoptActiveWsEnv persists them so a later patchSettings
+  // can't clobber the effective folder/theme back to a stale value.)
+  await adoptActiveWsEnv();
+  relay.saveWorkspaceMeta(wsDefs, id);
+  const ws = await relay.getWorkspaceSnapshot(id);
+  await restoreWorkspaceSnapshot(ws);
+  renderFiles(); updateMainView(); renderWorkspaceChip(); reflectSettings();
+  booting = false; persistWorkspace(true);
+  toast(`Workspace: ${def.name}`, true);
+  settleDeeplink(); // a link that arrived mid-switch runs now
+}
+
+async function createWorkspace(): Promise<void> {
+  if (booting) return; // don't add + switch while a switch/boot is in flight
+  // A fresh workspace is a blank project: no folder (→ "Open a project folder to start") and no theme
+  // override (→ inherits the current look until one is picked). Its identity is a distinct root + look.
+  const def: WorkspaceDef = { id: 'ws_' + uid(), name: 'New workspace', color: nextWsColor(), root: null, themeId: null, trusted: false, createdAt: Date.now(), lastOpenedAt: Date.now() };
+  wsDefs.push(def);
+  await switchWorkspace(def.id); // saves the current snapshot, then rebuilds into the (empty) new one
+}
+
+function renderWorkspaceChip(): void {
+  const def = wsDefs.find((w) => w.id === wsActiveId);
+  const dot = $('#wsChip').querySelector('.ws-dot') as HTMLElement | null;
+  if (dot) dot.style.background = def?.color || 'var(--accent)';
+  $('#wsChipName').textContent = def?.name || 'Workspace';
+}
+function renderWsMenu(): void {
+  $('#wsMenu').innerHTML = wsDefs.map((w) => {
+    const trusted = wsTrusted(w);
+    const sub = (w.root ? shortCwd(w.root) : 'no folder') + (trusted ? '' : '  ·  🔒 untrusted');
+    return `<div class="ws-item${w.id === wsActiveId ? ' on' : ''}" data-ws="${w.id}">
+      <span class="ws-dot" data-wsrecolor="${w.id}" title="Cycle color" style="background:${esc(w.color)}"></span>
+      <span class="ws-col"><span class="ws-nm" data-wsname="${w.id}">${esc(w.name)}</span><span class="ws-pth">${esc(sub)}</span></span>
+      ${w.id === wsActiveId ? '<span class="ws-chk">✓</span>' : ''}
+      <span class="ws-acts"><button data-wstrust="${w.id}" title="${trusted ? 'Trusted — click to require agent approvals' : 'Untrusted — click to trust'}">${trusted ? '🔓' : '🔒'}</button><button data-wsdup="${w.id}" title="Duplicate">⧉</button><button data-wsexport="${w.id}" title="Export…">⤓</button><button data-wslink="${w.id}" title="Copy slayert:// link">🔗</button><button data-wsrename="${w.id}" title="Rename">✎</button><button data-wsdel="${w.id}" title="Delete">✕</button></span>
+    </div>`;
+  }).join('')
+    + `<div class="ws-sep"></div><div class="ws-act" data-wsnew><span class="g">＋</span> New workspace</div><div class="ws-act" data-wstpl><span class="g">▤</span> Templates…</div><div class="ws-act" data-wsimport><span class="g">⤒</span> Import workspace…</div>`;
+}
+function openWsMenu(): void {
+  renderWsMenu();
+  const r = $('#wsChip').getBoundingClientRect(); const m = $('#wsMenu');
+  m.style.left = r.left + 'px'; m.style.top = (r.bottom + 6) + 'px'; m.classList.add('show');
+}
+function closeWsMenu(): void { $('#wsMenu').classList.remove('show'); }
+function saveWsMeta(): void { relay.saveWorkspaceMeta(wsDefs, wsActiveId); }
+// Mirror the active workspace's persisted folder + theme into the live settings the rest of the UI reads.
+// Boot-only (in-memory): the values already equal what was persisted on the last switch/set, so no write.
+function syncEffectiveFromActiveWs(): void {
+  const def = activeWsDef(); if (!def) return;
+  state.settings.workspace = def.root ?? '';
+  if (def.themeId) state.settings.template = def.themeId as Settings['template']; // null = inherit the global default
+}
+// Adopt the ACTIVE workspace's folder + theme into the live settings (persisted mirror) and re-tint the
+// chrome. Call wherever wsActiveId changes to a workspace whose terminals are about to be (re)built — both
+// a switch AND a delete-of-the-active — so the newly-active workspace always opens in its own folder + look.
+// (Boot uses the in-memory syncEffectiveFromActiveWs instead; no persist needed there.)
+async function adoptActiveWsEnv(): Promise<void> {
+  const def = activeWsDef(); if (!def) return;
+  const effTpl = (def.themeId ?? state.settings.template) as Settings['template'];
+  state.settings = await relay.patchSettings({ workspace: def.root ?? '', template: effTpl });
+  applyTheme();
+}
+// Record a folder as the active workspace's root (persisted). '' collapses to null → shown as "no folder".
+function setActiveWsRoot(dir: string | null): void {
+  const def = activeWsDef(); if (!def) return;
+  def.root = dir || null; saveWsMeta();
+}
+
+/* ---- workspace management: trust, duplicate, export / import (Phase 3) ---- */
+const wsTrusted = (def: WorkspaceDef | undefined): boolean => !!def && def.trusted !== false; // undefined = trusted
+// Make a name unique within the current definition list ("Foo" → "Foo 2", "Foo 3", …).
+function uniqueWsName(base: string): string {
+  const names = new Set(wsDefs.map((w) => w.name));
+  if (!names.has(base)) return base;
+  for (let i = 2; ; i++) { const n = `${base} ${i}`; if (!names.has(n)) return n; }
+}
+// Snapshot of a workspace's live tabs — from renderer state for the active one (freshest), else the store.
+async function wsSnapshotOf(id: string): Promise<Workspace> {
+  return id === wsActiveId
+    ? { active: state.active, tabs: snapshotTabs(), gv: state.gv, focus: state.focus, layout: state.layout }
+    : await relay.getWorkspaceSnapshot(id);
+}
+// Clone a snapshot with FRESH terminal ids (so it never collides with the source's live/persisted shells),
+// dropping the heavy, machine-specific per-terminal state (scrollback, blocks, chat, Library link). The
+// result opens the same layout + terminals (folder / name / model / colors) as clean shells. Tolerant of
+// untrusted input (import): every field is validated/coerced, so a malformed file can't corrupt state.
+function cloneSnapshot(src: any): Workspace {
+  const idMap = new Map<string, string>();
+  const tabs: OpenTab[] = (Array.isArray(src?.tabs) ? src.tabs : [])
+    .filter((t: any) => t && typeof t === 'object')
+    .map((t: any) => {
+      const nid = uid();
+      if (typeof t.id === 'string') idMap.set(t.id, nid);
+      return {
+        id: nid,
+        name: typeof t.name === 'string' ? t.name : 'terminal',
+        model: typeof t.model === 'string' ? t.model : state.settings.defaultModel,
+        cwd: typeof t.cwd === 'string' ? t.cwd : '',
+        group: typeof t.group === 'number' ? t.group : 0,
+        tabBg: typeof t.tabBg === 'string' ? t.tabBg : undefined, tabFg: typeof t.tabFg === 'string' ? t.tabFg : undefined,
+        bodyBg: typeof t.bodyBg === 'string' ? t.bodyBg : undefined, bodyFg: typeof t.bodyFg === 'string' ? t.bodyFg : undefined,
+        bkNonce: uid(),
+      } as OpenTab;
+    });
+  const gv = (Array.isArray(src?.gv) ? src.gv : []).map((id: any) => (typeof id === 'string' && idMap.get(id)) || '');
+  const active = (typeof src?.active === 'string' && idMap.get(src.active)) || (tabs[0]?.id ?? '');
+  return { active, tabs, gv, focus: typeof src?.focus === 'number' ? src.focus : 0, layout: src?.layout };
+}
+function toggleTrust(id: string): void {
+  const def = wsDefs.find((w) => w.id === id); if (!def) return;
+  def.trusted = !wsTrusted(def); // trusted → untrusted, untrusted → trusted
+  saveWsMeta(); renderWsMenu();
+  if ($('#agentPanel').classList.contains('show')) renderChat(); // refresh the trust notice
+  toast(def.trusted ? `“${def.name}” trusted` : `“${def.name}” untrusted — the agent will ask`, true);
+}
+async function duplicateWorkspace(id: string): Promise<void> {
+  if (booting) return; // mid-switch: snapshotTabs() of the active workspace would be half-built
+  const src = wsDefs.find((w) => w.id === id); if (!src) return;
+  const nid = 'ws_' + uid();
+  const def: WorkspaceDef = { id: nid, name: uniqueWsName(`${src.name} copy`), color: nextWsColor(), root: src.root, themeId: src.themeId, trusted: src.trusted, createdAt: Date.now(), lastOpenedAt: Date.now() };
+  relay.saveWorkspaceSnapshot(nid, cloneSnapshot(await wsSnapshotOf(id)));
+  wsDefs.push(def); saveWsMeta(); renderWsMenu();
+  toast(`Duplicated “${src.name}”`);
+}
+async function exportWorkspace(id: string): Promise<void> {
+  if (booting) return; // mid-switch: don't capture a half-built active snapshot
+  const def = wsDefs.find((w) => w.id === id); if (!def) return;
+  // A portable TEMPLATE: identity + folder/theme + terminal layout, minus scrollback/blocks/chat.
+  const payload = { kind: 'slayer-t.workspace', version: 1,
+    workspace: { name: def.name, color: def.color, root: def.root, themeId: def.themeId },
+    snapshot: cloneSnapshot(await wsSnapshotOf(id)) };
+  const r = await relay.exportSession({ name: def.name, content: JSON.stringify(payload, null, 2), ext: 'json' });
+  if (r.ok) toast(`Exported “${def.name}”`); else if (r.error) toast(`Export failed: ${r.error}`);
+}
+async function importWorkspace(): Promise<void> {
+  const r = await relay.importWorkspace();
+  if (!r.ok) { if (r.error) toast(`Import failed: ${r.error}`); return; }
+  const d = r.data as any;
+  if (!d || d.kind !== 'slayer-t.workspace' || typeof d.workspace !== 'object' || !d.workspace) { toast('Not a Slayer T workspace file'); return; }
+  const w = d.workspace;
+  const nid = 'ws_' + uid();
+  const base = (typeof w.name === 'string' && w.name.trim()) ? w.name.trim() : 'Imported workspace';
+  const def: WorkspaceDef = {
+    id: nid, name: uniqueWsName(base),
+    color: (typeof w.color === 'string' && w.color) ? w.color : nextWsColor(),
+    root: typeof w.root === 'string' ? w.root : null,
+    themeId: (typeof w.themeId === 'string' && TEMPLATES.some((t) => t.id === w.themeId)) ? w.themeId : null,
+    trusted: false, // came from elsewhere → untrusted until the user trusts it
+    createdAt: Date.now(), lastOpenedAt: Date.now(),
+  };
+  relay.saveWorkspaceSnapshot(nid, cloneSnapshot(d.snapshot));
+  wsDefs.push(def); saveWsMeta(); renderWsMenu();
+  toast(`Imported “${def.name}”`);
+}
+function renameWorkspace(id: string, name: string): void {
+  const def = wsDefs.find((w) => w.id === id); if (!def) return;
+  const nm = name.trim(); if (nm) def.name = nm;
+  saveWsMeta(); renderWorkspaceChip(); renderWsMenu();
+}
+function startRenameWorkspace(id: string): void {
+  const el = $('#wsMenu').querySelector(`[data-wsname="${id}"]`) as HTMLElement | null;
+  if (el) makeEditable(el, (v) => renameWorkspace(id, v));
+}
+function recolorWorkspace(id: string): void {
+  const def = wsDefs.find((w) => w.id === id); if (!def) return;
+  def.color = WS_COLORS[(WS_COLORS.indexOf(def.color) + 1) % WS_COLORS.length];
+  saveWsMeta(); renderWorkspaceChip(); renderWsMenu();
+}
+async function deleteWorkspace(id: string): Promise<void> {
+  if (booting) return; // a switch/boot in flight
+  if (wsDefs.length <= 1) { toast('Can’t delete the only workspace'); return; }
+  const def = wsDefs.find((w) => w.id === id); if (!def) return;
+  if (!(await confirmDialog('Delete workspace?', `“${def.name}” and its saved terminals will be removed — this can’t be undone.`, 'Delete'))) return;
+  if (id === wsActiveId) {
+    // Drop the active session WITHOUT saving its snapshot (it's being deleted), then open the first remaining one.
+    booting = true; teardownAllTabs(true); // kill — this workspace's shells are gone for good
+    wsDefs = wsDefs.filter((w) => w.id !== id);
+    wsActiveId = wsDefs[0].id;
+    warmWs = warmWs.filter((w) => w !== id && w !== wsActiveId); // deleted gone; the new active is no longer background
+    await adoptActiveWsEnv(); // the surviving active workspace has its OWN folder + theme — adopt them before rebuilding
+    relay.saveWorkspaceMeta(wsDefs, wsActiveId); // prunes the deleted workspace's snapshot from byId
+    const ws = await relay.getWorkspaceSnapshot(wsActiveId);
+    await restoreWorkspaceSnapshot(ws);
+    renderFiles(); updateMainView(); reflectSettings();
+    booting = false; persistWorkspace(true); settleDeeplink(); // a link buffered during the delete runs now
+  } else {
+    if (warmWs.includes(id)) await killWorkspaceShells(id); // kill its background shells before dropping it
+    warmWs = warmWs.filter((w) => w !== id);
+    wsDefs = wsDefs.filter((w) => w.id !== id);
+    relay.saveWorkspaceMeta(wsDefs, wsActiveId); // prunes the snapshot; current session untouched
+  }
+  renderWorkspaceChip(); renderWsMenu();
+  toast(`Deleted “${def.name}”`);
+}
+
+/* ---- workspace blueprints ("Templates", Phase 4): save current + spawn new ---- */
+function saveBlueprints(): void { relay.saveBlueprints(blueprints); }
+function uniqueBlueprintName(base: string): string {
+  const names = new Set(blueprints.map((b) => b.name));
+  if (!names.has(base)) return base;
+  for (let i = 2; ; i++) { const n = `${base} ${i}`; if (!names.has(n)) return n; }
+}
+// Capture the ACTIVE workspace (folder, theme, colour, split layout, terminals) as a reusable template.
+function saveAsTemplate(): void {
+  if (booting) return;
+  const def = activeWsDef(); if (!def) return;
+  const tabs: BlueprintTab[] = state.tabs.map((t) => ({ name: t.name, cwd: t.cwd, group: t.group }));
+  const bp: WorkspaceBlueprint = {
+    id: 'bp_' + uid(), name: uniqueBlueprintName(def.name),
+    root: def.root, themeId: def.themeId, color: def.color,
+    tabs, layout: state.layout, createdAt: Date.now(),
+  };
+  blueprints.push(bp); saveBlueprints();
+  toast(`Saved template “${bp.name}”`, true);
+}
+// A startup-command token: [name]. Fresh regex each call (avoids /g lastIndex state bugs).
+const paramRe = () => /\[([A-Za-z0-9_.-]+)\]/g;
+function scanParams(bp: WorkspaceBlueprint): string[] {
+  const set = new Set<string>();
+  for (const t of bp.tabs) { const re = paramRe(); let m; while ((m = re.exec(t.command || ''))) set.add(m[1]); }
+  return [...set];
+}
+const subst = (cmd: string, values: Record<string, string>): string => cmd.replace(paramRe(), (_m, n) => values[n] ?? `[${n}]`);
+
+// Startup commands to run ONCE per spawned terminal, on its first shell-integration prompt (the 'cwd'
+// event) with a timeout fallback if integration is off. Never stored on the tab — a pure one-shot.
+const pendingStartup = new Map<string, string>();
+function runStartup(id: string): void {
+  const cmd = pendingStartup.get(id); if (cmd === undefined) return;
+  pendingStartup.delete(id);
+  if (state.tabs.some((t) => t.id === id)) sendCommand(id, cmd);
+}
+
+// Build a fresh tab snapshot from a blueprint (new ids; terminals in their cwds or the workspace root;
+// visible tab per group = first in that group) plus the [id, substituted-command] pairs to run on spawn.
+function buildFromBlueprint(bp: WorkspaceBlueprint, values: Record<string, string>): { ws: Workspace; cmds: Array<[string, string]> } {
+  const cmds: Array<[string, string]> = [];
+  const tabs: OpenTab[] = bp.tabs.map((bt) => {
+    const id = uid(); const cmd = (bt.command || '').trim();
+    if (cmd) cmds.push([id, subst(cmd, values)]);
+    return { id, name: bt.name || 'terminal', model: state.settings.defaultModel, cwd: bt.cwd || bp.root || '', group: typeof bt.group === 'number' ? bt.group : 0, bkNonce: uid() };
+  });
+  const gv: string[] = ['', '', '', ''];
+  for (const t of tabs) { const g = t.group ?? 0; if (g >= 0 && g < gv.length && !gv[g]) gv[g] = t.id; }
+  return { ws: { active: tabs[0]?.id ?? '', tabs, gv, focus: 0, layout: bp.layout }, cmds };
+}
+// Spawn a new workspace from a template + param values, switch to it, and run each terminal's command.
+async function spawnBlueprint(bp: WorkspaceBlueprint, values: Record<string, string>): Promise<void> {
+  if (booting) return;
+  const nid = 'ws_' + uid();
+  const def: WorkspaceDef = { id: nid, name: uniqueWsName(bp.name), color: bp.color || nextWsColor(), root: bp.root, themeId: bp.themeId, trusted: false, createdAt: Date.now(), lastOpenedAt: Date.now() };
+  const built = buildFromBlueprint(bp, values);
+  relay.saveWorkspaceSnapshot(nid, built.ws); // persist BEFORE switch reads it back
+  for (const [tid, cmd] of built.cmds) pendingStartup.set(tid, cmd);
+  wsDefs.push(def);
+  await switchWorkspace(nid); // adopts root/theme, rebuilds the terminals; commands fire on first prompt
+  if (built.cmds.length) { const ids = built.cmds.map((c) => c[0]); setTimeout(() => ids.forEach(runStartup), 2200); } // fallback if integration is off
+  toast(`New workspace from “${bp.name}”`, true);
+}
+// Spawn from a template: prompt for its [params] first (if any), else spawn straight away.
+function newFromBlueprint(id: string): void {
+  if (booting) return;
+  const bp = blueprints.find((b) => b.id === id); if (!bp) return;
+  const params = scanParams(bp);
+  if (params.length) openParamPrompt(bp, params); else void spawnBlueprint(bp, {});
+}
+async function deleteBlueprint(id: string): Promise<void> {
+  const bp = blueprints.find((b) => b.id === id); if (!bp) return;
+  closeTplMenu();
+  if (!(await confirmDialog('Delete template?', `“${bp.name}” will be removed — this can’t be undone.`, 'Delete'))) return;
+  blueprints = blueprints.filter((b) => b.id !== id); saveBlueprints(); renderTplMenu();
+  toast(`Deleted “${bp.name}”`);
+}
+
+// A self-contained modal overlay (own scrim; Escape or scrim-click closes). Themed via the app's CSS vars.
+function modal(html: string): { root: HTMLElement; close: () => void } {
+  const root = document.createElement('div'); root.className = 'tpl-modal';
+  root.innerHTML = `<div class="tpl-sc"></div>${html}`;
+  const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') { e.preventDefault(); close(); } };
+  const close = () => { root.remove(); document.removeEventListener('keydown', onKey); };
+  document.body.appendChild(root);
+  document.addEventListener('keydown', onKey);
+  root.querySelector('.tpl-sc')?.addEventListener('click', close);
+  return { root, close };
+}
+// Screen 1 — edit a template's name + per-terminal startup commands; live-collect its [params].
+function openTemplateEditor(id: string): void {
+  const bp = blueprints.find((b) => b.id === id); if (!bp) return;
+  closeTplMenu();
+  const rows = bp.tabs.length
+    ? bp.tabs.map((t, i) => `<div class="te-row"><div class="th"><span class="ic">›_</span>&nbsp;${esc(t.name || 'terminal')}<span class="g">pane ${(t.group ?? 0) + 1}</span></div><textarea class="te-cmd" data-i="${i}" rows="1" spellcheck="false" placeholder="startup command — optional · use [name] for a prompt">${esc(t.command || '')}</textarea></div>`).join('')
+    : '<div class="te-mut" style="padding:6px 2px">This template has no terminals.</div>';
+  const { root, close } = modal(`<div class="tpl-card">
+      <div class="hd"><span class="dot" style="background:${esc(bp.color)}"></span><span class="t">Edit template<small>${esc(bp.root ? shortCwd(bp.root) : 'no folder')} · ${bp.tabs.length} terminal${bp.tabs.length === 1 ? '' : 's'}</small></span></div>
+      <div class="bd"><input class="te-name" value="${esc(bp.name)}" placeholder="Template name" spellcheck="false" />${rows}<div class="te-params"><span class="lab">Parameters</span><span class="te-plist"></span></div></div>
+      <div class="ft"><span class="hint">Wrap a variable in <code>[name]</code> to make it a prompt</span><span class="r"><button class="tpl-btn ghost" data-x>Cancel</button><button class="tpl-btn pri" data-ok>Done</button></span></div>
+    </div>`);
+  const plist = root.querySelector('.te-plist') as HTMLElement;
+  const nameEl = root.querySelector('.te-name') as HTMLInputElement;
+  const areas = [...root.querySelectorAll('.te-cmd')] as HTMLTextAreaElement[];
+  const refresh = () => {
+    const set = new Set<string>();
+    for (const ta of areas) { const re = paramRe(); let m; while ((m = re.exec(ta.value))) set.add(m[1]); ta.style.height = 'auto'; ta.style.height = ta.scrollHeight + 'px'; }
+    plist.innerHTML = set.size ? [...set].map((p) => `<span class="pchip">${esc(p)}</span>`).join('') : '<span class="te-mut">none — plain commands</span>';
+  };
+  areas.forEach((ta) => ta.addEventListener('input', refresh)); refresh();
+  root.querySelector('[data-x]')?.addEventListener('click', close);
+  root.querySelector('[data-ok]')?.addEventListener('click', () => {
+    const nm = nameEl.value.trim(); if (nm) bp.name = nm;
+    areas.forEach((ta) => { const i = +ta.dataset.i!; if (bp.tabs[i]) bp.tabs[i].command = ta.value.trim() || undefined; });
+    saveBlueprints(); renderTplMenu(); close(); toast(`Saved “${bp.name}”`, true);
+  });
+}
+// Screen 2 — fill each [param] once, with a live preview of the resolved commands, then spawn.
+function openParamPrompt(bp: WorkspaceBlueprint, params: string[]): void {
+  closeTplMenu();
+  const flds = params.map((p) => `<div class="pp-fld"><label>${esc(p)}</label><input class="pp-inp" data-p="${esc(p)}" placeholder="[${esc(p)}]" spellcheck="false" /></div>`).join('');
+  const { root, close } = modal(`<div class="tpl-card">
+      <div class="hd"><span class="dot" style="background:${esc(bp.color)}"></span><span class="t">New workspace from “${esc(bp.name)}”<small>${params.length} blank${params.length === 1 ? '' : 's'} to fill</small></span></div>
+      <div class="bd">${flds}<div class="pp-prev"><div class="pl">Commands to run</div><div class="pp-list"></div></div></div>
+      <div class="ft"><span class="hint"></span><span class="r"><button class="tpl-btn ghost" data-x>Cancel</button><button class="tpl-btn pri" data-ok>Create workspace</button></span></div>
+    </div>`);
+  const inps = [...root.querySelectorAll('.pp-inp')] as HTMLInputElement[];
+  const list = root.querySelector('.pp-list') as HTMLElement;
+  const values = () => Object.fromEntries(inps.map((i) => [i.dataset.p!, i.value]));
+  const refresh = () => {
+    const v = values();
+    const cmds = bp.tabs.filter((t) => (t.command || '').trim());
+    list.innerHTML = cmds.length
+      ? cmds.map((t) => `<div class="pp-cmd"><span class="who">${esc(t.name || 'terminal')} ›</span> ${esc(t.command!).replace(paramRe(), (_m, n) => v[n] ? `<span class="fill">${esc(v[n])}</span>` : `<span class="tok">[${esc(n)}]</span>`)}</div>`).join('')
+      : '<div class="pp-cmd te-mut">no commands — just opens the folders</div>';
+  };
+  const okBtn = root.querySelector('[data-ok]') as HTMLButtonElement;
+  const filled = () => inps.every((i) => i.value.trim() !== ''); // every [param] must be filled — a blank would break the command
+  const sync = () => { refresh(); okBtn.disabled = !filled(); };
+  inps.forEach((i) => i.addEventListener('input', sync)); sync();
+  setTimeout(() => inps[0]?.focus(), 30);
+  const go = () => { if (!filled()) return; const v = values(); close(); void spawnBlueprint(bp, v); };
+  okBtn.addEventListener('click', go);
+  root.querySelector('[data-x]')?.addEventListener('click', close);
+  inps.forEach((i) => i.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter') return; e.preventDefault();
+    if (filled()) go(); else (inps.find((x) => !x.value.trim()) ?? inps[0]).focus(); // Enter → next empty field, else submit
+  }));
+}
+function renderTplMenu(): void {
+  const rows = blueprints.length
+    ? blueprints.map((b) => {
+        const ps = scanParams(b);
+        const sub = `${b.root ? shortCwd(b.root) : 'no folder'} · ${b.tabs.length} tab${b.tabs.length === 1 ? '' : 's'}${ps.length ? ` · ⚡ ${ps.join(', ')}` : ''}`;
+        return `<div class="ws-item" data-tpl="${b.id}" title="New workspace from this template">
+        <span class="ws-dot" style="background:${esc(b.color)}"></span>
+        <span class="ws-col"><span class="ws-nm">${esc(b.name)}</span><span class="ws-pth">${esc(sub)}</span></span>
+        <span class="ws-acts"><button data-tpledit="${b.id}" title="Edit commands &amp; params">✎</button><button data-tpldel="${b.id}" title="Delete">✕</button></span>
+      </div>`;
+      }).join('')
+    : '<div class="ws-empty">No templates yet.<br>Set up a workspace, then “Save current as template”.</div>';
+  $('#tplMenu').innerHTML = rows + `<div class="ws-sep"></div><div class="ws-act" data-tplsave><span class="g">＋</span> Save current as template</div>`;
+}
+function openTplMenu(): void {
+  renderTplMenu();
+  const r = $('#wsChip').getBoundingClientRect(); const m = $('#tplMenu');
+  m.style.left = r.left + 'px'; m.style.top = (r.bottom + 6) + 'px'; m.classList.add('show');
+}
+function closeTplMenu(): void { $('#tplMenu').classList.remove('show'); }
+
+/* ---- slayert:// deeplinks: switch to a workspace / spawn a template by name ---- */
+let pendingDeeplink: { kind: string; name: string } | null = null;
+function handleDeeplink(intent: { kind: string; name: string }): void {
+  if (booting) { pendingDeeplink = intent; return; } // defer until boot / an in-flight switch settles
+  const name = (intent.name || '').trim();
+  if (intent.kind === 'workspace') {
+    const def = wsDefs.find((w) => w.name === name);
+    if (!def) { toast(`No workspace named “${name}”`); return; }
+    if (def.id === wsActiveId) { toast(`Already in “${name}”`, true); return; }
+    switchWorkspace(def.id);
+  } else if (intent.kind === 'template') {
+    const bp = blueprints.find((b) => b.name === name);
+    if (bp) newFromBlueprint(bp.id); else toast(`No template named “${name}”`);
+  } else {
+    toast(`Unknown link kind: ${intent.kind}`);
+  }
+}
+// Run a link buffered while booting / switching — called wherever `booting` returns to false.
+function settleDeeplink(): void {
+  if (!pendingDeeplink || booting) return;
+  const d = pendingDeeplink; pendingDeeplink = null; handleDeeplink(d);
+}
+function copyWorkspaceLink(id: string): void {
+  const def = wsDefs.find((w) => w.id === id); if (!def) return;
+  closeWsMenu();
+  relay.copyText('slayert://workspace/' + encodeURIComponent(def.name));
+  toast('Link copied', true);
 }
 
 /* ----------------------------- library ----------------------------- */
@@ -639,7 +1138,11 @@ function applyTheme() {
   applyThemeVars(activeTheme());
   for (const t of state.tabs) { applyTermColors(t); t.term.refresh(0, t.term.rows - 1); } // re-tint every live terminal
 }
-async function setTemplate(id: string) { state.settings = await relay.patchSettings({ template: id as Settings['template'] }); applyTheme(); reflectSettings(); }
+async function setTemplate(id: string) {
+  const def = activeWsDef(); if (def) { def.themeId = id; saveWsMeta(); } // theme is per-workspace; the global setting is only the seed for new ones
+  state.settings = await relay.patchSettings({ template: id as Settings['template'] });
+  applyTheme(); reflectSettings();
+}
 async function cycleTemplate() { const i = TEMPLATES.findIndex((t) => t.id === curTemplate()); await setTemplate(TEMPLATES[(i + 1) % TEMPLATES.length].id); }
 function applySidebar() { $('#main').classList.toggle('collapsed', state.settings.sidebarCollapsed); const t = activeTab(); if (t) setTimeout(() => { t.fit.fit(); relay.ptyResize(t.id, t.term.cols, t.term.rows); }, 210); }
 function applyToolbar() { document.querySelector('.titlebar')?.classList.toggle('shown', state.settings.toolbarShown); }
@@ -669,8 +1172,19 @@ let agentBusy = false;
 function chat(): ChatTurn[] { const t = activeTab(); return t ? t.chat : state.history; }
 function renderChat() {
   $('#agentBody').innerHTML = '';
+  renderTrustNotice();
   if (!chat().length) { renderChips(); return; }
   for (const turn of chat()) addMsg(turn.role, turn.content);
+}
+// When the active workspace isn't trusted, tell the user why the agent will keep asking, with a one-click
+// trust action. Shown above the chat/chips so it's visible whether or not a conversation exists yet.
+function renderTrustNotice() {
+  const def = activeWsDef();
+  if (wsTrusted(def) || !def) return;
+  const div = document.createElement('div'); div.className = 'agent-trust';
+  div.innerHTML = `<span class="lk">🔒</span><span><b>${esc(def.name)}</b> isn’t trusted — the agent will ask before each file change or command. <button class="trust-btn">Trust workspace</button></span>`;
+  $('#agentBody').appendChild(div);
+  div.querySelector('.trust-btn')?.addEventListener('click', () => toggleTrust(def.id));
 }
 function renderChips() {
   if (chat().length) return;
@@ -728,7 +1242,11 @@ relay.onPtyBlock((id: string, ev: { type: 'start' | 'update' | 'end'; block: Blo
   const t = state.tabs.find((x) => x.id === id); if (!t) return;
   // The shell reported its working directory (fires each prompt) — keep the tab's cwd live so the
   // cd autocomplete lists the *current* folder and the status bar stays accurate after a `cd`.
-  if (ev.type === 'cwd') { if (ev.cwd && ev.cwd !== t.cwd) { t.cwd = ev.cwd; if (state.active === id) updateStatus(); } return; }
+  if (ev.type === 'cwd') {
+    if (ev.cwd && ev.cwd !== t.cwd) { t.cwd = ev.cwd; if (state.active === id) updateStatus(); }
+    if (pendingStartup.has(id)) runStartup(id); // template startup command — run on the first prompt (shell is ready)
+    return;
+  }
   // Namespace the parser's per-run ids (b1, b2, …) with a per-tab nonce so a fresh shell's
   // blocks never collide with blocks restored from a previous run of the same terminal.
   const bid = t.bkNonce + ':' + ev.block.id;
@@ -1132,6 +1650,15 @@ function paletteActions(): PalAction[] {
     { g: 'Terminal', t: 'Close all terminals', run: () => closeAll() },
     { g: 'View', t: 'Next theme', run: cycleTemplate },
     { g: 'View', t: 'Choose theme…', run: () => { openSettings(); } },
+    { g: 'View', t: 'New workspace', run: createWorkspace },
+    { g: 'View', t: 'Switch workspace…', run: openWsMenu },
+    { g: 'View', t: 'Duplicate workspace', run: () => duplicateWorkspace(wsActiveId) },
+    { g: 'View', t: 'Export workspace…', run: () => exportWorkspace(wsActiveId) },
+    { g: 'View', t: 'Import workspace…', run: importWorkspace },
+    { g: 'View', t: 'Trust / untrust workspace', run: () => toggleTrust(wsActiveId) },
+    { g: 'View', t: 'Copy workspace link', run: () => copyWorkspaceLink(wsActiveId) },
+    { g: 'View', t: 'Save workspace as template', run: saveAsTemplate },
+    { g: 'View', t: 'New workspace from template…', run: openTplMenu },
     { g: 'View', t: 'Toggle library sidebar', run: toggleSidebar },
     { g: 'View', t: 'Toggle top toolbar', run: toggleToolbar },
     { g: 'View', t: 'Toggle auto-save', run: toggleAutosave },
@@ -1358,6 +1885,33 @@ $('#btnTheme').onclick = cycleTemplate; // quick-cycle through the five template
 $('#themeGrid').addEventListener('click', (e) => { const b = (e.target as HTMLElement).closest('[data-tpl]') as HTMLElement | null; if (b) setTemplate(b.dataset.tpl!); });
 $('#btnPalette').onclick = openPalette;
 $('#winSearch').onclick = openPalette; // command-search box in the top window bar
+// workspace switcher
+$('#wsChip').onclick = () => ($('#wsMenu').classList.contains('show') ? closeWsMenu() : openWsMenu());
+$('#wsMenu').addEventListener('click', (e) => {
+  const t = e.target as HTMLElement;
+  const rc = t.closest('[data-wsrecolor]') as HTMLElement | null; if (rc) { recolorWorkspace(rc.dataset.wsrecolor!); return; }
+  const rn = t.closest('[data-wsrename]') as HTMLElement | null; if (rn) { startRenameWorkspace(rn.dataset.wsrename!); return; }
+  const tr = t.closest('[data-wstrust]') as HTMLElement | null; if (tr) { toggleTrust(tr.dataset.wstrust!); return; }
+  const dup = t.closest('[data-wsdup]') as HTMLElement | null; if (dup) { duplicateWorkspace(dup.dataset.wsdup!); return; }
+  const ex = t.closest('[data-wsexport]') as HTMLElement | null; if (ex) { closeWsMenu(); exportWorkspace(ex.dataset.wsexport!); return; }
+  const lk = t.closest('[data-wslink]') as HTMLElement | null; if (lk) { copyWorkspaceLink(lk.dataset.wslink!); return; }
+  const del = t.closest('[data-wsdel]') as HTMLElement | null; if (del) { deleteWorkspace(del.dataset.wsdel!); return; }
+  if (t.closest('[data-wsnew]')) { createWorkspace(); return; }
+  if (t.closest('[data-wstpl]')) { closeWsMenu(); openTplMenu(); return; }
+  if (t.closest('[data-wsimport]')) { closeWsMenu(); importWorkspace(); return; }
+  const it = t.closest('[data-ws]') as HTMLElement | null;
+  if (it) switchWorkspace(it.dataset.ws!);
+});
+$('#tplMenu').addEventListener('click', (e) => {
+  const t = e.target as HTMLElement;
+  const ed = t.closest('[data-tpledit]') as HTMLElement | null; if (ed) { openTemplateEditor(ed.dataset.tpledit!); return; }
+  const del = t.closest('[data-tpldel]') as HTMLElement | null; if (del) { deleteBlueprint(del.dataset.tpldel!); return; }
+  if (t.closest('[data-tplsave]')) { closeTplMenu(); saveAsTemplate(); return; }
+  const it = t.closest('[data-tpl]') as HTMLElement | null;
+  if (it) { closeTplMenu(); newFromBlueprint(it.dataset.tpl!); }
+});
+document.addEventListener('mousedown', (e) => { if (!(e.target as HTMLElement).closest('#tplMenu')) closeTplMenu(); });
+document.addEventListener('mousedown', (e) => { const t = e.target as HTMLElement; if (!t.closest('#wsMenu') && !t.closest('#wsChip')) closeWsMenu(); });
 $('#btnOpen').onclick = addFolderTab;
 $('#stAutosave').onclick = toggleAutosave;
 $('#libSort').addEventListener('change', async (e) => { state.settings = await relay.patchSettings({ librarySort: (e.target as HTMLSelectElement).value as any }); renderLibrary(); });
@@ -1613,7 +2167,7 @@ $('#settingsClose').onclick = closeSettings;
 $('#cfOk').onclick = () => closeConfirm(true);
 $('#cfCancel').onclick = () => closeConfirm(false);
 $('#scrim').onclick = () => { closeConfirm(false); closeSettings(); closePalette(); };
-$('#setWsBtn').onclick = async () => { state.settings = await relay.openWorkspace(); updateStatus(); reflectSettings(); };
+$('#setWsBtn').onclick = async () => { state.settings = await relay.openWorkspace(); setActiveWsRoot(state.settings.workspace || null); updateStatus(); reflectSettings(); };
 $('#autoApprove').addEventListener('change', async (e) => { state.settings = await relay.patchSettings({ autoApprove: (e.target as HTMLInputElement).checked }); });
 document.querySelectorAll('.set[data-key]').forEach((b) => b.addEventListener('click', async () => {
   const p = (b as HTMLElement).dataset.key!;
@@ -1644,6 +2198,7 @@ document.addEventListener('keydown', (e) => {
   else if (mod && e.shiftKey && e.key.toLowerCase() === 'c') { e.preventDefault(); const t = (window.getSelection()?.toString().trim() || '') || xtermSelection(); if (t) { navigator.clipboard?.writeText(t); toast('Copied', true); } } // terminal copy (was: launch Claude)
   else if (mod && e.shiftKey && e.key.toLowerCase() === 'l') { e.preventDefault(); newClaudeTab(); } // launch Claude Code (moved off Ctrl+Shift+C)
   else if (mod && e.shiftKey && e.key.toLowerCase() === 'h') { e.preventDefault(); $('#historyPanel').classList.contains('show') ? closeHistory() : openHistory(); }
+  else if (mod && e.shiftKey && e.key.toLowerCase() === 'w') { e.preventDefault(); $('#wsMenu').classList.contains('show') ? closeWsMenu() : openWsMenu(); } // workspace switcher
   else if (mod && e.shiftKey && e.key.toLowerCase() === 'b') { e.preventDefault(); toggleBlocksView(); }
   else if (mod && !e.shiftKey && e.key.toLowerCase() === 'b') { e.preventDefault(); toggleSidebar(); } // toggle the left sidebar
   else if (mod && e.shiftKey && e.key.toLowerCase() === 'e') { e.preventDefault(); splitClone('row'); }
@@ -1661,18 +2216,28 @@ document.addEventListener('keydown', (e) => {
   else if (mod && e.key.toLowerCase() === 's') { e.preventDefault(); saveActive(); }
   else if (mod && e.key.toLowerCase() === 'l') { e.preventDefault(); clearActive(); }
   else if (mod && e.key.toLowerCase() === 'w') { e.preventDefault(); state.active && closeTab(state.active); }
-  else if (e.key === 'Escape') { closeConfirm(false); closeModelMenu(); closePalette(); closeSettings(); closeTabMenu(); closeColorPop(); closeHistory(); closeBookmarks(); hideBkmPop(); hideCdPop(); }
+  else if (e.key === 'Escape') { closeConfirm(false); closeModelMenu(); closePalette(); closeSettings(); closeTabMenu(); closeColorPop(); closeHistory(); closeBookmarks(); hideBkmPop(); hideCdPop(); closeWsMenu(); }
 });
 
-relay.onPtyData((id: string, data: string) => { state.tabs.find((t) => t.id === id)?.term.write(data); persistWorkspace(); });
+// Write terminal output to a tab, or BUFFER it when the tab has no measured size yet (it was created in a
+// hidden/display:none pane during restore). Writing to an unmeasured xterm throws inside its viewport
+// (syncScrollArea → undefined `dimensions`); the buffer is bounded (newest kept) and flushed by applyResize
+// the first time the tab is fit while visible. A tab that was ever fit keeps cached dims, so this is a no-op.
+function writeToTab(id: string, data: string): void {
+  const t = state.tabs.find((x) => x.id === id); if (!t) return;
+  if (t.fitted) t.term.write(data);
+  else t.replayQ = ((t.replayQ ?? '') + data).slice(-512 * 1024);
+}
+relay.onPtyData((id: string, data: string) => { writeToTab(id, data); persistWorkspace(); });
 // Final flush on close — synchronous so the latest scrollback reaches disk before teardown.
 // Wrapped so a failed flush can never throw mid-unload (which would abort a clean close).
 window.addEventListener('beforeunload', () => {
   // !booting: never let a close mid-restore flush a partial tab set over the full saved workspace.
   try { if (state.settings.autoSave && !booting) relay.flushWorkspace({ active: state.active, tabs: snapshotTabs(), gv: state.gv, focus: state.focus, layout: state.layout }); } catch { /* ignore */ }
 });
-relay.onPtyExit((id: string) => { state.tabs.find((x) => x.id === id)?.term.write('\r\n\x1b[90m[process exited]\x1b[0m\r\n'); });
+relay.onPtyExit((id: string) => { writeToTab(id, '\r\n\x1b[90m[process exited]\x1b[0m\r\n'); });
 relay.onApproval((req: ApprovalRequest) => showApproval(req));
+relay.onDeeplink(handleDeeplink);
 let _roT: any;
 new ResizeObserver(() => { clearTimeout(_roT); _roT = setTimeout(() => { fitPanes(); updateTabOverflow(); }, 80); }).observe($('#paneGrid'));
 
@@ -1680,38 +2245,19 @@ new ResizeObserver(() => { clearTimeout(_roT); _roT = setTimeout(() => { fitPane
 (async function boot() {
   state.settings = await relay.getSettings();
   state.library = await relay.listSessions();
+  const meta = await relay.getWorkspaceMeta();
+  wsDefs = meta.workspaces; wsActiveId = meta.activeWorkspaceId; renderWorkspaceChip();
+  blueprints = await relay.getBlueprints();
+  syncEffectiveFromActiveWs(); // mirror the active workspace's folder + theme into settings before first paint
   ($('#libSort') as HTMLSelectElement).value = state.settings.librarySort || 'recent';
   applyTheme(); applySidebarWidth(); applySidebar(); applyToolbar(); applySplit(); reflectAutosave(); renderLibrary(); updateStatus(); reflectModel(); reflectSettings();
   ($('#storeText') as HTMLElement).textContent = 'Saved on this machine';
   tickClock(); setInterval(tickClock, 20000);
 
-  const ws = await relay.getWorkspace();
-  if (state.settings.autoSave && ws.tabs.length) {
-    const activeId = ws.tabs.some((t: OpenTab) => t.id === ws.active) ? ws.active : ws.tabs[0].id;
-    // Apply the saved split layout FIRST, so each tab restores into its real pane. (If we created
-    // tabs first, reconcilePanes would flatten every group to 0 while the layout is still {g:0}.)
-    const savedGroups = new Set<number>(ws.tabs.map((t: OpenTab) => (typeof t.group === 'number' ? t.group : 0)));
-    const validLayout = ws.layout != null && isValidLayout(ws.layout, savedGroups);
-    if (validLayout) {
-      state.layout = ws.layout as LNode;
-      for (const g of leaves(state.layout)) state.gv[g] = ws.gv?.[g] || '';
-      state.focus = leaves(state.layout).includes(ws.focus ?? 0) ? (ws.focus ?? 0) : leaves(state.layout)[0];
-    } else { state.layout = { g: 0 }; state.focus = 0; }
-    // Create every tab WITHOUT activating (no mid-loop reconcile); pin each to a real leaf.
-    const lvs = leaves(state.layout);
-    for (const t of ws.tabs) { if (typeof t.group !== 'number' || !lvs.includes(t.group)) t.group = lvs[0]; await newTab(t, false); }
-    // Repair each pane's visible tab, then settle the whole layout in one pass.
-    for (const g of lvs) { if (!state.tabs.some((t) => t.id === state.gv[g] && t.group === g)) state.gv[g] = groupTabs(g)[0]?.id || ''; }
-    if (!validLayout) state.gv[0] = state.tabs.some((t) => t.id === activeId) ? activeId : (groupTabs(0)[0]?.id || '');
-    state.active = state.gv[state.focus] || activeId;
-    E('#termEmpty').style.display = 'none';
-    reconcilePanes(); renderTabs(); updateStatus(); reflectModel();
-  } else if (state.settings.workspace) {
-    newTab();
-  } else {
-    E('#termEmpty').innerHTML = 'Open a project folder to start.<br>Press <b>Ctrl/⌘ K</b> → “Open folder”.';
-  }
+  const ws = await relay.getWorkspace(); // the active workspace's tab snapshot
+  await restoreWorkspaceSnapshot(ws);
   renderFiles(); // populate the Files section even if no terminal is active yet
   updateMainView(); // reflect Blocks/Classic choice (and the toggle button) on first paint
   booting = false; persistWorkspace(true); // restore complete — resume autosave and write the settled state once
+  settleDeeplink(); // deliver a slayert:// link this instance launched with, now that boot is done
 })();

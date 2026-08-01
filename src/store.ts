@@ -1,25 +1,34 @@
 import { app } from 'electron';
 import { promises as fs, writeFileSync, renameSync } from 'node:fs';
 import path from 'node:path';
-import type { SavedSession, Settings, Workspace } from './shared/types';
+import type { SavedSession, Settings, Workspace, WorkspaceDef, WorkspaceBlueprint } from './shared/types';
 import { DEFAULT_MODEL } from './shared/models';
 
-// Simple JSON persistence for saved sessions (the "Library"), the open-tab
-// workspace, and app settings. Swap for better-sqlite3 if scrollback grows large.
+// Simple JSON persistence for saved sessions (the "Library"), named workspaces (each a split-layout
+// snapshot of open tabs), and app settings. Swap for better-sqlite3 if scrollback grows large.
+//
+// relay.json (rare writes) holds sessions + settings + the workspace DEFINITIONS + which one is
+// active. workspace.json (frequent writes) holds the per-workspace tab SNAPSHOTS, keyed by id.
 
-const file = () => path.join(app.getPath('userData'), 'relay.json');      // sessions + settings (rarely written)
-const wsFile = () => path.join(app.getPath('userData'), 'workspace.json'); // open tabs (written often during output)
+const file = () => path.join(app.getPath('userData'), 'relay.json');      // sessions + settings + workspace defs (rare)
+const wsFile = () => path.join(app.getPath('userData'), 'workspace.json'); // per-workspace tab snapshots (frequent)
 
 interface DB {
   sessions: SavedSession[];
-  workspace: Workspace;
   settings: Settings;
+  workspaces: WorkspaceDef[];          // definitions (relay.json)
+  activeWorkspaceId: string;           // which workspace is open (relay.json)
+  blueprints: WorkspaceBlueprint[];    // reusable workspace templates (relay.json)
+  wsById: Record<string, Workspace>;   // per-workspace tab snapshots (workspace.json)
 }
 
 const defaults = (): DB => ({
   sessions: [],
-  workspace: { active: '', tabs: [] },
   settings: { workspace: null, defaultModel: DEFAULT_MODEL, autoApprove: false, autoSave: true, theme: 'dark', template: 'graphite', sidebarCollapsed: false, toolbarShown: false, librarySort: 'recent', librarySplit: 0.4, sidebarWidth: 260, shellIntegration: true, blocksView: true, notifications: true, bookmarks: [], bookmarkGroups: [], hasKey: {} },
+  workspaces: [],
+  activeWorkspaceId: '',
+  blueprints: [],
+  wsById: {},
 });
 
 let cache: DB | null = null;
@@ -46,10 +55,32 @@ async function doLoad(): Promise<DB> {
   const d = defaults();
   const main = await readJson(file(), true);
   const wsRaw = await readJson(wsFile(), false);
+  const settings = { ...d.settings, ...(main && typeof main.settings === 'object' ? main.settings : {}) } as Settings;
+
+  // Per-workspace snapshots: the new { version, byId } shape, else migrate the pre-multi single
+  // snapshot (workspace.json was one Workspace; even older, relay.json.workspace) into ws_default.
+  const wsById: Record<string, Workspace> = {};
+  const byId = wsRaw && typeof wsRaw.byId === 'object' ? (wsRaw.byId as Record<string, unknown>) : null;
+  if (byId) { for (const [id, snap] of Object.entries(byId)) wsById[id] = normWs(snap); }
+  else if (wsRaw ?? main?.workspace) { wsById['ws_default'] = normWs(wsRaw ?? main?.workspace); }
+
+  // Workspace definitions: seed a default one on first run, named from the open folder.
+  let workspaces: WorkspaceDef[] = Array.isArray(main?.workspaces) ? (main!.workspaces as WorkspaceDef[]) : [];
+  let activeWorkspaceId = typeof main?.activeWorkspaceId === 'string' ? (main!.activeWorkspaceId as string) : '';
+  if (!workspaces.length) {
+    const root = settings.workspace ?? null;
+    const name = root ? (root.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || 'Workspace') : 'Default';
+    const now = Date.now();
+    workspaces = [{ id: 'ws_default', name, color: '#6e7bff', root, themeId: null, createdAt: now, lastOpenedAt: now }];
+  }
+  if (!workspaces.some((w) => w.id === activeWorkspaceId)) activeWorkspaceId = workspaces[0].id; // active must exist
+  if (!wsById[activeWorkspaceId]) wsById[activeWorkspaceId] = { active: '', tabs: [] };
+
   cache = {
     sessions: Array.isArray(main?.sessions) ? (main!.sessions as SavedSession[]) : d.sessions,
-    settings: { ...d.settings, ...(main && typeof main.settings === 'object' ? main.settings : {}) },
-    workspace: normWs(wsRaw ?? main?.workspace), // migrate a legacy relay.json.workspace on first run
+    settings, workspaces, activeWorkspaceId,
+    blueprints: Array.isArray(main?.blueprints) ? (main!.blueprints as WorkspaceBlueprint[]) : d.blueprints,
+    wsById,
   };
   return cache!;
 }
@@ -68,10 +99,10 @@ async function atomicWrite(f: string, data: string): Promise<void> {
   await fs.rename(tmp, f);
 }
 
-// relay.json — sessions + settings only (the workspace lives in its own file now).
+// relay.json — sessions + settings + workspace definitions (the tab snapshots live in their own file).
 async function flushMain(): Promise<void> {
   if (!cache || readFailed) return;
-  const data = JSON.stringify({ sessions: cache.sessions, settings: cache.settings });
+  const data = JSON.stringify({ sessions: cache.sessions, settings: cache.settings, workspaces: cache.workspaces, activeWorkspaceId: cache.activeWorkspaceId, blueprints: cache.blueprints });
   if (data === lastMain) return;
   lastMain = data;
   writeChain = writeChain.then(() => atomicWrite(file(), data)).catch(() => { lastMain = null; });
@@ -82,7 +113,7 @@ async function flushMain(): Promise<void> {
 // re-serializes the whole Library.
 async function flushWorkspace(): Promise<void> {
   if (!cache || wsFinalized) return; // once the shutdown sync flush ran, its snapshot is final
-  const data = JSON.stringify(cache.workspace);
+  const data = JSON.stringify({ version: 1, byId: cache.wsById });
   if (data === lastWs) return;
   lastWs = data;
   // Not the shared atomicWrite: re-check wsFinalized right before the rename so an async write that
@@ -139,13 +170,15 @@ export async function reorderSessions(ids: string[]): Promise<SavedSession[]> {
   return db.sessions;
 }
 
+// --- active workspace's tab snapshot (what the renderer boots into / autosaves) ---
 export async function getWorkspace(): Promise<Workspace> {
-  return (await load()).workspace;
+  const db = await load();
+  return db.wsById[db.activeWorkspaceId] ?? { active: '', tabs: [] };
 }
 
 export async function setWorkspace(ws: Workspace): Promise<void> {
   const db = await load();
-  db.workspace = ws;
+  db.wsById[db.activeWorkspaceId] = ws;
   await flushWorkspace();
 }
 
@@ -153,11 +186,56 @@ export async function setWorkspace(ws: Workspace): Promise<void> {
 // workspace file (the cache is always populated by boot; if not, there's nothing to persist).
 export function setWorkspaceSync(ws: Workspace): void {
   if (!cache) return;
-  cache.workspace = ws;
+  cache.wsById[cache.activeWorkspaceId] = ws;
   wsFinalized = true; // set BEFORE writing: this is the last word on close, so any queued/in-flight async flush skips its rename
   try {
     const f = wsFile(); const tmp = `${f}.sync.tmp`;
-    writeFileSync(tmp, JSON.stringify(ws), 'utf8');
+    writeFileSync(tmp, JSON.stringify({ version: 1, byId: cache.wsById }), 'utf8');
     renameSync(tmp, f); // atomic replace, like the async path
   } catch { /* best-effort on shutdown */ }
+}
+
+// --- multi-workspace: definitions, the active id, and per-id snapshots (used by the switcher) ---
+export async function getWorkspaceMeta(): Promise<{ workspaces: WorkspaceDef[]; activeWorkspaceId: string }> {
+  const db = await load();
+  return { workspaces: db.workspaces, activeWorkspaceId: db.activeWorkspaceId };
+}
+
+// The active workspace's definition — used by the agent (main process) to resolve per-workspace trust.
+export async function getActiveWorkspaceDef(): Promise<WorkspaceDef | undefined> {
+  const db = await load();
+  return db.workspaces.find((w) => w.id === db.activeWorkspaceId);
+}
+
+// --- workspace blueprints (reusable "Templates") ---
+export async function getBlueprints(): Promise<WorkspaceBlueprint[]> {
+  return (await load()).blueprints;
+}
+export async function saveBlueprints(blueprints: WorkspaceBlueprint[]): Promise<void> {
+  const db = await load();
+  db.blueprints = blueprints;
+  await flushMain();
+}
+
+// Persist the definition list + active id; prune snapshots for workspaces that no longer exist.
+export async function saveWorkspaceMeta(workspaces: WorkspaceDef[], activeWorkspaceId: string): Promise<void> {
+  const db = await load();
+  db.workspaces = workspaces;
+  if (workspaces.some((w) => w.id === activeWorkspaceId)) db.activeWorkspaceId = activeWorkspaceId;
+  const ids = new Set(workspaces.map((w) => w.id));
+  let pruned = false;
+  for (const id of Object.keys(db.wsById)) if (!ids.has(id)) { delete db.wsById[id]; pruned = true; }
+  await flushMain();
+  if (pruned) await flushWorkspace();
+}
+
+export async function getWorkspaceSnapshot(id: string): Promise<Workspace> {
+  const db = await load();
+  return db.wsById[id] ?? { active: '', tabs: [] };
+}
+
+export async function saveWorkspaceSnapshot(id: string, ws: Workspace): Promise<void> {
+  const db = await load();
+  db.wsById[id] = ws;
+  await flushWorkspace();
 }

@@ -64,6 +64,23 @@ declare const MAIN_WINDOW_VITE_NAME: string;
 
 let win: BrowserWindow | null = null;
 
+// --- slayert:// deeplinks: slayert://<kind>/<name>, e.g. slayert://workspace/agent-t ---
+// Scheme is "slayert" (not "slayer") to stay namespaced to this app — other Slayer projects keep their own.
+const DEEPLINK_SCHEME = 'slayert';
+function extractDeeplink(argv: readonly string[]): string | null {
+  return argv.find((a) => typeof a === 'string' && a.toLowerCase().startsWith(DEEPLINK_SCHEME + '://')) ?? null;
+}
+function parseDeeplink(url: string): { kind: string; name: string } | null {
+  const m = new RegExp('^' + DEEPLINK_SCHEME + '://([^/]+)/(.+)$', 'i').exec(url.trim());
+  if (!m) return null;
+  try { return { kind: m[1].toLowerCase(), name: decodeURIComponent(m[2].replace(/\/+$/, '')) }; } catch { return null; }
+}
+let bootDeeplink: string | null = null; // a slayert:// URL this instance launched with — routed once the renderer is up
+function routeDeeplink(url: string | null): void {
+  const intent = url ? parseDeeplink(url) : null;
+  if (intent && win && !win.isDestroyed()) win.webContents.send('deeplink', intent);
+}
+
 // Remove the native application menu bar (File / Edit / View / Window / Help).
 // Windows/Linux: this drops the window menu bar entirely. macOS always keeps a
 // minimal app menu (OS requirement), which lives in the top screen bar, not the window.
@@ -102,6 +119,9 @@ function createWindow(): void {
   win.webContents.on('render-process-gone', (_e, d) => { logFatal('render-process-gone', JSON.stringify(d)); clearPendingApprovals(); });
   win.webContents.on('did-start-navigation', (_e, _url, isInPlace, isMainFrame) => { if (isMainFrame && !isInPlace) clearPendingApprovals(); });
   win.webContents.on('did-fail-load', (_e, code, desc, url) => logFatal('did-fail-load', `${code} ${desc} ${url}`));
+  // A slayert:// link this instance launched with is routed once the renderer has loaded (it buffers the
+  // intent until its own boot finishes). Cleared after the first delivery so a reload can't refire it.
+  win.webContents.on('did-finish-load', () => { if (bootDeeplink) { routeDeeplink(bootDeeplink); bootDeeplink = null; } });
   win.on('closed', () => { win = null; }); // drop the ref so stale window handlers / late IPC can't hit a destroyed window
 
   const loaded = MAIN_WINDOW_VITE_DEV_SERVER_URL
@@ -122,14 +142,35 @@ ipcMain.on('win:focus', () => { if (win) { if (win.isMinimized()) win.restore();
 
 // Only boot the real app when this isn't a Squirrel maintenance run (see isSquirrel above).
 if (!isSquirrel) {
-  app.whenReady().then(createWindow);
-  app.on('window-all-closed', () => {
-    killAll();
-    if (process.platform !== 'darwin') app.quit();
-  });
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
-  });
+  // Single instance: a second launch (e.g. the OS opening a slayert:// link) must route to the already-
+  // running window rather than spawn a second app. Without the lock we hand our argv over (Electron fires
+  // 'second-instance' in the primary) and quit.
+  if (!app.requestSingleInstanceLock()) {
+    app.quit();
+  } else {
+    // Register slayert:// so the OS routes those links here. Dev needs the exec path + main script explicitly.
+    if (app.isPackaged) app.setAsDefaultProtocolClient(DEEPLINK_SCHEME);
+    else app.setAsDefaultProtocolClient(DEEPLINK_SCHEME, process.execPath, [path.resolve(process.argv[1] ?? '')]);
+    bootDeeplink = extractDeeplink(process.argv); // launched WITH a link? deliver it once the renderer is up
+
+    app.on('second-instance', (_e, argv) => {
+      if (win) { if (win.isMinimized()) win.restore(); win.show(); win.focus(); }
+      routeDeeplink(extractDeeplink(argv));
+    });
+    app.on('open-url', (e, url) => { // macOS delivers links here
+      e.preventDefault(); // we handle the scheme ourselves
+      if (win) { win.show(); win.focus(); routeDeeplink(url); } else bootDeeplink = url;
+    });
+
+    app.whenReady().then(createWindow);
+    app.on('window-all-closed', () => {
+      killAll();
+      if (process.platform !== 'darwin') app.quit();
+    });
+    app.on('activate', () => {
+      if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    });
+  }
 }
 
 /* -------------------- PTY IPC -------------------- */
@@ -203,6 +244,18 @@ ipcMain.handle('session:export', async (_e, { name, content, ext }: { name: stri
   try { await fsp.writeFile(r.filePath, content, 'utf8'); return { ok: true, path: r.filePath }; }
   catch (e: any) { return { ok: false, error: e?.message || String(e) }; }
 });
+// Import a workspace: read a user-picked JSON file and hand the raw parsed payload back to the renderer,
+// which validates the shape and builds a fresh def + snapshot. (Treated as untrusted content — the
+// renderer sanitizes; imported workspaces start untrusted for the agent.)
+ipcMain.handle('workspace:import', async () => {
+  const r = await dialog.showOpenDialog(win!, {
+    properties: ['openFile'],
+    filters: [{ name: 'Slayer T workspace', extensions: ['json'] }, { name: 'All files', extensions: ['*'] }],
+  });
+  if (r.canceled || !r.filePaths[0]) return { ok: false };
+  try { return { ok: true, data: JSON.parse(await fsp.readFile(r.filePaths[0], 'utf8')) }; }
+  catch (e: any) { return { ok: false, error: e?.message || String(e) }; }
+});
 
 /* -------------------- file browser -------------------- */
 const CODE_EXTS = new Set(['.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs', '.json', '.jsonc', '.html', '.htm', '.css', '.scss', '.sass', '.less', '.md', '.markdown', '.py', '.rb', '.go', '.rs', '.java', '.kt', '.kts', '.c', '.h', '.cpp', '.cc', '.hpp', '.cs', '.php', '.swift', '.sh', '.bash', '.zsh', '.fish', '.ps1', '.yml', '.yaml', '.toml', '.ini', '.cfg', '.conf', '.env', '.xml', '.sql', '.vue', '.svelte', '.astro', '.txt', '.log', '.gradle', '.r', '.lua', '.dart', '.pl', '.ex', '.exs', '.clj', '.tf', '.graphql', '.proto']);
@@ -254,6 +307,13 @@ ipcMain.on('workspace:set-sync', (e, ws) => {
   try { store.setWorkspaceSync(ws); } catch (err) { logFatal('flush', err); }
   e.returnValue = true;
 });
+// Named workspaces: definitions + active id (rare) and per-workspace snapshots (used on switch).
+ipcMain.handle('workspaces:meta', () => store.getWorkspaceMeta());
+ipcMain.on('workspaces:save-meta', (_e, { workspaces, activeWorkspaceId }) => { void store.saveWorkspaceMeta(workspaces, activeWorkspaceId); });
+ipcMain.handle('workspace:get-snapshot', (_e, id: string) => store.getWorkspaceSnapshot(id));
+ipcMain.on('workspace:save-snapshot', (_e, { id, ws }) => { void store.saveWorkspaceSnapshot(id, ws); });
+ipcMain.handle('blueprints:get', () => store.getBlueprints());
+ipcMain.on('blueprints:save', (_e, blueprints) => { void store.saveBlueprints(blueprints); });
 
 /* -------------------- agent (with approval round-trip) -------------------- */
 const pendingApprovals = new Map<string, (ok: boolean) => void>();
