@@ -843,7 +843,6 @@ async function deleteWorkspace(id: string): Promise<void> {
   toast(`Deleted “${def.name}”`);
 }
 
-
 /* ---- slayert:// deeplinks: switch to a workspace / spawn a template by name ---- */
 let pendingDeeplink: { kind: string; name: string } | null = null;
 function handleDeeplink(intent: { kind: string; name: string }): void {
