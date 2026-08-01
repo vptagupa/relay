@@ -54,7 +54,7 @@ process.on('uncaughtException', (err) => {
   logFatal('uncaughtException', err);
   // Never pop a modal dialog during a Squirrel maintenance run — it would keep the process
   // alive and lock files, failing the (un)install. In that case just log and move on.
-  if (!isSquirrel) { try { dialog.showErrorBox('Relay — unexpected error', (err as { stack?: string })?.stack || String(err)); } catch { /* ignore */ } }
+  if (!isSquirrel) { try { dialog.showErrorBox('Slayer T — unexpected error', (err as { stack?: string })?.stack || String(err)); } catch { /* ignore */ } }
 });
 process.on('unhandledRejection', (reason) => logFatal('unhandledRejection', reason));
 
@@ -77,7 +77,7 @@ function createWindow(): void {
     minWidth: 780,
     minHeight: 480,
     backgroundColor: '#0e1116',
-    title: 'Relay',
+    title: 'Slayer T',
     icon: path.join(__dirname, '..', '..', 'assets', 'icon.png'), // dev taskbar icon (packaged uses the exe icon)
     // Native chrome off; our custom bar is drawn in the renderer.
     // Windows/Linux: fully frameless. macOS: keep the native traffic lights (hiddenInset).

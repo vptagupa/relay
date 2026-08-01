@@ -11,7 +11,7 @@ export function appHtml(panes: string): string {
   ${ICON_SPRITE}
   <div class="app">
     <div class="winbar">
-      <div class="winbar-brand"><span class="winbar-mark">›_</span><span class="winbar-title">Relay</span></div>
+      <div class="winbar-brand"><span class="winbar-mark"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5.3 8l3.1 4-3.1 4"/><path d="M11.6 8.4h7.2"/><path d="M15.2 8.4v7.6"/></svg></span><span class="winbar-title">Slayer T</span></div>
       <div class="winbar-ctx">
         <button class="winbar-search" id="winSearch" title="Search commands & sessions (⌘K)">
           <span class="winbar-search-ic">⌕</span>
@@ -133,7 +133,7 @@ export function appHtml(panes: string): string {
       <label class="chk"><input type="checkbox" id="autoApprove"> Auto-approve agent file writes & commands (skip the confirm step)</label>
       <label class="chk"><input type="checkbox" id="shellIntegration"> Command blocks — capture each command as a block in History (shell integration; applies to new terminals)</label>
       <label class="chk"><input type="checkbox" id="blocksViewSet"> Blocks view — show commands as blocks in the main terminal (full-screen apps drop to the live terminal automatically)</label>
-      <label class="chk"><input type="checkbox" id="notifySet"> Notify me when a long command finishes while Relay isn't focused</label>
+      <label class="chk"><input type="checkbox" id="notifySet"> Notify me when a long command finishes while Slayer T isn't focused</label>
     </div>
     <div class="modal-foot"><button class="btn primary" id="settingsClose">Done</button></div>
   </div>

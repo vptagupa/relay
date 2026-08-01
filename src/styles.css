@@ -70,7 +70,8 @@ button{font-family:inherit;color:inherit;cursor:pointer;border:none;background:n
 /* custom window title bar (frameless window chrome) */
 .winbar{display:flex;align-items:stretch;height:34px;background:var(--surface);border-bottom:1px solid var(--border);-webkit-app-region:drag;user-select:none;flex:none}
 .winbar-brand{display:flex;align-items:center;gap:8px;padding:0 12px}
-.winbar-mark{width:18px;height:18px;border-radius:5px;background:linear-gradient(150deg,var(--accent),var(--accent-2));display:grid;place-items:center;color:var(--on-accent);font-family:var(--mono);font-size:9px;font-weight:700}
+.winbar-mark{width:18px;height:18px;border-radius:5px;background:linear-gradient(150deg,var(--accent),var(--accent-2));display:grid;place-items:center;color:var(--on-accent)}
+.winbar-mark svg{width:15px;height:15px;display:block} /* mark uses currentColor → honors each theme's --on-accent */
 .winbar-title{font-size:12.5px;font-weight:600;color:var(--text-dim);letter-spacing:.01em}
 .winbar-ctx{flex:1;display:flex;align-items:center;justify-content:center;min-width:0;padding:0 12px}
 /* Command search — a palette trigger styled as a search field, centered in the draggable winbar. */
