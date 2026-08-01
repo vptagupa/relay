@@ -824,7 +824,7 @@ async function deleteWorkspace(id: string): Promise<void> {
     const ws = await relay.getWorkspaceSnapshot(wsActiveId);
     await restoreWorkspaceSnapshot(ws);
     renderFiles(); updateMainView(); reflectSettings();
-    booting = false; persistWorkspace(true);
+    booting = false; persistWorkspace(true); settleDeeplink(); // a link buffered during the delete runs now
   } else {
     if (warmWs.includes(id)) await killWorkspaceShells(id); // kill its background shells before dropping it
     warmWs = warmWs.filter((w) => w !== id);

@@ -157,7 +157,8 @@ if (!isSquirrel) {
       if (win) { if (win.isMinimized()) win.restore(); win.show(); win.focus(); }
       routeDeeplink(extractDeeplink(argv));
     });
-    app.on('open-url', (_e, url) => { // macOS delivers links here
+    app.on('open-url', (e, url) => { // macOS delivers links here
+      e.preventDefault(); // we handle the scheme ourselves
       if (win) { win.show(); win.focus(); routeDeeplink(url); } else bootDeeplink = url;
     });
 
