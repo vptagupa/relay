@@ -562,7 +562,10 @@ async function killWorkspaceShells(id: string): Promise<void> {
   for (const t of snap.tabs) relay.ptyKill(t.id);
 }
 async function evictBeyondCap(): Promise<void> {
-  while (warmWs.length > WARM_CAP) await killWorkspaceShells(warmWs.shift()!);
+  const over = warmWs.length - WARM_CAP;
+  if (over <= 0) return;
+  const evict = warmWs.splice(0, over); // remove the oldest synchronously (before any await) so a concurrent switch can't race the list
+  for (const id of evict) await killWorkspaceShells(id);
 }
 
 // Rebuild the pane layout + terminals from a saved snapshot. Shared by boot and workspace switch;
