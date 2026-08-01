@@ -585,11 +585,13 @@ async function restoreWorkspaceSnapshot(ws: Workspace): Promise<void> {
   if ($('#agentPanel').classList.contains('show')) renderChat();
 }
 
-// Cold teardown for a switch: kill every terminal's shell, dispose its renderer, drop its tab node,
-// and reset to a single empty pane. Pane DOM elements are reused (never removed) so the E() cache
-// stays valid for the rebuild — only tab elements are dropped.
-function teardownAllTabs(): void {
-  for (const t of state.tabs) { relay.ptyKill(t.id); t.term.dispose(); t.el.remove(); }
+// Teardown for a switch. Keep-alive (Phase 2): DETACH each shell — it keeps running and buffering in
+// the main process, so switching back REATTACHES via ptyCreate and replays the live output (a dev
+// server never dies on a switch). Pass `kill` only when the workspace is being deleted. Either way,
+// dispose the xterm renderers + drop the tab nodes (frees DOM/WebGL); pane DOM is reused so the E()
+// cache stays valid for the rebuild — only tab elements are dropped.
+function teardownAllTabs(kill = false): void {
+  for (const t of state.tabs) { if (kill) relay.ptyKill(t.id); else relay.ptyDetach(t.id); t.term.dispose(); t.el.remove(); }
   state.tabs = [];
   state.layout = { g: 0 }; state.gv = ['', '', '', '']; state.focus = 0; state.active = ''; state.maxG = null;
   reconcilePanes(); // collapse the grid back to one empty pane (like closeTab's last-tab reset) before the rebuild
@@ -663,7 +665,7 @@ async function deleteWorkspace(id: string): Promise<void> {
   if (!(await confirmDialog('Delete workspace?', `“${def.name}” and its saved terminals will be removed — this can’t be undone.`, 'Delete'))) return;
   if (id === wsActiveId) {
     // Drop the active session WITHOUT saving its snapshot (it's being deleted), then open the first remaining one.
-    booting = true; teardownAllTabs();
+    booting = true; teardownAllTabs(true); // kill — this workspace's shells are gone for good
     wsDefs = wsDefs.filter((w) => w.id !== id);
     wsActiveId = wsDefs[0].id;
     relay.saveWorkspaceMeta(wsDefs, wsActiveId); // prunes the deleted workspace's snapshot from byId
