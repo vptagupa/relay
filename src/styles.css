@@ -4,87 +4,51 @@
   --shadow-sm:0 3px 12px -4px rgba(0,0,0,.6);
   --mono:ui-monospace,"SF Mono","Cascadia Code","JetBrains Mono",Menlo,Consolas,monospace;
   --sans:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif;
-  /* --r/--r-sm/--r-lg (shape), --glass/--chrome (depth) and --gap/--pad (space) are per-theme below */
+  /* --r/--r-sm/--r-lg (shape) and --gap/--pad (space) are per-theme below; --sel tints ::selection */
 }
-/* Graphite is the default palette (also on bare :root to avoid a flash before JS runs). */
-:root,:root[data-theme="graphite"]{
-  --bg:#0b0c0e;--surface:#121317;--surface-2:#171920;--surface-3:#1c1e24;--canvas:#0e0f12;
-  --border:#26282f;--border-strong:#343742;--text:#e8eaee;--text-dim:#a2a8b2;--muted:#6b7280;
-  --accent:#6e7bff;--accent-2:#8fd0ff;--accent-ghost:rgba(110,123,255,.14);--accent-line:rgba(110,123,255,.5);
-  --ok:#4ec46a;--err:#f0616a;--sel:rgba(110,123,255,.24);--on-accent:#0b0c0e;
-  --shadow:0 22px 60px -20px rgba(0,0,0,.62);
-  --r:6px;--r-sm:4px;--r-lg:10px;--glass:0px;--chrome:var(--surface);--gap:11px;--pad:9px; /* precise, compact, flat */
-}
-:root[data-theme="ember"]{
-  --bg:#15110d;--surface:#1d1712;--surface-2:#241c15;--surface-3:#2c2118;--canvas:#181310;
-  --border:#3a2c20;--border-strong:#493829;--text:#f4ebe0;--text-dim:#c7b6a2;--muted:#8a7461;
-  --accent:#f2a93b;--accent-2:#ffcf85;--accent-ghost:rgba(242,169,59,.14);--accent-line:rgba(242,169,59,.55);
-  --ok:#8bbf5f;--err:#e5644e;--sel:rgba(242,169,59,.24);--on-accent:#231604;
-  --shadow:0 22px 60px -20px rgba(0,0,0,.6);
-  --r:9px;--r-sm:6px;--r-lg:13px;--glass:0px;--chrome:var(--surface);--gap:14px;--pad:12px; /* warm, roomy/comfortable */
-}
-:root[data-theme="voltage"]{
-  --bg:#0a0713;--surface:#120c22;--surface-2:#170f2b;--surface-3:#1e1440;--canvas:#0c0819;
-  --border:#33215c;--border-strong:#402c66;--text:#ece6ff;--text-dim:#ab9de0;--muted:#6c5da8;
-  --accent:#ff2e97;--accent-2:#22d3ee;--accent-ghost:rgba(255,46,151,.16);--accent-line:rgba(255,46,151,.55);
-  --ok:#2bd9a6;--err:#ff4d6d;--sel:rgba(255,46,151,.26);--on-accent:#0a0713;
-  --shadow:0 22px 60px -20px rgba(0,0,0,.72),0 0 50px -24px rgba(34,211,238,.5);
-  --r:4px;--r-sm:3px;--r-lg:6px;--glass:0px;--chrome:var(--surface);--gap:10px;--pad:8px; /* sharp, tight, high-contrast */
-}
-:root[data-theme="aurora"]{
-  --bg:#0b1120;--surface:#151d31;--surface-2:#1b2438;--surface-3:#232e48;--canvas:#0d1426;
-  --border:#263149;--border-strong:#384662;--text:#eaf1ff;--text-dim:#aebbd6;--muted:#7683a0;
-  --accent:#a78bfa;--accent-2:#5eead4;--accent-ghost:rgba(167,139,250,.16);--accent-line:rgba(167,139,250,.5);
-  --ok:#34d399;--err:#fb7185;--sel:rgba(167,139,250,.26);--on-accent:#0b1120;
-  --shadow:0 24px 64px -22px rgba(3,7,25,.75);
-  --r:11px;--r-sm:8px;--r-lg:16px;--glass:14px;--chrome:color-mix(in srgb,var(--surface) 80%,transparent);--gap:16px;--pad:13px; /* soft, airy, frosted glass */
-}
-:root[data-theme="daylight"]{
-  --bg:#f5f6f8;--surface:#ffffff;--surface-2:#f2f4f7;--surface-3:#eef7f4;--canvas:#fbfcfd;
-  --border:#e4e7ec;--border-strong:#ccd3dd;--text:#161b22;--text-dim:#55606e;--muted:#8a94a3;
-  --accent:#0e7c66;--accent-2:#2563eb;--accent-ghost:rgba(14,124,102,.1);--accent-line:rgba(14,124,102,.34);
-  --ok:#15803d;--err:#dc2626;--sel:rgba(14,124,102,.16);--on-accent:#ffffff;
-  --shadow:0 24px 60px -26px rgba(20,40,60,.24);
-  --r:8px;--r-sm:5px;--r-lg:12px;--glass:0px;--chrome:var(--surface);--gap:13px;--pad:11px; /* crisp, open, normal density */
-}
-/* Aurora theme: a subtle violet→teal aurora behind the frosted chrome. */
-:root[data-theme="aurora"] body{background:linear-gradient(165deg,#0d1426,#0a0f1e)}
-:root[data-theme="aurora"] body::before{
-  content:"";position:fixed;inset:0;z-index:0;pointer-events:none;
-  background:radial-gradient(130% 100% at 8% -8%,rgba(139,92,246,.42),transparent 55%),radial-gradient(120% 110% at 102% 12%,rgba(45,212,191,.32),transparent 55%);
-}
-:root[data-theme="aurora"] .app{position:relative;z-index:1;background:transparent}
-/* Corners follow each theme's --r (Graphite 6px … Voltage 4px … Aurora 11px). */
+/* Themed text selection (DOM only — xterm draws its own selection on canvas). */
+::selection{background:var(--sel);color:var(--text)}
+::-moz-selection{background:var(--sel);color:var(--text)}
+/* Theme palettes (colors + space/shape) are applied to <html> from the registry in src/themes.ts
+   (renderer applyThemeVars). Nothing here defines a theme; components below just read the vars.
+   Corners follow each theme's --r. */
 .bvb,.hb,.lib-item,.file-item,.ctx-menu,.bkm-pop,.model-menu,.pal{border-radius:var(--r)}
 .modal,.agent,.history{border-radius:var(--r-lg)}
 .tb-btn,.bv-input,.set,.btn{border-radius:var(--r-sm)}
-/* Aurora only: translucent white-frost panels floating over the gradient (all other themes flat). */
-:root[data-theme="aurora"] .sidebar,:root[data-theme="aurora"] .winbar,:root[data-theme="aurora"] .titlebar,:root[data-theme="aurora"] .tabstrip,:root[data-theme="aurora"] .pane-tabs,:root[data-theme="aurora"] .statusbar,:root[data-theme="aurora"] .agent-head{
-  background:rgba(255,255,255,.05);backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);border-color:rgba(255,255,255,.1);
-}
-/* Blocks view must still COVER the live xterm — give it its own aurora gradient (not transparent,
-   or the terminal underneath bleeds through) and float frosted cards on it. */
-:root[data-theme="aurora"] .term-area{background:transparent}
-:root[data-theme="aurora"] .blocks-view{background:linear-gradient(170deg,#0f1834,#0b1020)}
-:root[data-theme="aurora"] .bv-scroll,:root[data-theme="aurora"] .bv-input{background:transparent}
-:root[data-theme="aurora"] .bvb{background:rgba(255,255,255,.06);border-color:rgba(255,255,255,.12);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px)}
-:root[data-theme="aurora"] .bvb-cmd{background:rgba(255,255,255,.07);border-bottom-color:rgba(255,255,255,.1)}
-:root[data-theme="aurora"] .lib-item:hover,:root[data-theme="aurora"] .file-item:hover{background:rgba(255,255,255,.07)}
-:root[data-theme="aurora"] .tab.active{background:rgba(255,255,255,.06);box-shadow:inset 0 -2px 0 var(--accent-2)} /* teal underline, per artifact */
-:root[data-theme="aurora"] .p-path{color:#7cc6ff} /* light-blue path, per artifact */
 
-/* Daylight: the strip goes light-grey so the white active tab clearly pops (was near-invisible). */
-:root[data-theme="daylight"] .pane-tabs{background:var(--surface-2)}
-:root[data-theme="daylight"] .tab.active{background:var(--surface);box-shadow:inset 0 -2.5px 0 var(--accent),0 1px 4px rgba(20,40,60,.08)}
-:root[data-theme="daylight"] .tab:hover:not(.active){background:rgba(20,30,45,.04)}
+/* ============================ THEME TRAITS ============================ */
+/* Structural add-ons a theme opts into via `traits` in themes.ts → `.t-<trait>` on <html>.
+   They read the theme's own vars, so they work for ANY theme that declares the trait. */
 
-/* Voltage: neon synthwave identity — faint grid canvas, accent glow, cyan second accent. */
-:root[data-theme="voltage"] .blocks-view{background-color:var(--canvas);background-image:linear-gradient(rgba(124,77,255,.11) 1px,transparent 1px),linear-gradient(90deg,rgba(124,77,255,.11) 1px,transparent 1px);background-size:26px 26px}
-:root[data-theme="voltage"] .tab.active{box-shadow:inset 0 -2px 0 var(--accent),0 0 14px -3px var(--accent)}
-:root[data-theme="voltage"] .winbar-mark,:root[data-theme="voltage"] .mark,:root[data-theme="voltage"] .agent-ava{box-shadow:0 0 12px rgba(255,46,151,.55)}
-:root[data-theme="voltage"] .bv-prompt,:root[data-theme="voltage"] .bvb-p{text-shadow:0 0 10px rgba(255,46,151,.5)}
-:root[data-theme="voltage"] .p-path{color:var(--accent-2)} /* cyan path, per artifact */
-:root[data-theme="voltage"] .tt-model,:root[data-theme="voltage"] .lib-pill{box-shadow:0 0 10px -2px var(--accent-line)}
+/* .t-glass — translucent frosted panels floating over a gradient of the theme's accents. */
+.t-glass body{background:linear-gradient(165deg,var(--canvas),var(--bg))}
+.t-glass body::before{content:"";position:fixed;inset:0;z-index:0;pointer-events:none;
+  background:radial-gradient(130% 100% at 8% -8%,color-mix(in srgb,var(--accent) 42%,transparent),transparent 55%),radial-gradient(120% 110% at 102% 12%,color-mix(in srgb,var(--accent-2) 32%,transparent),transparent 55%)}
+.t-glass .app{position:relative;z-index:1;background:transparent}
+.t-glass .sidebar,.t-glass .winbar,.t-glass .titlebar,.t-glass .tabstrip,.t-glass .pane-tabs,.t-glass .statusbar,.t-glass .agent-head{
+  background:rgba(255,255,255,.05);backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);border-color:rgba(255,255,255,.1)}
+/* blocks view still covers the live xterm (its own gradient), with frosted cards on top */
+.t-glass .term-area{background:transparent}
+.t-glass .blocks-view{background:linear-gradient(170deg,var(--surface),var(--bg))}
+.t-glass .bv-scroll,.t-glass .bv-input{background:transparent}
+.t-glass .bvb{background:rgba(255,255,255,.06);border-color:rgba(255,255,255,.12);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px)}
+.t-glass .bvb-cmd{background:rgba(255,255,255,.07);border-bottom-color:rgba(255,255,255,.1)}
+.t-glass .lib-item:hover,.t-glass .file-item:hover{background:rgba(255,255,255,.07)}
+.t-glass .tab.active{background:rgba(255,255,255,.06);box-shadow:inset 0 -2px 0 var(--accent-2)}
+.t-glass .p-path{color:var(--path,var(--accent-2))} /* uses the theme's --path if set, else accent-2 */
+
+/* .t-neon — synthwave grid canvas, accent glow, and accent-2 as the second accent. */
+.t-neon .blocks-view{background-color:var(--canvas);background-image:linear-gradient(color-mix(in srgb,var(--accent) 12%,transparent) 1px,transparent 1px),linear-gradient(90deg,color-mix(in srgb,var(--accent) 12%,transparent) 1px,transparent 1px);background-size:26px 26px}
+.t-neon .tab.active{box-shadow:inset 0 -2px 0 var(--accent),0 0 14px -3px var(--accent)}
+.t-neon .winbar-mark,.t-neon .mark,.t-neon .agent-ava{box-shadow:0 0 12px color-mix(in srgb,var(--accent) 55%,transparent)}
+.t-neon .bv-prompt,.t-neon .bvb-p{text-shadow:0 0 10px color-mix(in srgb,var(--accent) 50%,transparent)}
+.t-neon .tt-model,.t-neon .lib-pill{box-shadow:0 0 10px -2px var(--accent-line)}
+.t-neon .p-path{color:var(--accent-2)}
+
+/* .t-light-tabs — grey tab strip so the white active tab clearly pops (light themes). */
+.t-light-tabs .pane-tabs{background:var(--surface-2)}
+.t-light-tabs .tab.active{background:var(--surface);box-shadow:inset 0 -2.5px 0 var(--accent),0 1px 4px rgba(20,40,60,.08)}
+.t-light-tabs .tab:hover:not(.active){background:rgba(20,30,45,.04)}
 *{box-sizing:border-box}
 html,body,#app{height:100%;margin:0}
 body{background:var(--bg);color:var(--text);font-family:var(--sans);font-size:14px;-webkit-font-smoothing:antialiased;overflow:hidden}
@@ -106,9 +70,16 @@ button{font-family:inherit;color:inherit;cursor:pointer;border:none;background:n
 /* custom window title bar (frameless window chrome) */
 .winbar{display:flex;align-items:stretch;height:34px;background:var(--surface);border-bottom:1px solid var(--border);-webkit-app-region:drag;user-select:none;flex:none}
 .winbar-brand{display:flex;align-items:center;gap:8px;padding:0 12px}
-.winbar-mark{width:18px;height:18px;border-radius:5px;background:linear-gradient(150deg,var(--accent),var(--accent-2));display:grid;place-items:center;color:var(--on-accent);font-family:var(--mono);font-size:9px;font-weight:700}
+.winbar-mark{width:18px;height:18px;border-radius:5px;background:linear-gradient(150deg,var(--accent),var(--accent-2));display:grid;place-items:center;color:var(--on-accent)}
+.winbar-mark svg{width:15px;height:15px;display:block} /* mark uses currentColor → honors each theme's --on-accent */
 .winbar-title{font-size:12.5px;font-weight:600;color:var(--text-dim);letter-spacing:.01em}
-.winbar-ctx{flex:1;display:flex;align-items:center;justify-content:center;min-width:0;padding:0 12px;font-size:11.5px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-variant-numeric:tabular-nums}
+.winbar-ctx{flex:1;display:flex;align-items:center;justify-content:center;min-width:0;padding:0 12px}
+/* Command search — a palette trigger styled as a search field, centered in the draggable winbar. */
+.winbar-search{-webkit-app-region:no-drag;display:flex;align-items:center;gap:8px;width:min(440px,100%);height:24px;padding:0 8px 0 10px;background:var(--surface-2);border:1px solid var(--border);border-radius:7px;color:var(--muted);font-size:11.5px;font-family:var(--sans);cursor:pointer;transition:border-color .12s,background .12s,color .12s}
+.winbar-search:hover{border-color:var(--border-strong);background:var(--surface-3);color:var(--text-dim)}
+.winbar-search-ic{flex:none;font-family:var(--mono);font-size:12.5px;line-height:1}
+.winbar-search-ph{flex:1;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.winbar-search .kbd{flex:none}
 .win-controls{display:flex;-webkit-app-region:no-drag}
 /* macOS: native traffic lights on the left — hide our controls, inset the brand */
 .winbar.mac .win-controls{display:none}
@@ -412,6 +383,10 @@ button{font-family:inherit;color:inherit;cursor:pointer;border:none;background:n
 .hist-export{width:34px;height:32px;border-radius:7px;display:grid;place-items:center;color:var(--text-dim);border:1px solid var(--border);background:var(--surface-2);font-size:14px;cursor:pointer}
 .hist-export:hover,.hist-filter:hover{border-color:var(--border-strong);color:var(--text)}
 .hist-list{flex:1;overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:9px}
+/* Children of these flex-column scroll lists must keep their natural height. An .hb/.hr-item with
+   overflow:hidden has an automatic min-size of 0, so with a long history flexbox shrinks every item
+   to fit the panel — collapsing blocks into empty bars — instead of scrolling. flex:none = scroll. */
+.hist-list>*,.hist-rail>*{flex:none}
 .hist-empty{padding:28px 16px;text-align:center;color:var(--muted);font-size:12.5px;line-height:1.7}
 .history .dim{color:var(--muted)}
 .hb{border:1px solid var(--border);border-radius:10px;background:var(--surface-2);overflow:hidden}
@@ -421,9 +396,9 @@ button{font-family:inherit;color:inherit;cursor:pointer;border:none;background:n
 .hb-cmd{font-family:var(--mono);font-size:12.5px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;min-width:0}
 .hb-meta{display:flex;align-items:center;gap:8px;flex:none;font-family:var(--mono);font-size:10.5px;color:var(--muted)}
 .hb-badge{flex:none;font:600 10.5px/1 var(--mono);padding:3px 7px;border-radius:99px}
-.hb-badge.ok{color:var(--c-green);background:var(--accent-ghost)}
-.hb-badge.fail{color:var(--c-red);background:rgba(207,34,46,.13)}
-.hb-badge.run{color:var(--c-blue)}
+.hb-badge.ok{color:var(--ok);background:var(--accent-ghost)}
+.hb-badge.fail{color:var(--err);background:rgba(207,34,46,.13)}
+.hb-badge.run{color:var(--accent-2)}
 .hb-chev{color:var(--muted);font-size:10px;flex:none;transition:transform .15s;cursor:pointer;padding:5px 7px;margin:-5px -3px;border-radius:6px}
 .hb-chev:hover{color:var(--text);background:var(--surface-3)}
 .hb.collapsed .hb-chev{transform:rotate(-90deg)}
@@ -443,7 +418,7 @@ button{font-family:inherit;color:inherit;cursor:pointer;border:none;background:n
 .hr-item{display:flex;align-items:center;gap:7px;padding:6px 7px;border-radius:6px;cursor:pointer;font:11.5px/1.2 var(--mono);color:var(--text-dim);white-space:nowrap;overflow:hidden}
 .hr-item:hover{background:var(--surface-2);color:var(--text)}
 .hr-dot{width:7px;height:7px;border-radius:50%;flex:none}
-.hr-dot.ok{background:var(--c-green)}.hr-dot.fail{background:var(--c-red)}.hr-dot.run{background:var(--accent)}.hr-dot.int{background:var(--c-blue)}
+.hr-dot.ok{background:var(--ok)}.hr-dot.fail{background:var(--err)}.hr-dot.run{background:var(--accent)}.hr-dot.int{background:var(--accent-2)}
 .hr-t{overflow:hidden;text-overflow:ellipsis}
 /* export format menu */
 .hist-exwrap{position:relative}
@@ -529,6 +504,17 @@ body.tabdrag .dz{display:block;pointer-events:auto}
 /* bookmarks */
 .bkm-pop{position:fixed;z-index:90;display:none}
 .bkm-pop.show{display:block}
+/* cd directory autocomplete popup (blocks-view command bar) */
+.cd-pop{position:fixed;z-index:88;display:none;background:var(--surface);border:1px solid var(--border-strong);border-radius:var(--r-lg);box-shadow:var(--shadow);padding:5px;max-width:460px}
+.cd-pop.show{display:block}
+.cd-hint{font:10px/1 var(--mono);color:var(--muted);letter-spacing:.02em;padding:5px 9px 7px}
+.cd-list{max-height:248px;overflow-y:auto;display:flex;flex-direction:column;gap:1px}
+.cd-item{display:flex;align-items:center;gap:8px;padding:6px 9px;border-radius:7px;cursor:pointer;font:12.5px/1.2 var(--mono);color:var(--text-dim);white-space:nowrap;overflow:hidden}
+.cd-item .fi{flex:none;color:var(--accent-2);opacity:.9}
+.cd-item .cd-nm{flex:1;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.cd-item .cd-nm b{color:var(--text);font-weight:700}
+.cd-item:hover{background:var(--surface-2)}
+.cd-item.sel{background:var(--accent-ghost);color:var(--text)}
 .bkm-pop button{background:var(--accent);color:var(--on-accent);border:none;border-radius:8px;padding:7px 12px;font:600 12px/1 var(--sans);cursor:pointer;box-shadow:var(--shadow)}
 .bkm-pop button:hover{filter:brightness(1.08)}
 #bkmList{gap:10px}

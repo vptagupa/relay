@@ -32,7 +32,8 @@ export interface TermBlock {
 export type BlockEvent =
   | { type: 'start'; block: TermBlock }
   | { type: 'update'; block: TermBlock }
-  | { type: 'end'; block: TermBlock };
+  | { type: 'end'; block: TermBlock }
+  | { type: 'cwd'; cwd: string };        // the shell's working directory changed (every prompt)
 
 const ESC = '\x1b';
 const BEL = '\x07';
@@ -47,6 +48,9 @@ export function createShellParser(emit: (e: BlockEvent) => void): { feed(chunk: 
   let updateTimer: ReturnType<typeof setTimeout> | null = null;
 
   function startBlock(command: string): void {
+    // A new command starting while the previous block is still open means its 133;D end-marker was
+    // lost/garbled — close that orphan (exit unknown) so it can't spin "running" forever.
+    if (cur) endBlock(cur.exitCode);
     cur = { id: `b${++n}`, command, output: '', cwd: lastCwd, exitCode: null, startedAt: Date.now(), endedAt: null, running: true };
     emit({ type: 'start', block: cur });
   }
@@ -83,6 +87,7 @@ export function createShellParser(emit: (e: BlockEvent) => void): { feed(chunk: 
     } else if (body.startsWith('633;P;Cwd=')) {
       lastCwd = body.slice('633;P;Cwd='.length);
       if (cur) cur.cwd = lastCwd;
+      emit({ type: 'cwd', cwd: lastCwd }); // let the renderer track the live cwd (drives cd autocomplete + status bar)
     } else if (body.startsWith('633;E;')) {
       startBlock(body.slice('633;E;'.length)); // the clean command line
       mode = 'idle'; // output starts at the following 133;C

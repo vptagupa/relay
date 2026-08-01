@@ -8,14 +8,15 @@ const config: ForgeConfig = {
     // node-pty is a native module — keep its files on disk (unpacked from the asar)
     // so the compiled binaries can be loaded at runtime.
     asar: { unpack: '**/node_modules/node-pty/**' },
-    name: 'Relay', // exe + shortcut display name
+    name: 'Slayer T',          // product / display name (Task Manager, Add/Remove, userData folder)
+    executableName: 'SlayerT', // space-free exe → SlayerT.exe
     icon: './assets/icon', // packager appends .ico (Win) / .icns (macOS) automatically
   },
   // node-pty ships ABI-stable N-API prebuilds, so no from-source rebuild is needed
   // (which also avoids node-gyp failing on toolchains it can't auto-detect).
   rebuildConfig: { onlyModules: [] },
   makers: [
-    { name: '@electron-forge/maker-squirrel', config: { name: 'relay_terminal', setupIcon: './assets/icon.ico' } }, // Windows .exe installer → installs to relay_terminal
+    { name: '@electron-forge/maker-squirrel', config: { name: 'SlayerT', title: 'Slayer T', authors: 'Slayer T', exe: 'SlayerT.exe', setupExe: 'Slayer T Setup.exe', setupIcon: './assets/icon.ico' } }, // Windows .exe installer → installs to %LOCALAPPDATA%\SlayerT
     { name: '@electron-forge/maker-zip', config: {}, platforms: ['darwin'] },                // macOS
     { name: '@electron-forge/maker-deb', config: { options: { icon: './assets/icon.png' } } }, // Linux
     { name: '@electron-forge/maker-rpm', config: { options: { icon: './assets/icon.png' } } }, // Linux

@@ -28,6 +28,7 @@ let readFailed = false;                    // relay.json existed but couldn't be
 let writeChain: Promise<void> = Promise.resolve(); // serialize writes so overlapping saves can't interleave
 let lastMain: string | null = null;        // last relay.json content written (skip redundant writes)
 let lastWs: string | null = null;          // last workspace.json content written
+let wsFinalized = false;                    // the sync shutdown flush wrote the final workspace — no async write may overwrite it
 
 function normWs(w: unknown): Workspace {
   const wsp = (w && typeof w === 'object' ? w : {}) as Record<string, unknown>;
@@ -80,11 +81,19 @@ async function flushMain(): Promise<void> {
 // workspace.json — the frequently-changing open-tab snapshot, so a workspace save no longer
 // re-serializes the whole Library.
 async function flushWorkspace(): Promise<void> {
-  if (!cache) return;
+  if (!cache || wsFinalized) return; // once the shutdown sync flush ran, its snapshot is final
   const data = JSON.stringify(cache.workspace);
   if (data === lastWs) return;
   lastWs = data;
-  writeChain = writeChain.then(() => atomicWrite(wsFile(), data)).catch(() => { lastWs = null; });
+  // Not the shared atomicWrite: re-check wsFinalized right before the rename so an async write that
+  // was already in-flight when the sync shutdown flush ran can't rename its (now stale) temp over it.
+  writeChain = writeChain.then(async () => {
+    if (wsFinalized) return;
+    const f = wsFile(); const tmp = `${f}.${process.pid}.tmp`;
+    await fs.writeFile(tmp, data, 'utf8');
+    if (wsFinalized) { try { await fs.unlink(tmp); } catch { /* ignore */ } return; }
+    await fs.rename(tmp, f);
+  }).catch(() => { lastWs = null; });
   await writeChain;
 }
 
@@ -145,10 +154,10 @@ export async function setWorkspace(ws: Workspace): Promise<void> {
 export function setWorkspaceSync(ws: Workspace): void {
   if (!cache) return;
   cache.workspace = ws;
+  wsFinalized = true; // set BEFORE writing: this is the last word on close, so any queued/in-flight async flush skips its rename
   try {
     const f = wsFile(); const tmp = `${f}.sync.tmp`;
     writeFileSync(tmp, JSON.stringify(ws), 'utf8');
     renameSync(tmp, f); // atomic replace, like the async path
-    lastWs = null; // let later async flushes re-evaluate
   } catch { /* best-effort on shutdown */ }
 }

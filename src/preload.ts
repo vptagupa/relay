@@ -5,7 +5,7 @@ import type { Settings, SavedSession, AgentEvent, ApprovalRequest, ChatTurn, Wor
 // Real identity for the Blocks-view prompt line (user@host + home for ~ shortening).
 function sysInfo() { try { return { user: os.userInfo().username, host: os.hostname().split('.')[0], home: os.homedir() }; } catch { return { user: 'user', host: 'relay', home: '' }; } }
 
-type BlockEvt = { type: 'start' | 'update' | 'end'; block: Block };
+type BlockEvt = { type: 'start' | 'update' | 'end'; block: Block } | { type: 'cwd'; cwd: string };
 
 // The only surface the renderer can touch. No Node, no fs, no API keys here.
 const api = {

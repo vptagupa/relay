@@ -34,20 +34,27 @@ function logFatal(kind: string, err: unknown): void {
 // Async, size-capped mirror for renderer console messages — a warn-in-a-loop must never block the
 // main thread on sync disk I/O or grow the log without bound.
 let rendererLogBytes = 0;
+let rendererLogCapped = false; // once renderer console output hits the cap we STOP appending — never
+// truncate the shared log, or we'd wipe the logFatal crash records this file exists to preserve.
 async function logRenderer(text: string): Promise<void> {
+  if (rendererLogCapped) return;
   try {
     const f = path.join(app.getPath('userData'), 'relay-error.log');
     const line = `[${new Date().toISOString()}] renderer-console: ${text}\n`;
     rendererLogBytes += line.length;
-    if (rendererLogBytes > 1_000_000) { await fsp.writeFile(f, line); rendererLogBytes = line.length; } // reset when large
-    else await fsp.appendFile(f, line);
+    if (rendererLogBytes > 1_000_000) {
+      rendererLogCapped = true; // append-only so crash records survive; bound growth by suppressing, not wiping
+      await fsp.appendFile(f, `[${new Date().toISOString()}] renderer-console: (further renderer output suppressed — exceeded 1 MB this session)\n`);
+      return;
+    }
+    await fsp.appendFile(f, line);
   } catch { /* diagnostics only */ }
 }
 process.on('uncaughtException', (err) => {
   logFatal('uncaughtException', err);
   // Never pop a modal dialog during a Squirrel maintenance run — it would keep the process
   // alive and lock files, failing the (un)install. In that case just log and move on.
-  if (!isSquirrel) { try { dialog.showErrorBox('Relay — unexpected error', (err as { stack?: string })?.stack || String(err)); } catch { /* ignore */ } }
+  if (!isSquirrel) { try { dialog.showErrorBox('Slayer T — unexpected error', (err as { stack?: string })?.stack || String(err)); } catch { /* ignore */ } }
 });
 process.on('unhandledRejection', (reason) => logFatal('unhandledRejection', reason));
 
@@ -70,7 +77,7 @@ function createWindow(): void {
     minWidth: 780,
     minHeight: 480,
     backgroundColor: '#0e1116',
-    title: 'Relay',
+    title: 'Slayer T',
     icon: path.join(__dirname, '..', '..', 'assets', 'icon.png'), // dev taskbar icon (packaged uses the exe icon)
     // Native chrome off; our custom bar is drawn in the renderer.
     // Windows/Linux: fully frameless. macOS: keep the native traffic lights (hiddenInset).

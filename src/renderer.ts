@@ -2,7 +2,22 @@ import '@xterm/xterm/css/xterm.css';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { SerializeAddon } from '@xterm/addon-serialize';
-import { MODELS, modelById, DEFAULT_MODEL } from './shared/models';
+import { MODELS, modelById } from './shared/models';
+import { themeById, DEFAULT_THEME } from './themes';
+import { activeTheme, activeXterm, TEMPLATES, curTemplate, applyThemeVars, renderThemeGrid } from './theme';
+import { sortSessions } from './library';
+import { type LNode, type Split, isLeaf, leaves, replaceLeaf, removeLeaf, siblingLeaf, isValidLayout } from './layout';
+import { stripAnsi, collapseCR } from './ansi';
+import { type ExFmt, realBlock, cmdText, cmdRaw, buildExport } from './blocks-text';
+import { $, E, esc, uid, svgIcon } from './dom';
+import { appHtml } from './template';
+import { type Tab, state, activeTab, gTab, groupTabs } from './state';
+import { type PalAction, initPalette, openPalette, closePalette, renderPalette, palMove, palRun, palClick } from './palette';
+import { groupOf, addToList, reorderBookmark, removeGroup } from './bookmarks';
+import { toast, makeEditable } from './ui';
+import { filterHistory, railEntry } from './history';
+import { initFiles, renderFiles } from './files';
+import { initBlockView, blockHtml, bvBlockHtml, collapsedBlocks, fmtDur } from './block-view';
 import type { Settings, SavedSession, AgentEvent, ApprovalRequest, ChatTurn, OpenTab, Block, Bookmark, BookmarkGroup } from './shared/types';
 
 // TEMP DIAG: surface full stacks (minify is off) for the init crash.
@@ -10,289 +25,47 @@ window.addEventListener('error', (e) => console.error('WERR ' + ((e as ErrorEven
 window.addEventListener('unhandledrejection', (e) => console.error('WREJ ' + ((e as PromiseRejectionEvent).reason?.stack || String((e as PromiseRejectionEvent).reason))));
 
 const relay = (window as any).relay;
-const $ = <T extends HTMLElement = HTMLElement>(s: string) => document.querySelector(s) as T;
-const uid = () => (crypto as any).randomUUID();
-const esc = (s: string) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]!));
-const svgIcon = (id: string, sz = 16) => `<svg width="${sz}" height="${sz}" aria-hidden="true"><use href="#${id}"/></svg>`; // artifact line-icon set
+// $, E, esc, uid, svgIcon — shared DOM/render primitives — live in ./dom (imported above).
 
-interface Tab { id: string; name: string; model: string; cwd: string; libId?: string; term: Terminal; fit: FitAddon; ser: SerializeAddon; el: HTMLElement; lastCols?: number; lastRows?: number; tabBg?: string; tabFg?: string; bodyBg?: string; bodyFg?: string; chat: ChatTurn[]; blocks: Block[]; bkNonce: string; cmdHistory: string[]; histIdx: number; liveInteractive: boolean; group: number; }
-
-const state = {
-  tabs: [] as Tab[],
-  active: '' as string,
-  gv: ['', '', '', ''] as string[],      // visible tab id per group slot
-  groups: 1,                             // number of open groups/panes (derived from layout leaves)
-  focus: 0,                              // which group has focus
-  layout: { g: 0 } as LNode,             // nested split tree (leaves = pane indices)
-  maxG: null as null | number,           // a group temporarily maximized (fills the pane grid)
-  settings: { workspace: null, defaultModel: DEFAULT_MODEL, autoApprove: false, autoSave: true, theme: 'dark', template: 'graphite', sidebarCollapsed: false, toolbarShown: false, librarySort: 'recent', librarySplit: 0.4, sidebarWidth: 260, hasKey: {} } as Settings,
-  library: [] as SavedSession[],
-  history: [] as ChatTurn[],
-  browsePath: '' as string,
-  browse: null as null | { path: string; parent: string; entries: { name: string; isDir: boolean }[] },
-};
-const activeTab = () => state.tabs.find((t) => t.id === state.active);
-// A nested split layout: a leaf (pane index) or a split of two child nodes.
-type LNode = { g: number } | { d: 'row' | 'col'; r: number; a: LNode; b: LNode };
-const isLeaf = (n: LNode): n is { g: number } => 'g' in n;
-function leaves(n: LNode): number[] { return isLeaf(n) ? [n.g] : [...leaves(n.a), ...leaves(n.b)]; }
-function firstLeaf(n: LNode): number { return isLeaf(n) ? n.g : firstLeaf(n.a); }
-function replaceLeaf(n: LNode, g: number, repl: LNode): LNode { return isLeaf(n) ? (n.g === g ? repl : n) : { ...n, a: replaceLeaf(n.a, g, repl), b: replaceLeaf(n.b, g, repl) }; }
-function removeLeaf(n: LNode, g: number): LNode { if (isLeaf(n)) return n; if (isLeaf(n.a) && n.a.g === g) return n.b; if (isLeaf(n.b) && n.b.g === g) return n.a; return { ...n, a: removeLeaf(n.a, g), b: removeLeaf(n.b, g) }; }
-function siblingLeaf(n: LNode, g: number): number | null { if (isLeaf(n)) return null; if (isLeaf(n.a) && n.a.g === g) return firstLeaf(n.b); if (isLeaf(n.b) && n.b.g === g) return firstLeaf(n.a); return siblingLeaf(n.a, g) ?? siblingLeaf(n.b, g); }
-// Validate an untrusted (persisted / hand-edited) layout tree: well-formed nodes, leaf groups in
-// range 0..3, unique, and each present in `allowed` (groups that actually have restored tabs).
-function isValidLayout(n: unknown, allowed: Set<number>): n is LNode {
-  const seen = new Set<number>();
-  const walk = (x: any): boolean => {
-    if (x && typeof x === 'object' && typeof x.g === 'number') {
-      if (!Number.isInteger(x.g) || x.g < 0 || x.g >= 4 || seen.has(x.g) || !allowed.has(x.g)) return false;
-      seen.add(x.g); return true;
-    }
-    if (x && typeof x === 'object' && (x.d === 'row' || x.d === 'col') && typeof x.r === 'number') return walk(x.a) && walk(x.b);
-    return false;
-  };
-  return walk(n);
+// App state — the `state` singleton, the Tab type, and the derived accessors activeTab/gTab/groupTabs
+// live in ./state (imported above). The nested split tree (LNode) + its ops live in ./layout.
+// The four panes are generated by paneHtml() with consistent IDs (pane-N, tabs-N, host-N,
+// blocks-N, scroll-N, cmd-N, prompt-N), so every per-pane selector array derives from one helper.
+const NPANES = 4;
+const selArr = (prefix: string) => Array.from({ length: NPANES }, (_, g) => `#${prefix}-${g}`);
+const PANE = selArr('pane');
+const P_TABS = selArr('tabs');
+const P_HOST = selArr('host');
+const P_VIEW = selArr('blocks');
+const P_SCROLL = selArr('scroll');
+const P_CMD = selArr('cmd');
+const P_PROMPT = selArr('prompt');
+// One pane's markup — generated instead of copy-pasted 4×. Pane 0 holds the empty-state and has
+// no close button; panes 1..3 start hidden and get a close (✕) button.
+function paneHtml(g: number): string {
+  const close = g > 0 ? `<button class="pane-x" data-closeg="${g}" title="Close this pane">✕</button>` : '';
+  const empty = g === 0 ? `<div class="term-empty" id="termEmpty">No terminal yet.<br>Press + to open one.</div>` : '';
+  return `<div class="pane" id="pane-${g}" data-g="${g}"${g > 0 ? ' style="display:none"' : ''}>
+    <div class="pane-tabs"><div class="tabs" id="tabs-${g}"></div><button class="pane-add" data-g="${g}" title="New terminal in this pane"><svg width="15" height="15"><use href="#i-plus"/></svg></button><button class="pane-max" data-g="${g}" title="Maximize / restore pane"><svg width="14" height="14"><use href="#i-max"/></svg></button>${close}</div>
+    <div class="pane-body">
+      <div class="term-host" id="host-${g}">${empty}</div>
+      <div class="blocks-view" id="blocks-${g}"><div class="bv-scroll" id="scroll-${g}"></div><div class="bv-input"><span class="bv-prompt" id="prompt-${g}">❯</span><textarea class="bv-cmd" id="cmd-${g}" rows="1" placeholder="type a command — Enter runs · Shift+Enter new line · ↑ recalls" spellcheck="false" autocomplete="off"></textarea></div></div>
+    </div>
+  </div>`;
 }
-const gTab = (g: number) => state.tabs.find((t) => t.id === state.gv[g]);   // visible tab of group g
-const groupTabs = (g: number) => state.tabs.filter((t) => t.group === g);   // all tabs in group g
-// Per-pane DOM selectors, indexed by group slot 0..3.
-const PANE = ['#primaryPane', '#tilePane', '#pane2', '#pane3'];
-const P_TABS = ['#tabs', '#tabs1', '#tabs2', '#tabs3'];
-const P_HOST = ['#termHost', '#tileHost', '#host2', '#host3'];
-const P_VIEW = ['#blocksView', '#blocksView2', '#blocksView3', '#blocksView4'];
-const P_SCROLL = ['#bvScroll', '#bvScroll2', '#bvScroll3', '#bvScroll4'];
-const P_CMD = ['#bvCmd', '#bvCmd2', '#bvCmd3', '#bvCmd4'];
-const P_PROMPT = ['#bvPrompt', '#bvPrompt2', '#bvPrompt3', '#bvPrompt4'];
-// Persistent per-pane elements are reused as split leaves. Once a pane is removed from the
-// grid (during a layout rebuild) it's detached from the document, so querySelector can no
-// longer find it. Resolve each ONCE while still attached and cache the live reference.
-const _elCache: Record<string, HTMLElement> = {};
-const E = (sel: string): HTMLElement => (_elCache[sel] ??= document.querySelector(sel) as HTMLElement);
+
+// Apply the default theme's CSS vars synchronously BEFORE the template renders — no flash, and
+// no need for per-theme blocks in the stylesheet (boot() re-applies the persisted theme).
+applyThemeVars(themeById(DEFAULT_THEME));
 
 /* ----------------------------- layout ----------------------------- */
-$('#app').innerHTML = `
-  <svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
-    <symbol id="i-term" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6l5 6-5 6"/><path d="M13 18h7"/></symbol>
-    <symbol id="i-folder" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></symbol>
-    <symbol id="i-file" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></symbol>
-    <symbol id="i-split" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M12 4v16"/></symbol>
-    <symbol id="i-splitdown" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 12h18"/></symbol>
-    <symbol id="i-plus" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></symbol>
-    <symbol id="i-search" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4-4"/></symbol>
-    <symbol id="i-star" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><path d="M12 3l2.6 5.6 6 .8-4.4 4.2 1.1 6L12 17l-5.3 2.6 1.1-6L3.4 9.4l6-.8z"/></symbol>
-    <symbol id="i-spark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v4M12 17v4M3 12h4M17 12h4M6 6l2.5 2.5M15.5 15.5 18 18M18 6l-2.5 2.5M8.5 15.5 6 18"/></symbol>
-    <symbol id="i-grid" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></symbol>
-    <symbol id="i-save" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v11M8 11l4 4 4-4"/><path d="M5 20h14"/></symbol>
-    <symbol id="i-clear" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6H9.5L4 12l5.5 6H20a1 1 0 0 0 1-1V7a1 1 0 0 0-1-1z"/><path d="M13 10l4 4M17 10l-4 4"/></symbol>
-    <symbol id="i-max" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M8 4H5a1 1 0 0 0-1 1v3M16 4h3a1 1 0 0 1 1 1v3M8 20H5a1 1 0 0 1-1-1v-3M16 20h3a1 1 0 0 1 1-1v-3"/></symbol>
-    <symbol id="i-up" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V6M6 12l6-6 6 6"/></symbol>
-  </defs></svg>
-  <div class="app">
-    <div class="winbar">
-      <div class="winbar-brand"><span class="winbar-mark">›_</span><span class="winbar-title">Relay</span></div>
-      <div class="winbar-ctx" id="winCtx"></div>
-      <div class="win-controls">
-        <button class="win-btn" id="winMin" aria-label="Minimize"><svg viewBox="0 0 10 10"><line x1="1" y1="5" x2="9" y2="5"/></svg></button>
-        <button class="win-btn" id="winMax" aria-label="Maximize"><svg viewBox="0 0 10 10"><rect x="1.5" y="1.5" width="7" height="7"/></svg></button>
-        <button class="win-btn close" id="winClose" aria-label="Close"><svg viewBox="0 0 10 10"><line x1="1" y1="1" x2="9" y2="9"/><line x1="9" y1="1" x2="1" y2="9"/></svg></button>
-      </div>
-    </div>
-    <header class="titlebar">
-      <div class="brand"><span class="ws" id="wsLabel">No folder open</span></div>
-      <div class="tb-spacer"></div>
-      <button class="tb-btn" id="btnOpen">Open folder…</button>
-      <button class="tb-btn" id="btnHistory" title="Command history (⌘⇧H)">☰ History</button>
-      <button class="tb-btn accent" id="btnAgent">✦ Agent <span class="kbd">⌘J</span></button>
-      <button class="tb-btn" id="btnPalette" title="Command palette"><span class="kbd">⌘K</span></button>
-      <button class="tb-btn tb-icon" id="btnTheme" title="Toggle theme">◐</button>
-      <button class="tb-btn tb-icon" id="btnSettings" title="Settings">⚙</button>
-    </header>
-    <div class="main" id="main">
-      <aside class="sidebar">
-        <div class="side-view side-library" id="viewLibrary">
-          <div class="side-head"><span class="side-title">Library</span>
-            <select class="lib-sort" id="libSort" title="Sort saved terminals">
-              <option value="recent">Recent</option><option value="name">Name</option><option value="model">Model</option><option value="custom">Custom</option>
-            </select></div>
-          <div class="side-list" id="libList"></div>
-        </div>
-        <div class="side-divider" id="sideDivider" title="Drag to resize"></div>
-        <div class="side-view side-files" id="viewFiles">
-          <div class="side-head"><span class="side-title">Files</span><button class="files-up" id="filesUp" title="Parent folder"><svg width="15" height="15"><use href="#i-up"/></svg></button></div>
-          <div class="files-path" id="filesPath">—</div>
-          <div class="side-list" id="fileList"></div>
-        </div>
-        <div class="side-foot"><span class="sdot" id="storeDot"></span><span id="storeText">Saved on this machine</span></div>
-      </aside>
-      <div class="main-divider" id="mainDivider" title="Drag to resize sidebar"></div>
-      <section class="term-area">
-        <div class="tabstrip">
-          <button class="side-toggle" id="btnSidebar" title="Toggle library">▤</button>
-          <button class="tab-add" id="btnNewTab" title="New terminal (⌘T)"><svg width="16" height="16"><use href="#i-plus"/></svg></button>
-          <button class="tab-add" id="btnAddFolder" title="Open folder in new terminal (⌘⇧O)"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h5l2 2h9a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1z"/><line x1="12" y1="11" x2="12" y2="16"/><line x1="9.5" y1="13.5" x2="14.5" y2="13.5"/></svg></button>
-          <button class="tab-add cc" id="btnClaude" title="Launch Claude Code (⌘⇧L)"><svg width="16" height="16"><use href="#i-spark"/></svg></button>
-          <div class="tt-spacer"></div>
-          <button class="tt-model" id="tabModelBtn" title="Model for this terminal"><span class="dot"></span><span id="tabModelName">Opus 5</span> ▾</button>
-          <button class="tt-icon blocks-toggle on" id="btnBlocks" title="Blocks view / Classic terminal (⌘⇧B)"><svg width="16" height="16"><use href="#i-grid"/></svg></button>
-          <button class="tt-icon" id="btnSplitRight" title="Split right — clone this terminal into a pane on the right (⌘⇧E)"><svg width="16" height="16"><use href="#i-split"/></svg></button>
-          <button class="tt-icon" id="btnSplitDown" title="Split down — clone this terminal into a pane below"><svg width="16" height="16"><use href="#i-splitdown"/></svg></button>
-          <button class="tt-icon" id="btnBookmarks" title="Bookmarks — highlight a command to save one (⌘⇧K)"><svg width="16" height="16"><use href="#i-star"/></svg></button>
-          <button class="tt-icon" id="btnSave" title="Save to Library (⌘S)"><svg width="16" height="16"><use href="#i-save"/></svg></button>
-          <button class="tt-icon" id="btnClear" title="Clear terminal (⌃L)"><svg width="16" height="16"><use href="#i-clear"/></svg></button>
-        </div>
-        <div class="term-stack">
-         <div class="pane-grid" id="paneGrid">
-          <div class="pane primary" id="primaryPane" data-g="0">
-            <div class="pane-tabs"><div class="tabs" id="tabs"></div><button class="pane-add" data-g="0" title="New terminal in this pane"><svg width="15" height="15"><use href="#i-plus"/></svg></button><button class="pane-max" data-g="0" title="Maximize / restore pane"><svg width="14" height="14"><use href="#i-max"/></svg></button></div>
-            <div class="pane-body">
-              <div class="term-host" id="termHost"><div class="term-empty" id="termEmpty">No terminal yet.<br>Press + to open one.</div></div>
-              <div class="blocks-view" id="blocksView"><div class="bv-scroll" id="bvScroll"></div><div class="bv-input"><span class="bv-prompt" id="bvPrompt">❯</span><textarea class="bv-cmd" id="bvCmd" rows="1" placeholder="type a command — Enter runs · Shift+Enter new line · ↑ recalls" spellcheck="false" autocomplete="off"></textarea></div></div>
-            </div>
-          </div>
-          <div class="pane tile" id="tilePane" data-g="1" style="display:none">
-            <div class="pane-tabs"><div class="tabs" id="tabs1"></div><button class="pane-add" data-g="1" title="New terminal in this pane"><svg width="15" height="15"><use href="#i-plus"/></svg></button><button class="pane-max" data-g="1" title="Maximize / restore pane"><svg width="14" height="14"><use href="#i-max"/></svg></button><button class="pane-x" data-closeg="1" title="Close this pane">✕</button></div>
-            <div class="pane-body">
-              <div class="term-host" id="tileHost"></div>
-              <div class="blocks-view" id="blocksView2"><div class="bv-scroll" id="bvScroll2"></div><div class="bv-input"><span class="bv-prompt" id="bvPrompt2">❯</span><textarea class="bv-cmd" id="bvCmd2" rows="1" placeholder="type a command — Enter runs · Shift+Enter new line" spellcheck="false" autocomplete="off"></textarea></div></div>
-            </div>
-          </div>
-          <div class="pane" id="pane2" data-g="2" style="display:none">
-            <div class="pane-tabs"><div class="tabs" id="tabs2"></div><button class="pane-add" data-g="2" title="New terminal in this pane"><svg width="15" height="15"><use href="#i-plus"/></svg></button><button class="pane-max" data-g="2" title="Maximize / restore pane"><svg width="14" height="14"><use href="#i-max"/></svg></button><button class="pane-x" data-closeg="2" title="Close this pane">✕</button></div>
-            <div class="pane-body">
-              <div class="term-host" id="host2"></div>
-              <div class="blocks-view" id="blocksView3"><div class="bv-scroll" id="bvScroll3"></div><div class="bv-input"><span class="bv-prompt" id="bvPrompt3">❯</span><textarea class="bv-cmd" id="bvCmd3" rows="1" placeholder="type a command — Enter runs · Shift+Enter new line" spellcheck="false" autocomplete="off"></textarea></div></div>
-            </div>
-          </div>
-          <div class="pane" id="pane3" data-g="3" style="display:none">
-            <div class="pane-tabs"><div class="tabs" id="tabs3"></div><button class="pane-add" data-g="3" title="New terminal in this pane"><svg width="15" height="15"><use href="#i-plus"/></svg></button><button class="pane-max" data-g="3" title="Maximize / restore pane"><svg width="14" height="14"><use href="#i-max"/></svg></button><button class="pane-x" data-closeg="3" title="Close this pane">✕</button></div>
-            <div class="pane-body">
-              <div class="term-host" id="host3"></div>
-              <div class="blocks-view" id="blocksView4"><div class="bv-scroll" id="bvScroll4"></div><div class="bv-input"><span class="bv-prompt" id="bvPrompt4">❯</span><textarea class="bv-cmd" id="bvCmd4" rows="1" placeholder="type a command — Enter runs · Shift+Enter new line" spellcheck="false" autocomplete="off"></textarea></div></div>
-            </div>
-          </div>
-         </div>
-        </div>
-      </section>
-    </div>
-    <footer class="statusbar">
-      <div class="st-seg accent"><span class="dot"></span><span id="stSession">—</span></div>
-      <div class="st-seg" id="stCwd">~</div>
-      <div class="st-spacer"></div>
-      <div class="st-seg btn" id="stAutosave"><span class="dot"></span><span id="stAutosaveText">Auto-save on</span></div>
-      <div class="st-seg btn" id="stAgent"><span class="dot"></span>agent · Opus 5</div>
-      <div class="st-seg tnum" id="stClock">--:--</div>
-    </footer>
-  </div>
-
-  <aside class="agent" id="agentPanel">
-    <div class="agent-head">
-      <div class="agent-ava">✦</div>
-      <div><div class="agent-title">Agent</div>
-        <button class="model-btn" id="modelBtn"><span class="dot"></span><span id="modelBtnName">Opus 5</span> ▾</button></div>
-      <button class="agent-close" id="btnAgentClose">✕</button>
-    </div>
-    <div class="agent-body" id="agentBody"></div>
-    <div class="agent-inputwrap">
-      <textarea class="agent-input" id="agentInput" rows="1" placeholder="Ask the agent to read or change files in this project…"></textarea>
-      <button class="agent-send" id="agentSend">➤</button>
-    </div>
-  </aside>
-
-  <aside class="history" id="historyPanel" role="dialog" aria-label="Command history">
-    <div class="hist-head"><div class="hist-title">☰ History</div><button class="hist-x" id="btnHistoryClose" aria-label="Close">✕</button></div>
-    <div class="hist-tools">
-      <div class="hist-search"><span>⌕</span><input id="histSearch" placeholder="Search commands & output" spellcheck="false"></div>
-      <button class="hist-filter" id="histFilter" title="Show failures only">✗ Fails</button>
-      <div class="hist-exwrap"><button class="hist-export" id="histExport" title="Export session">⤓</button><div class="hist-exmenu" id="histExMenu"><button data-fmt="md">Markdown</button><button data-fmt="json">JSON</button><button data-fmt="txt">Plain text</button><button data-fmt="html">HTML</button></div></div>
-    </div>
-    <div class="hist-body"><aside class="hist-rail" id="histRail"></aside><div class="hist-list" id="histList"></div></div>
-  </aside>
-
-  <div class="model-menu" id="modelMenu" role="listbox"></div>
-  <div class="ctx-menu" id="tabMenu" role="menu"></div>
-  <div class="ctx-menu" id="tabsMenu" role="menu"></div>
-  <div class="color-pop" id="colorPop"></div>
-
-  <div class="palette" id="palette">
-    <div class="pal-input-wrap"><span class="pal-ic">⌘</span><input class="pal-input" id="palInput" placeholder="Type a command or search sessions…" spellcheck="false"></div>
-    <div class="pal-list" id="palList"></div>
-  </div>
-
-  <div class="scrim" id="scrim"></div>
-
-  <div class="modal" id="settings">
-    <div class="modal-head">Settings</div>
-    <div class="modal-sub">API keys are encrypted with your OS keychain and stay in the app's main process — never in this window.</div>
-    <div class="modal-body">
-      <div class="field"><label>Theme</label><div class="theme-grid" id="themeGrid"></div><div class="fhint">Recolors the whole app and the terminal. Quick-cycle with the ◐ button in the title bar.</div></div>
-      <div class="field"><label>Project folder</label><div class="row"><input id="setWs" readonly placeholder="none"><button class="set" id="setWsBtn">Choose…</button></div></div>
-      <div class="field"><label>Anthropic API key (Claude) <span class="opt">optional</span></label><div class="row"><input id="keyAnthropic" type="password" placeholder="blank = use your Claude Code login"><button class="set" data-key="anthropic">Save</button></div><div class="state off" id="stateAnthropic">not set</div><div class="fhint">Leave blank to sign in with your Claude subscription / Claude Code login (or an environment key). Paste a key only to override.</div></div>
-      <div class="field"><label>OpenAI API key (GPT)</label><div class="row"><input id="keyOpenai" type="password" placeholder="sk-…"><button class="set" data-key="openai">Save</button></div><div class="state off" id="stateOpenai">not set</div></div>
-      <div class="field"><label>Google AI API key (Gemini)</label><div class="row"><input id="keyGoogle" type="password" placeholder="AIza…"><button class="set" data-key="google">Save</button></div><div class="state off" id="stateGoogle">not set</div></div>
-      <label class="chk"><input type="checkbox" id="autoApprove"> Auto-approve agent file writes & commands (skip the confirm step)</label>
-      <label class="chk"><input type="checkbox" id="shellIntegration"> Command blocks — capture each command as a block in History (shell integration; applies to new terminals)</label>
-      <label class="chk"><input type="checkbox" id="blocksViewSet"> Blocks view — show commands as blocks in the main terminal (full-screen apps drop to the live terminal automatically)</label>
-      <label class="chk"><input type="checkbox" id="notifySet"> Notify me when a long command finishes while Relay isn't focused</label>
-    </div>
-    <div class="modal-foot"><button class="btn primary" id="settingsClose">Done</button></div>
-  </div>
-
-  <div class="approval" id="approval">
-    <div class="a-title" id="apTitle"></div>
-    <div class="a-detail" id="apDetail"></div>
-    <div class="a-foot"><button class="btn" id="apDeny">Deny</button><button class="btn primary" id="apAllow">Allow</button></div>
-  </div>
-
-  <aside class="history bookmarks" id="bookmarksPanel" role="dialog" aria-label="Bookmarks">
-    <div class="hist-head"><div class="hist-title">★ Bookmarks</div><button class="hist-x" id="btnBookmarksClose" aria-label="Close">✕</button></div>
-    <div class="hist-tools"><button class="hist-filter" id="bkmAddGroup" title="Add a group">＋ Group</button></div>
-    <div class="hist-list" id="bkmList"></div>
-  </aside>
-
-  <div class="bkm-pop" id="bkmPop"><button id="bkmAdd">★ Bookmark</button></div>
-
-  <div class="confirm" id="confirmBox" role="alertdialog" aria-labelledby="cfTitle">
-    <div class="a-title" id="cfTitle">Close terminal?</div>
-    <div class="a-detail" id="cfDetail"></div>
-    <div class="a-foot"><button class="btn" id="cfCancel">Cancel</button><button class="btn primary" id="cfOk">Close</button></div>
-  </div>
-
-  <div class="toast-wrap" id="toastWrap"></div>
-`;
+$('#app').innerHTML = appHtml(Array.from({ length: NPANES }, (_, g) => paneHtml(g)).join(''));
 // Prime the per-pane element cache now, while every pane is still attached to the grid.
 for (const s of ['#termEmpty', ...PANE, ...P_TABS, ...P_HOST, ...P_VIEW, ...P_SCROLL, ...P_CMD, ...P_PROMPT]) E(s);
 
 /* ----------------------------- helpers ----------------------------- */
-// One xterm palette per theme template — so the terminal itself follows the chosen theme
-// (a light "Daylight" terminal, a neon "Voltage" one, etc.), not just the app chrome.
-const ANSI_DARK = {
-  black: '#3b3f4a', red: '#ff7b72', green: '#7ee787', yellow: '#f0c674', blue: '#6cb6ff',
-  magenta: '#d2a8ff', cyan: '#56d4dd', white: '#d8dee7', brightBlack: '#66717f',
-  brightRed: '#ffa198', brightGreen: '#a2f2b0', brightYellow: '#f7d774', brightBlue: '#89bdff',
-  brightMagenta: '#e0bbff', brightCyan: '#7ee0e8', brightWhite: '#ffffff',
-};
-const ANSI_LIGHT = {
-  black: '#161b22', red: '#c0341d', green: '#15803d', yellow: '#9a6700', blue: '#1d4ed8',
-  magenta: '#9333ea', cyan: '#0e7490', white: '#55606e', brightBlack: '#8a94a3',
-  brightRed: '#dc2626', brightGreen: '#16a34a', brightYellow: '#b45309', brightBlue: '#2563eb',
-  brightMagenta: '#a855f7', brightCyan: '#0891b2', brightWhite: '#161b22',
-};
-const XTERM_THEMES: Record<string, Record<string, string>> = {
-  graphite: { background: '#0e0f12', foreground: '#e8eaee', cursor: '#6e7bff', cursorAccent: '#0e0f12', selectionBackground: 'rgba(110,123,255,.28)', ...ANSI_DARK },
-  ember: { background: '#181310', foreground: '#f4ebe0', cursor: '#f2a93b', cursorAccent: '#181310', selectionBackground: 'rgba(242,169,59,.26)', ...ANSI_DARK },
-  voltage: { background: '#0c0819', foreground: '#ece6ff', cursor: '#ff2e97', cursorAccent: '#0c0819', selectionBackground: 'rgba(255,46,151,.28)', ...ANSI_DARK, magenta: '#ff6ac1', cyan: '#22d3ee', brightMagenta: '#ff8fd0', brightCyan: '#67e8f9' },
-  aurora: { background: '#0d1426', foreground: '#eaf1ff', cursor: '#a78bfa', cursorAccent: '#0d1426', selectionBackground: 'rgba(167,139,250,.28)', ...ANSI_DARK },
-  daylight: { background: '#fbfcfd', foreground: '#161b22', cursor: '#0e7c66', cursorAccent: '#fbfcfd', selectionBackground: 'rgba(14,124,102,.2)', ...ANSI_LIGHT },
-};
-function activeXterm(): Record<string, string> { return XTERM_THEMES[state.settings.template] || XTERM_THEMES.graphite; }
-let toastT: ReturnType<typeof setTimeout> | null = null;
-function toast(msg: string, ok = false) {
-  const w = $('#toastWrap');
-  w.innerHTML = `<div class="toast ${ok ? 'ok' : ''}"><span class="tdot"></span>${esc(msg)}</div>`;
-  if (toastT) clearTimeout(toastT); // don't let a prior toast's timer clear this newer one early
-  toastT = setTimeout(() => { w.innerHTML = ''; toastT = null; }, 2600);
-}
+// Theme runtime (activeTheme/activeXterm/TEMPLATES/curTemplate/applyThemeVars/renderThemeGrid) lives
+// in ./theme; the registry in ./themes. toast + makeEditable (shared UI helpers) live in ./ui.
 // Move the item identified by dragId to before/after targetId within arr.
 function reorderById<T>(arr: T[], getId: (x: T) => string, dragId: string, targetId: string, before: boolean) {
   const from = arr.findIndex((x) => getId(x) === dragId); if (from < 0) return;
@@ -302,39 +75,10 @@ function reorderById<T>(arr: T[], getId: (x: T) => string, dragId: string, targe
   if (!before) to += 1;
   arr.splice(to, 0, item);
 }
-function makeEditable(el: HTMLElement, commit: (v: string) => void, onDone?: () => void) {
-  const dragAnc = el.closest('[draggable="true"]') as HTMLElement | null; // don't drag while renaming
-  if (dragAnc) dragAnc.draggable = false;
-  const original = el.textContent || '';
-  el.setAttribute('contenteditable', 'true');
-  el.focus();
-  const sel = window.getSelection(); const r = document.createRange();
-  r.selectNodeContents(el); sel?.removeAllRanges(); sel?.addRange(r);
-  let finished = false;
-  const done = (save: boolean) => {
-    if (finished) return; finished = true;
-    el.onblur = null; el.onkeydown = null; // detach BEFORE blur so cancel can't re-commit via onblur
-    el.removeAttribute('contenteditable');
-    if (dragAnc) dragAnc.draggable = true;
-    if (save) commit(el.textContent?.trim() || ''); else el.textContent = original; // Escape restores the old text
-    el.blur();
-    onDone?.(); // always runs, on commit OR cancel
-  };
-  el.onkeydown = (e) => {
-    if (e.key === 'Enter') { e.preventDefault(); done(true); }
-    else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); done(false); } // don't let Escape also close the panel
-  };
-  el.onblur = () => done(true);
-}
 function shortCwd(c: string) { const h = state.settings.workspace; return c && h && c.startsWith(h) ? '…' + (c.slice(h.length) || '/') : (c || '~'); }
-// Real identity + a home-relative cwd for the Blocks-view prompt line (agent@host ~/path $).
-const SYS = ((relay.sys as { user: string; host: string; home: string }) || { user: 'user', host: 'relay', home: '' });
-function promptCwd(c: string) {
-  let p = (c || SYS.home || '~').replace(/\\/g, '/');
-  const home = (SYS.home || '').replace(/\\/g, '/');
-  if (home && (p === home || p.startsWith(home + '/'))) p = '~' + p.slice(home.length);
-  return p;
-}
+// The command-block renderers (blockHtml/bvBlockHtml) + their prompt identity live in ./block-view;
+// hand it the real user/host/home from the preload bridge for the Blocks-view prompt line.
+initBlockView(relay.sys as { user: string; host: string; home: string } | undefined);
 // Last path segment of a folder path (handles both \ and /), for naming a folder's terminal.
 function baseName(p: string): string { const s = p.replace(/[\\/]+$/, ''); const i = Math.max(s.lastIndexOf('\\'), s.lastIndexOf('/')); return (i >= 0 ? s.slice(i + 1) : s) || s; }
 
@@ -348,7 +92,7 @@ async function newTab(seed?: Partial<OpenTab> & { libId?: string }, activate = t
   const fit = new FitAddon(); const ser = new SerializeAddon();
   term.loadAddon(fit); term.loadAddon(ser);
   const el = document.createElement('div'); el.className = 'xterm-wrap hidden'; // hidden first — avoids overlap flash
-  E('#termHost').appendChild(el); // temporary mount; reconcile/activate moves it to the right pane host
+  E(P_HOST[0]).appendChild(el); // temporary mount; reconcile/activate moves it to the right pane host
   term.open(el);
   const cwd = seed?.cwd || state.settings.workspace || '';
   // Open into the focused pane (or the tab's saved group on restore); never a stale/hidden pane.
@@ -358,7 +102,24 @@ async function newTab(seed?: Partial<OpenTab> & { libId?: string }, activate = t
   state.tabs.push(tab);
   applyTermColors(tab); // honor any restored per-terminal body/text colors
   term.onData((d) => relay.ptyWrite(id, d));
-  term.onSelectionChange(() => { if (state.active === id) refreshPill(undefined, undefined, true); }); // show the ★ pill for terminal selections
+  // Shift+Enter → send a literal newline so multiline TUIs (e.g. Claude Code) insert a line instead
+  // of submitting; xterm otherwise emits the same \r as plain Enter. Plain Enter is unchanged.
+  term.attachCustomKeyEventHandler((e) => {
+    if (e.type === 'keydown' && e.key === 'Enter' && e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
+      e.preventDefault(); relay.ptyWrite(id, '\n'); return false; // suppress xterm's default \r
+    }
+    // Ctrl+B is a global app shortcut (toggle sidebar). Ignore it here — returning false stops xterm
+    // from emitting ^B (\x02) to the shell WITHOUT canceling the event, so it still bubbles up to the
+    // document keydown handler that does the toggle. Otherwise a focused terminal swallows the chord.
+    if (e.type === 'keydown' && (e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'b') {
+      return false;
+    }
+    return true;
+  });
+  // Only (re)show the pill while a selection actually exists. A full-screen TUI (Claude Code) redraws
+  // constantly and clears the xterm selection, which would otherwise fire this with an empty selection
+  // and hide the pill the instant it appeared. Real dismissal is click-away / Escape / after save.
+  term.onSelectionChange(() => { if (state.active === id && (term.getSelection() || '').trim()) refreshPill(undefined, undefined, true); });
   let saveT: any;
   term.onData(() => { clearTimeout(saveT); saveT = setTimeout(persistWorkspace, 1500); }); // keep the persisted snapshot fresh
   if (activate) {
@@ -426,7 +187,7 @@ function renderNode(n: LNode): HTMLElement {
   box.append(a, makeDivider(n), b);
   return box;
 }
-function makeDivider(n: { d: 'row' | 'col'; r: number; a: LNode; b: LNode }): HTMLElement {
+function makeDivider(n: Split): HTMLElement {
   const d = document.createElement('div'); d.className = 'pane-divider ' + (n.d === 'row' ? 'rowdir' : 'coldir');
   d.addEventListener('dblclick', () => toggleMaxGroup(state.focus));
   d.addEventListener('mousedown', (e) => {
@@ -783,14 +544,8 @@ async function toggleAutosave() {
 }
 
 /* ----------------------------- library ----------------------------- */
-function sortedLibrary(): SavedSession[] {
-  const s = state.settings.librarySort;
-  if (s === 'custom') return [...state.library]; // manual drag order (stored array order)
-  return [...state.library].sort((a, b) =>
-    s === 'name' ? a.name.localeCompare(b.name)
-      : s === 'model' ? (modelById(a.model).name.localeCompare(modelById(b.model).name) || a.name.localeCompare(b.name))
-        : b.lastUsed - a.lastUsed);
-}
+// Pure sort lives in ./library; this reads the current list + mode from state.
+const sortedLibrary = (): SavedSession[] => sortSessions(state.library, state.settings.librarySort);
 function renderLibrary() {
   const el = $('#libList');
   if (!state.library.length) { el.innerHTML = '<div class="lib-empty">No saved terminals yet.<br>Open one and press ⤓ Save.</div>'; return; }
@@ -831,20 +586,7 @@ function flushTabToLibrary(t: Tab) {
 }
 
 /* ----------------------------- file browser (follows the active terminal) ----------------------------- */
-async function renderFiles() {
-  const target = state.browsePath || activeTab()?.cwd || state.settings.workspace || '';
-  const res = await relay.fsList(target);
-  const el = $('#fileList');
-  if (res.error) { el.innerHTML = `<div class="lib-empty">${esc(res.error)}</div>`; return; }
-  state.browse = res; state.browsePath = res.path;
-  $('#filesPath').textContent = res.path || '—'; $('#filesPath').title = res.path;
-  const rows = res.entries.map((e: { name: string; isDir: boolean }) => `
-    <div class="file-item" data-fpath="${esc(res.path + '/' + e.name)}" data-dir="${e.isDir}">
-      <span class="file-ic ${e.isDir ? 'dir' : ''}">${svgIcon(e.isDir ? 'i-folder' : 'i-file', 15)}</span><span class="file-name">${esc(e.name)}</span>
-    </div>`).join('');
-  const note = res.truncated ? `<div class="lib-empty">Showing first ${res.entries.length.toLocaleString()} items — folder is larger.</div>` : '';
-  el.innerHTML = (rows || '<div class="lib-empty">(empty folder)</div>') + note;
-}
+// The Files sidebar (renderFiles + navigate/open wiring) lives in ./files — imported above.
 function openSession(s: SavedSession) {
   // If this Library entry is already open in a tab, just focus it — don't duplicate.
   const open = state.tabs.find((t) => (t.libId && t.libId === s.id) || (!!s.termId && t.id === s.termId));
@@ -891,26 +633,14 @@ function reflectModel() {
 }
 
 /* ----------------------------- theme + sidebar + status ----------------------------- */
-// The five selectable design templates (palette + xterm theme). Graphite is the default.
-const TEMPLATES: { id: string; name: string; c1: string; c2: string }[] = [
-  { id: 'graphite', name: 'Graphite', c1: '#0b0c0e', c2: '#6e7bff' },
-  { id: 'ember', name: 'Ember', c1: '#15110d', c2: '#f2a93b' },
-  { id: 'voltage', name: 'Voltage', c1: '#0a0713', c2: '#ff2e97' },
-  { id: 'aurora', name: 'Aurora', c1: '#0b1120', c2: '#a78bfa' },
-  { id: 'daylight', name: 'Daylight', c1: '#eef1f5', c2: '#0e7c66' },
-];
-const curTemplate = () => state.settings.template || 'graphite';
+// applyTheme/setTemplate/cycleTemplate stay here: they re-tint live terminals and persist the choice.
+// The pure theme lookups + var-writing + picker rendering live in ./theme (imported above).
 function applyTheme() {
-  document.documentElement.setAttribute('data-theme', curTemplate());
+  applyThemeVars(activeTheme());
   for (const t of state.tabs) { applyTermColors(t); t.term.refresh(0, t.term.rows - 1); } // re-tint every live terminal
 }
 async function setTemplate(id: string) { state.settings = await relay.patchSettings({ template: id as Settings['template'] }); applyTheme(); reflectSettings(); }
 async function cycleTemplate() { const i = TEMPLATES.findIndex((t) => t.id === curTemplate()); await setTemplate(TEMPLATES[(i + 1) % TEMPLATES.length].id); }
-function renderThemeGrid() {
-  const cur = curTemplate();
-  $('#themeGrid').innerHTML = TEMPLATES.map((t) =>
-    `<button class="theme-sw ${t.id === cur ? 'on' : ''}" data-tpl="${t.id}" title="${t.name}"><span class="pv"><i style="background:${t.c1}"></i><i style="background:${t.c2}"></i></span><span class="nm">${t.name}${t.id === 'graphite' ? ' · default' : ''}</span></button>`).join('');
-}
 function applySidebar() { $('#main').classList.toggle('collapsed', state.settings.sidebarCollapsed); const t = activeTab(); if (t) setTimeout(() => { t.fit.fit(); relay.ptyResize(t.id, t.term.cols, t.term.rows); }, 210); }
 function applyToolbar() { document.querySelector('.titlebar')?.classList.toggle('shown', state.settings.toolbarShown); }
 // Size the Library section from the saved fraction of the sidebar height; Files fills the rest.
@@ -929,8 +659,6 @@ function updateStatus() {
   const cwd = t?.cwd || state.settings.workspace || '';
   $('#stCwd').textContent = shortCwd(cwd);
   $('#wsLabel').textContent = state.settings.workspace || 'No folder open';
-  const folder = cwd ? (cwd.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || '') : '';
-  $('#winCtx').textContent = [folder, t?.name].filter(Boolean).join('  ·  ');
 }
 function tickClock() { const d = new Date(); $('#stClock').textContent = String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0'); }
 
@@ -993,58 +721,14 @@ async function sendAgent() {
 /* ----------------------------- command history (blocks) ----------------------------- */
 let histFilterFail = false;
 let histQuery = '';
-// Blocks the user has collapsed (by block id). Kept out of the DOM so it survives the
-// Blocks-view re-renders that rebuild innerHTML — otherwise a collapse would flicker back open.
-const collapsedBlocks = new Set<string>();
-function stripAnsi(s: string): string {
-  return s.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '').replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '').replace(/\x1b[=>()][0-9A-Za-z]?/g, '');
-}
-// Collapse carriage-return overwrites (progress bars: "10%\r20%\r30%") to the last write per line,
-// so they don't concatenate into one giant line. Normalize CRLF first so real line endings survive.
-function collapseCR(s: string): string {
-  return s.replace(/\r\n/g, '\n').split('\n').map((line) => { const i = line.lastIndexOf('\r'); return i >= 0 ? line.slice(i + 1) : line; }).join('\n');
-}
-function fmtDur(ms: number): string { return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(ms < 10000 ? 1 : 0)}s`; }
-// Map an xterm 256-color index to a hex string (16 base + 6×6×6 cube + 24 greys).
-function xterm256(n: number): string {
-  if (n < 16) return ['#0b0e13', '#ff7b72', '#7ee787', '#f0b429', '#6cb6ff', '#d2a8ff', '#56d4dd', '#d8dee7', '#66717f', '#ff7b72', '#7ee787', '#f0b429', '#6cb6ff', '#d2a8ff', '#56d4dd', '#ffffff'][n];
-  if (n >= 232) { const v = 8 + (n - 232) * 10; return `rgb(${v},${v},${v})`; }
-  const c = n - 16, r = Math.floor(c / 36), g = Math.floor((c % 36) / 6), b = c % 6;
-  const q = (x: number) => (x ? x * 40 + 55 : 0);
-  return `rgb(${q(r)},${q(g)},${q(b)})`;
-}
-// Render command output (raw, with ANSI) to safe HTML — SGR color/bold become styled spans;
-// cursor/erase/OSC control sequences are stripped. Used by the Blocks (Warp-style) main view.
-function ansiToHtml(raw: string): string {
-  const FG: Record<number, string> = { 30: '#66717f', 31: '#ff7b72', 32: '#7ee787', 33: '#f0b429', 34: '#6cb6ff', 35: '#d2a8ff', 36: '#56d4dd', 37: '#d8dee7', 90: '#8b98a6', 91: '#ff7b72', 92: '#7ee787', 93: '#f0b429', 94: '#6cb6ff', 95: '#d2a8ff', 96: '#56d4dd', 97: '#ffffff' };
-  const s = raw.replace(/\r(?!\n)/g, '')
-    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '')       // OSC
-    .replace(/\x1b\[[0-9;?]*[@-ln-~]/g, '')                   // CSI except SGR ('m')
-    .replace(/\x1b[=>()#][0-9A-Za-z]?/g, '');                 // charset/mode escapes
-  const escd = (t: string) => t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  let html = ''; const cur: { c?: string; b?: boolean } = {};
-  const re = /\x1b\[([0-9;]*)m|([^\x1b]+)/g; let m: RegExpExecArray | null;
-  while ((m = re.exec(s))) {
-    if (m[2] !== undefined) {
-      if (cur.c || cur.b) html += `<span style="${cur.c ? `color:${cur.c};` : ''}${cur.b ? 'font-weight:600;' : ''}">${escd(m[2])}</span>`;
-      else html += escd(m[2]);
-    } else {
-      const codes = (m[1] || '0').split(';').map((x) => parseInt(x || '0', 10));
-      for (let i = 0; i < codes.length; i++) { const c = codes[i];
-        if (c === 0) { cur.c = undefined; cur.b = false; }
-        else if (c === 1) cur.b = true;
-        else if (c === 22) cur.b = false;
-        else if (c === 39) cur.c = undefined;
-        else if (FG[c]) cur.c = FG[c];
-        else if (c === 38) { if (codes[i + 1] === 5) { cur.c = xterm256(codes[i + 2] || 0); i += 2; } else if (codes[i + 1] === 2) { cur.c = `rgb(${codes[i + 2] || 0},${codes[i + 3] || 0},${codes[i + 4] || 0})`; i += 4; } }
-      }
-    }
-  }
-  return html;
-}
+// collapsedBlocks + fmtDur + the block renderers (blockHtml/bvBlockHtml) live in ./block-view.
+// ANSI text helpers live in ./ansi (renderer still uses stripAnsi/collapseCR directly).
 // Structured command blocks stream in from the shell-integration parser (main process).
-relay.onPtyBlock((id: string, ev: { type: 'start' | 'update' | 'end'; block: Block }) => {
+relay.onPtyBlock((id: string, ev: { type: 'start' | 'update' | 'end'; block: Block } | { type: 'cwd'; cwd: string }) => {
   const t = state.tabs.find((x) => x.id === id); if (!t) return;
+  // The shell reported its working directory (fires each prompt) — keep the tab's cwd live so the
+  // cd autocomplete lists the *current* folder and the status bar stays accurate after a `cd`.
+  if (ev.type === 'cwd') { if (ev.cwd && ev.cwd !== t.cwd) { t.cwd = ev.cwd; if (state.active === id) updateStatus(); } return; }
   // Namespace the parser's per-run ids (b1, b2, …) with a per-tab nonce so a fresh shell's
   // blocks never collide with blocks restored from a previous run of the same terminal.
   const bid = t.bkNonce + ':' + ev.block.id;
@@ -1074,62 +758,11 @@ function maybeNotify(t: Tab, b: Block) {
     n.onclick = () => { relay.winFocus?.(); switchTab(t.id); };
   } catch { /* notifications unavailable */ }
 }
-function blockHtml(b: Block, color = false): string {
-  const badge = b.running ? '<span class="hb-badge run">running…</span>'
-    : b.exitCode === 0 ? '<span class="hb-badge ok">✓ 0</span>'
-    : b.exitCode != null ? `<span class="hb-badge fail">✗ ${b.exitCode}</span>` : '';
-  const dur = b.endedAt && b.startedAt ? fmtDur(b.endedAt - b.startedAt) : '';
-  const d = new Date(b.startedAt); const clock = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
-  const cmd = stripAnsi(b.command).replace(/[\r\n]+/g, ' ').trim();
-  if (b.interactive) {
-    return `<div class="hb interactive" data-bid="${b.id}">
-      <div class="hb-head"><span class="hb-p" style="color:var(--c-blue)">◧</span><span class="hb-cmd">${cmd ? esc(cmd) : 'interactive session'}</span><span class="hb-meta">${dur ? `<span>${dur}</span>` : ''}<span>${clock}</span></span>${badge}</div>
-      <div class="hb-int">Interactive full-screen session — ran live in the terminal (screen not captured as history).</div>
-      <div class="hb-actions"><button data-act="copycmd">Copy cmd</button><button data-act="rerun">Re-run</button><button data-act="pin">${b.pinned ? '★ Pinned' : '☆ Pin'}</button><button data-act="share">Share</button></div>
-    </div>`;
-  }
-  const plain = collapseCR(stripAnsi(b.output)).trim();
-  const out = color ? ansiToHtml(collapseCR(b.output)) : esc(plain);
-  const failed = b.exitCode != null && b.exitCode !== 0;
-  return `<div class="hb${collapsedBlocks.has(b.id) ? ' collapsed' : ''}${b.pinned ? ' pin' : ''}" data-bid="${b.id}">
-    <div class="hb-head"><span class="hb-p">❯</span><span class="hb-cmd">${cmd ? esc(cmd) : '<span class="dim">prompt</span>'}</span><span class="hb-meta">${dur ? `<span>${dur}</span>` : ''}<span>${clock}</span></span>${badge}<span class="hb-chev" data-act="collapse" title="Collapse / expand">▾</span></div>
-    <div class="hb-out">${plain ? out : '<span class="dim">(no output)</span>'}</div>
-    <div class="hb-actions"><button data-act="copycmd">Copy cmd</button><button data-act="copyout">Copy output</button><button data-act="rerun">Re-run</button><button data-act="pin">${b.pinned ? '★ Pinned' : '☆ Pin'}</button><button data-act="share">Share</button>${failed ? '<button data-act="fix" class="fix">Ask agent to fix</button>' : ''}</div>
-  </div>`;
-}
-// Blocks-view (Warp-style transcript) renderer — matches the artifact: a colored
-// `user@host ~/path $ command` prompt line, output beneath, subtle left-accent band,
-// hover-revealed actions. Output keeps its ANSI colors.
-function bvBlockHtml(b: Block): string {
-  const cwd = b.cwd || activeTab()?.cwd || '';
-  const cmd = cmdRaw(b); // display exactly as typed — newlines preserved (CSS renders them)
-  const d = new Date(b.startedAt);
-  const clock = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`;
-  const dur = b.endedAt && b.startedAt ? fmtDur(b.endedAt - b.startedAt) : '';
-  // Artifact-style prompt line: user@host  ~/path  (accent user · dim host · path).
-  const prompt = `<span class="p-user">${esc(SYS.user)}</span><span class="p-at">@</span><span class="p-host">${esc(SYS.host)}</span> <span class="p-path">${esc(promptCwd(cwd))}</span>`;
-  if (b.interactive) {
-    return `<div class="bvb int" data-bid="${b.id}" title="ran in ${esc(promptCwd(cwd))}"><div class="bvb-cmd"><span class="bvb-line">${prompt} <span class="bvb-text">${esc(cmd || 'interactive')}</span></span><span class="bvb-badge int">tui</span><span class="bvb-ts">${clock}</span></div><div class="bvb-out"><span class="o-dim">— interactive full-screen session · ran live in the terminal —</span></div></div>`;
-  }
-  const failed = b.exitCode != null && b.exitCode !== 0;
-  const cls = b.running ? 'run' : failed ? 'fail' : 'ok';
-  const badge = b.running ? '<span class="bvb-badge run">running…</span>'
-    : failed ? `<span class="bvb-badge fail">exit ${b.exitCode}</span>`
-    : `<span class="bvb-badge ok">✓</span>`; // clean green check on success (duration moves to the hover timestamp)
-  const out = ansiToHtml(collapseCR(b.output));
-  return `<div class="bvb ${cls}" data-bid="${b.id}" title="ran in ${esc(promptCwd(cwd))}">
-    <div class="bvb-cmd"><span class="bvb-line">${prompt} <span class="bvb-text">${cmd ? esc(cmd) : ''}</span></span>${badge}<span class="bvb-ts">${dur ? esc(dur) + ' · ' : ''}${clock}</span>
-      <span class="bvb-actions"><button data-act="copyout" title="Copy output">copy</button><button data-act="rerun" title="Re-run">re-run</button><button data-act="pin" title="Pin">${b.pinned ? '★' : 'pin'}</button><button data-act="share" title="Export block">share</button>${failed ? '<button data-act="fix" title="Ask the agent to fix">ask agent</button>' : ''}</span>
-    </div>${out.trim() ? `<div class="bvb-out">${out}</div>` : ''}</div>`;
-}
-function realBlock(b: Block): boolean { return !!((b.command && b.command.trim()) || b.output.trim() || b.interactive); }
 function renderHistory() {
   const list = $('#histList'); const rail = $('#histRail'); const t = activeTab();
   if (!t) { list.innerHTML = '<div class="hist-empty">No terminal open.</div>'; rail.innerHTML = ''; return; }
   const q = histQuery.trim().toLowerCase();
-  let blocks = t.blocks.filter(realBlock);
-  if (histFilterFail) blocks = blocks.filter((b) => b.exitCode != null && b.exitCode !== 0);
-  if (q) blocks = blocks.filter((b) => (stripAnsi(b.command) + ' ' + stripAnsi(b.output)).toLowerCase().includes(q));
+  const blocks = filterHistory(t.blocks, histQuery, histFilterFail);
   if (!blocks.length) {
     rail.innerHTML = '';
     list.innerHTML = `<div class="hist-empty">${t.blocks.length ? 'No matching commands.' : 'Run a command to build history.<br><span class="dim">Blocks use shell integration (Settings → Command blocks).</span>'}</div>`;
@@ -1137,8 +770,7 @@ function renderHistory() {
   }
   // Outline rail — one entry per block, click to jump to it.
   rail.innerHTML = blocks.map((b) => {
-    const dot = b.running ? 'run' : b.interactive ? 'int' : b.exitCode === 0 ? 'ok' : b.exitCode != null ? 'fail' : 'ok';
-    const label = stripAnsi(b.command).replace(/[\r\n]+/g, ' ').trim() || (b.interactive ? '(interactive)' : 'prompt');
+    const { dot, label } = railEntry(b);
     return `<div class="hr-item" data-jump="${b.id}" title="${esc(label)}"><span class="hr-dot ${dot}"></span><span class="hr-t">${esc(label)}</span></div>`;
   }).join('');
   const prevTop = list.scrollTop;
@@ -1152,14 +784,13 @@ function closeHistory() { $('#historyPanel').classList.remove('show'); }
 /* ----------------------------- bookmarks (saved command snippets, grouped) ----------------------------- */
 function bookmarks(): Bookmark[] { return state.settings.bookmarks || []; }
 function bookmarkGroups(): BookmarkGroup[] { return state.settings.bookmarkGroups || []; }
-// The group a bookmark effectively belongs to (undefined if none / group was deleted).
-function groupOf(b: Bookmark): string | undefined { return bookmarkGroups().some((g) => g.id === b.groupId) ? b.groupId : undefined; }
+// Pure list algebra (groupOf/addToList/reorderBookmark/removeGroup) lives in ./bookmarks — imported above.
 const collapsedGroups = new Set<string>(); // collapsed group ids ('' = the Ungrouped section)
 
 async function addBookmark(raw: string) {
   const text = raw.replace(/\s+$/, '').replace(/^\s+/, '');
   if (!text) { toast('Nothing selected'); return; }
-  const list = [{ id: uid(), text, createdAt: Date.now() }, ...bookmarks().filter((b) => b.text !== text)].slice(0, 300);
+  const list = addToList(bookmarks(), text, uid(), Date.now());
   state.settings = await relay.patchSettings({ bookmarks: list });
   renderBookmarks(); toast('Bookmarked ★', true);
 }
@@ -1170,20 +801,9 @@ async function deleteBookmark(id: string) {
 // Move a bookmark to `gid` group and reorder it: drop `before`/after `beforeId` (a sibling),
 // or append to the group when no sibling target (dropped on empty group area).
 async function dropBookmark(id: string, gid: string | undefined, beforeId: string | null, before: boolean) {
-  const list = [...bookmarks()];
-  const di = list.findIndex((b) => b.id === id); if (di < 0) return;
-  const dragged = { ...list[di], groupId: gid };
-  list.splice(di, 1);
-  if (beforeId && beforeId !== id) {
-    let ti = list.findIndex((b) => b.id === beforeId);
-    if (ti < 0) ti = list.length; else if (!before) ti += 1;
-    list.splice(ti, 0, dragged);
-  } else {
-    // append after the last item already in the target group
-    let at = list.length;
-    for (let k = list.length - 1; k >= 0; k--) { if (groupOf(list[k]) === gid) { at = k + 1; break; } }
-    list.splice(at, 0, dragged);
-  }
+  const cur = bookmarks();
+  const list = reorderBookmark(cur, bookmarkGroups(), id, gid, beforeId, before);
+  if (list === cur) return; // dragged id not found — nothing moved
   state.settings = await relay.patchSettings({ bookmarks: list });
   renderBookmarks();
 }
@@ -1199,11 +819,26 @@ async function renameBookmarkGroup(id: string, v: string) {
   state.settings = await relay.patchSettings({ bookmarkGroups: bookmarkGroups().map((g) => g.id === id ? { ...g, name } : g) });
   renderBookmarks();
 }
+// Manually add a bookmark (no selection needed): create an empty one at the top and edit it inline.
+async function addBookmarkManual() {
+  openBookmarks(); // ensure the panel is visible (also handles being triggered from the palette)
+  const b = { id: uid(), text: '', createdAt: Date.now() };
+  state.settings = await relay.patchSettings({ bookmarks: [b, ...bookmarks()] });
+  renderBookmarks();
+  const el = document.querySelector(`[data-bktext="${b.id}"]`) as HTMLElement | null;
+  // Commit saves the text; onDone (runs on commit OR cancel) drops the placeholder if it was left
+  // empty — read el.textContent (synchronous, reflects the just-typed/restored text) not async state.
+  if (el) makeEditable(el, (v) => renameBookmark(b.id, v), () => { if (!(el.textContent || '').trim()) deleteBookmark(b.id); });
+}
+async function renameBookmark(id: string, v: string) {
+  const text = v.trim();
+  if (!text) { await deleteBookmark(id); return; } // empty (e.g. cancelled placeholder) — drop it
+  state.settings = await relay.patchSettings({ bookmarks: bookmarks().map((b) => b.id === id ? { ...b, text } : b) });
+  renderBookmarks();
+}
 async function deleteBookmarkGroup(id: string) {
-  state.settings = await relay.patchSettings({
-    bookmarkGroups: bookmarkGroups().filter((g) => g.id !== id),
-    bookmarks: bookmarks().map((b) => b.groupId === id ? { ...b, groupId: undefined } : b), // orphans fall back to Ungrouped
-  });
+  const { groups, list } = removeGroup(bookmarkGroups(), bookmarks(), id); // orphans fall back to Ungrouped
+  state.settings = await relay.patchSettings({ bookmarkGroups: groups, bookmarks: list });
   renderBookmarks();
 }
 function runBookmark(text: string) {
@@ -1213,14 +848,14 @@ function runBookmark(text: string) {
 }
 function renderBookmarks() {
   const el = $('#bkmList'); const list = bookmarks(); const groups = bookmarkGroups();
-  if (!list.length && !groups.length) { el.innerHTML = '<div class="hist-empty">No bookmarks yet.<br><span class="dim">Highlight a command in a block and click ★ Bookmark. Use ＋ Group to organize them.</span></div>'; return; }
+  if (!list.length && !groups.length) { el.innerHTML = '<div class="hist-empty">No bookmarks yet.<br><span class="dim">Highlight a command and click ★ Bookmark, or use ＋ Bookmark to add one manually. ＋ Group organizes them.</span></div>'; return; }
   const itemHtml = (b: Bookmark) => `<div class="bkm-item" data-bid="${b.id}" draggable="true">
     <span class="bkm-grip" title="Drag to reorder or move to a group">⠿</span>
-    <div class="bkm-text" title="Use Run to execute in the active terminal">${esc(b.text)}</div>
+    <div class="bkm-text" data-bktext="${b.id}" title="Double-click to edit — Run executes it">${esc(b.text)}</div>
     <div class="bkm-actions"><button data-bact="run">Run</button><button data-bact="copy">Copy</button><button data-bact="del" title="Delete">✕</button></div>
   </div>`;
-  const count = (gid: string | undefined) => list.filter((b) => groupOf(b) === gid).length;
-  const sectionItems = (gid: string | undefined) => { const items = list.filter((b) => groupOf(b) === gid); return items.length ? items.map(itemHtml).join('') : '<div class="bkm-gempty">drop bookmarks here</div>'; };
+  const count = (gid: string | undefined) => list.filter((b) => groupOf(b, groups) === gid).length;
+  const sectionItems = (gid: string | undefined) => { const items = list.filter((b) => groupOf(b, groups) === gid); return items.length ? items.map(itemHtml).join('') : '<div class="bkm-gempty">drop bookmarks here</div>'; };
   const col = (gid: string) => collapsedGroups.has(gid) ? ' collapsed' : '';
   let html = '';
   for (const g of groups) {
@@ -1263,7 +898,9 @@ function refreshPill(mx?: number, my?: number, allowXterm = false) {
   // Only offer to bookmark the xterm selection when the interaction actually came from a terminal —
   // otherwise the persistent xterm selection re-pops the pill on every click elsewhere.
   if (allowXterm) { const x = xtermSelection(); if (x && x.length <= 800) { pendingBkmText = x; showBkmPopAt(mx ?? lastMouse.x, my ?? lastMouse.y); return; } }
-  hideBkmPop();
+  // Nothing to show right now — but DON'T hide here. A full-screen TUI (Claude Code) clears the xterm
+  // selection on every redraw, and hiding on that would make the pill vanish the instant it appeared.
+  // Dismissal is the click-away handler below, Escape, or after a save.
 }
 
 /* --------------------- Blocks (Warp-style) main view --------------------- */
@@ -1327,6 +964,14 @@ function paneSend(g: number) {
 // Shared keydown for a pane's command input.
 function bvKeydown(g: number, ev: KeyboardEvent) {
   const t = gTab(g); const inp = ev.target as HTMLTextAreaElement;
+  // While the cd-completion popup is open it owns the navigation/accept keys.
+  if (cdOpen() && cdc.g === g) {
+    if (ev.key === 'ArrowDown') { ev.preventDefault(); ev.stopPropagation(); cdMove(1); return; }
+    if (ev.key === 'ArrowUp')   { ev.preventDefault(); ev.stopPropagation(); cdMove(-1); return; }
+    if (ev.key === 'Enter')     { ev.preventDefault(); ev.stopPropagation(); cdAccept(g, false); return; }
+    if (ev.key === 'Tab')       { ev.preventDefault(); ev.stopPropagation(); cdAccept(g, true); return; } // Tab drills deeper
+    if (ev.key === 'Escape')    { ev.preventDefault(); ev.stopPropagation(); hideCdPop(); return; }
+  }
   if (ev.key === 'Enter' && !ev.shiftKey) { ev.preventDefault(); paneSend(g); }
   else if (ev.key === 'Enter') { requestAnimationFrame(() => bvGrow(inp)); }
   // History recall only when the caret is on the first/last line — otherwise arrows move within a multi-line command.
@@ -1334,47 +979,98 @@ function bvKeydown(g: number, ev: KeyboardEvent) {
   else if (ev.key === 'ArrowDown' && t && t.cmdHistory.length && !inp.value.slice(inp.selectionEnd).includes('\n')) { ev.preventDefault(); t.histIdx = Math.min(t.cmdHistory.length, t.histIdx + 1); inp.value = t.cmdHistory[t.histIdx] || ''; bvGrow(inp); }
   // Ctrl+C interrupts the shell only when nothing is selected; with a selection, let the browser copy it.
   else if (ev.ctrlKey && ev.key.toLowerCase() === 'c') { if (t && inp.selectionStart === inp.selectionEnd) { relay.ptyWrite(t.id, '\x03'); inp.value = ''; bvGrow(inp); } }
-  else if (ev.key === 'Tab') ev.preventDefault();
+  else if (ev.key === 'Tab') { ev.preventDefault(); updateCdPop(g); } // Tab on a `cd …` line opens directory completion
 }
-type ExFmt = 'md' | 'json' | 'txt' | 'html';
-function outText(b: Block): string { return b.interactive ? '(interactive session)' : collapseCR(stripAnsi(b.output)).trimEnd(); }
-function cmdText(b: Block): string { return stripAnsi(b.command).replace(/[\r\n]+/g, ' ').trim(); }
-// The command exactly as typed — newlines preserved (for display + faithful re-run).
-function cmdRaw(b: Block): string { return stripAnsi(b.command).replace(/\r\n?/g, '\n').replace(/\s+$/, ''); }
+
+/* ---- cd directory autocomplete (blocks-view command bar) --------------------------------------
+   When the line is `cd <partial>`, offer the matching subdirectories of the resolved directory
+   (the tab's live cwd + any path already typed). Auto-shows while typing; Tab opens/drills; ↑/↓
+   navigate; Enter/click fill; Esc dismisses. Only the bv-cmd input is Relay-owned, so this lives
+   here — the classic xterm relies on the shell's own Tab completion. */
+const cdc = { g: -1, items: [] as string[], sel: 0, dirPart: '', namePart: '', token: 0 };
+let cdCache: { dir: string; entries: { name: string; isDir: boolean }[] } = { dir: '', entries: [] };
+const CD_FI = `<svg class="fi" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M3 7a1 1 0 0 1 1-1h4.7l1.7 1.8H20a1 1 0 0 1 1 1V18a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1z"/></svg>`;
+
+// Split a `cd <arg>` line into the directory part (up to the last separator) and the name prefix.
+function cdParse(val: string): { dirPart: string; namePart: string } | null {
+  const m = /^\s*cd\s+(.*)$/i.exec(val);
+  if (!m) return null;
+  let arg = m[1];
+  if (arg.includes('\n')) return null;
+  if (arg[0] === '"' || arg[0] === "'") arg = arg.slice(1).replace(/["']$/, ''); // unwrap a quoted path
+  const sep = Math.max(arg.lastIndexOf('/'), arg.lastIndexOf('\\'));
+  return { dirPart: sep >= 0 ? arg.slice(0, sep + 1) : '', namePart: sep >= 0 ? arg.slice(sep + 1) : arg };
+}
+// The directory to list: an absolute path as-is, otherwise the tab's cwd joined with the typed part.
+function cdResolveDir(base: string, dirPart: string): string {
+  if (!dirPart) return base;
+  if (/^([a-zA-Z]:[\\/]|[\\/]{2}|[\\/])/.test(dirPart)) return dirPart; // C:\  \\unc  /abs
+  return base.replace(/[\\/]+$/, '') + '/' + dirPart; // main's fs.resolve normalizes mixed separators + ..
+}
+async function updateCdPop(g: number) {
+  const t = gTab(g); const inp = E(P_CMD[g]) as HTMLTextAreaElement;
+  const p = t && t.cwd ? cdParse(inp.value) : null;
+  if (!p || !t) { hideCdPop(); return; }
+  const dir = cdResolveDir(t.cwd, p.dirPart);
+  let entries: { name: string; isDir: boolean }[];
+  if (cdCache.dir === dir) entries = cdCache.entries; // still the same folder — re-filter without a new IPC
+  else {
+    const my = ++cdc.token;
+    const res = await relay.fsList(dir);
+    if (my !== cdc.token) return;            // a newer keystroke superseded this lookup
+    if (res.error) { hideCdPop(); return; }
+    entries = res.entries; cdCache = { dir, entries };
+  }
+  const q = p.namePart.toLowerCase();
+  const dirs = entries.filter((e) => e.isDir && e.name.toLowerCase().startsWith(q)).map((e) => e.name).slice(0, 200);
+  if (!dirs.length) { hideCdPop(); return; }
+  cdc.g = g; cdc.items = dirs; cdc.sel = 0; cdc.dirPart = p.dirPart; cdc.namePart = p.namePart;
+  renderCdPop(); positionCdPop(g); $('#cdPop').classList.add('show');
+}
+function renderCdPop() {
+  const n = cdc.namePart.length;
+  $('#cdList').innerHTML = cdc.items.map((name, i) => {
+    const label = n ? `<b>${esc(name.slice(0, n))}</b>${esc(name.slice(n))}` : esc(name); // bold the matched prefix
+    return `<div class="cd-item${i === cdc.sel ? ' sel' : ''}" data-i="${i}">${CD_FI}<span class="cd-nm">${label}</span></div>`;
+  }).join('');
+  ($('#cdList').querySelector('.cd-item.sel') as HTMLElement | null)?.scrollIntoView({ block: 'nearest' });
+}
+function positionCdPop(g: number) {
+  const r = (E(P_CMD[g]) as HTMLElement).getBoundingClientRect(); const pop = $('#cdPop');
+  pop.style.left = r.left + 'px'; pop.style.top = 'auto';
+  pop.style.bottom = (window.innerHeight - r.top + 6) + 'px'; // dropdown grows upward from just above the input
+  pop.style.minWidth = Math.min(Math.max(r.width * 0.55, 190), 460) + 'px';
+}
+function hideCdPop() { cdc.g = -1; cdc.items = []; $('#cdPop').classList.remove('show'); }
+function cdOpen(): boolean { return cdc.g >= 0 && $('#cdPop').classList.contains('show'); }
+function cdMove(d: number) { if (!cdc.items.length) return; cdc.sel = (cdc.sel + d + cdc.items.length) % cdc.items.length; renderCdPop(); }
+// Quote a path when it holds anything the shell treats specially — spaces, but also (), [], {}, $,
+// &, ;, etc. (e.g. a Next.js `(dashboard)` route folder, which PowerShell would parse as a
+// subexpression). Single quotes are literal in PowerShell and POSIX shells; escape an embedded
+// single quote per shell (PowerShell doubles it, POSIX uses '\'').
+function cdQuote(s: string): string {
+  if (!/[^\w./\\:@~+-]/.test(s)) return s; // only safe path chars → no quoting needed
+  const esc = relay.platform === 'win32' ? s.replace(/'/g, "''") : s.replace(/'/g, "'\\''");
+  return `'${esc}'`;
+}
+// Fill the selected directory into the command; `drill` appends a separator and re-lists to go deeper.
+function cdAccept(g: number, drill: boolean) {
+  if (cdc.g !== g || !cdc.items.length) return;
+  const inp = E(P_CMD[g]) as HTMLTextAreaElement;
+  let body = cdc.dirPart + cdc.items[cdc.sel];
+  if (drill) body += '/';
+  inp.value = 'cd ' + cdQuote(body);
+  const caret = inp.value.endsWith("'") ? inp.value.length - 1 : inp.value.length; // stay inside the quotes so typing keeps filtering
+  inp.setSelectionRange(caret, caret); bvGrow(inp);
+  if (drill) updateCdPop(g); else hideCdPop();
+}
+// Block→text helpers and session export (ExFmt/realBlock/cmdText/cmdRaw/buildExport) live in
+// ./blocks-text — imported above. sendCommand stays here: it writes to the pty via relay.
 // Run a command line in a terminal: multi-line goes as a bracketed paste (one command),
 // single-line as a plain Enter.
 function sendCommand(id: string, raw: string) {
   if (raw.includes('\n')) relay.ptyWrite(id, '\x1b[200~' + raw.replace(/\r\n/g, '\n') + '\x1b[201~\r');
   else relay.ptyWrite(id, raw + '\r');
-}
-// Serialize a terminal's blocks (+ chat) to Markdown / JSON / plain text / HTML. `blocks`
-// is passed in so this covers both whole-session export and single-block "share".
-function buildExport(t: Tab, blocks: Block[], fmt: ExFmt): { content: string; ext: string } {
-  if (fmt === 'json') {
-    return { ext: 'json', content: JSON.stringify({
-      name: t.name, cwd: t.cwd, model: t.model,
-      blocks: blocks.map((b) => ({ command: cmdText(b), output: outText(b), exitCode: b.exitCode, interactive: !!b.interactive, startedAt: b.startedAt, endedAt: b.endedAt })),
-      chat: t.chat,
-    }, null, 2) };
-  }
-  if (fmt === 'txt') {
-    const L: string[] = [t.name, `cwd: ${t.cwd || '~'}`, ''];
-    for (const b of blocks) { L.push(`$ ${cmdText(b)}${b.exitCode != null ? `   [exit ${b.exitCode}]` : ''}`); const o = outText(b); if (o) L.push(o); L.push(''); }
-    if (t.chat.length) { L.push('--- Agent ---', ''); for (const m of t.chat) L.push(`${m.role === 'user' ? 'You' : 'Agent'}: ${m.content}`, ''); }
-    return { ext: 'txt', content: L.join('\n') };
-  }
-  if (fmt === 'html') {
-    const h = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-    let o = `<!doctype html><meta charset=utf8><title>${h(t.name)}</title><style>body{background:#0b0e13;color:#d8dee7;font:13px ui-monospace,Consolas,monospace;padding:24px;max-width:900px;margin:auto}h1{font:600 18px system-ui,sans-serif;color:#f4f7fb}.m{color:#66717f;margin-bottom:16px}.b{border:1px solid #232a33;border-radius:9px;margin:10px 0;overflow:hidden}.c{background:#11161d;padding:9px 12px;color:#e8edf3}.c .p{color:#f0b429}.o{padding:9px 12px;white-space:pre-wrap;color:#b6c0cb}.ok{color:#7ee787}.fail{color:#ff7b72}</style>`;
-    o += `<h1>${h(t.name)}</h1><div class=m>${h(t.cwd || '~')} · ${h(modelById(t.model).name)}</div>`;
-    for (const b of blocks) { const badge = b.exitCode === 0 ? '<span class=ok>✓ 0</span>' : b.exitCode != null ? `<span class=fail>✗ ${b.exitCode}</span>` : ''; o += `<div class=b><div class=c><span class=p>❯</span> ${h(cmdText(b))} ${badge}</div><div class=o>${h(outText(b))}</div></div>`; }
-    if (t.chat.length) { o += '<h1>Agent</h1>'; for (const m of t.chat) o += `<div class=b><div class=c>${m.role === 'user' ? 'You' : 'Agent'}</div><div class=o>${h(m.content)}</div></div>`; }
-    return { ext: 'html', content: o };
-  }
-  const L: string[] = [`# ${t.name}`, '', `Working directory: \`${t.cwd || '~'}\`  ·  Model: ${modelById(t.model).name}`, ''];
-  if (blocks.length) { L.push('## Terminal', ''); for (const b of blocks) { const o = outText(b); L.push('```console', '❯ ' + cmdText(b) + (b.exitCode != null ? `   # exit ${b.exitCode}` : '')); if (o) L.push(o); L.push('```', ''); } }
-  if (t.chat.length) { L.push('## Agent conversation', ''); for (const m of t.chat) L.push(`**${m.role === 'user' ? 'You' : 'Agent'}:** ${m.content}`, ''); }
-  return { ext: 'md', content: L.join('\n') };
 }
 async function doExport(fmt: ExFmt) {
   const t = activeTab(); if (!t) { toast('No terminal to export'); return; }
@@ -1421,8 +1117,8 @@ function showApproval(req: ApprovalRequest) {
 }
 
 /* ----------------------------- command palette ----------------------------- */
-interface PalAction { g: string; t: string; run: () => void; }
-let palItems: PalAction[] = []; let palSel = 0;
+// The command-palette machinery (open/close/filter/render/keyboard) lives in ./palette. This is
+// just the action registry it renders — kept here because each action calls an app function.
 function paletteActions(): PalAction[] {
   const base: PalAction[] = [
     { g: 'Terminal', t: 'New terminal', run: () => newTab() },
@@ -1443,6 +1139,7 @@ function paletteActions(): PalAction[] {
     { g: 'View', t: 'Command history', run: openHistory },
     { g: 'View', t: 'Bookmarks', run: openBookmarks },
     { g: 'View', t: 'Bookmark highlighted text', run: bookmarkSelection },
+    { g: 'View', t: 'Add bookmark manually', run: addBookmarkManual },
     { g: 'View', t: 'Toggle Blocks / Classic terminal', run: toggleBlocksView },
     { g: 'View', t: 'Split right (clone terminal)', run: () => splitClone('row') },
     { g: 'View', t: 'Split down (clone terminal)', run: () => splitClone('col') },
@@ -1460,19 +1157,7 @@ function paletteActions(): PalAction[] {
   const lib: PalAction[] = state.library.map((s) => ({ g: 'Open from Library', t: `${s.name}  ·  ${modelById(s.model).short}`, run: () => openSession(s) }));
   return base.concat(models, lib);
 }
-function renderPalette(q: string) {
-  const all = paletteActions();
-  palItems = q ? all.filter((a) => (a.t + ' ' + a.g).toLowerCase().includes(q.toLowerCase())) : all;
-  palSel = 0;
-  if (!palItems.length) { $('#palList').innerHTML = '<div class="pal-empty">No matches</div>'; return; }
-  let html = '', lastG = '';
-  palItems.forEach((a, i) => { if (a.g !== lastG) { html += `<div class="pal-group">${esc(a.g)}</div>`; lastG = a.g; } html += `<div class="pal-item ${i === 0 ? 'sel' : ''}" data-i="${i}">${esc(a.t)}</div>`; });
-  $('#palList').innerHTML = html;
-}
-function openPalette() { renderPalette(''); ($('#palInput') as HTMLInputElement).value = ''; $('#palette').classList.add('show'); $('#scrim').classList.add('show'); setTimeout(() => ($('#palInput') as HTMLElement).focus(), 20); }
-function closePalette() { $('#palette').classList.remove('show'); if (!$('#settings').classList.contains('show')) $('#scrim').classList.remove('show'); }
-function palMove(d: number) { if (!palItems.length) return; palSel = (palSel + d + palItems.length) % palItems.length; [...document.querySelectorAll('#palList .pal-item')].forEach((el, i) => el.classList.toggle('sel', i === palSel)); (document.querySelector('#palList .pal-item.sel') as HTMLElement)?.scrollIntoView({ block: 'nearest' }); }
-function palRun() { const a = palItems[palSel]; if (a) { closePalette(); a.run(); } }
+initPalette(paletteActions); // hand the registry to the palette module (open/close/render/keyboard)
 
 /* ----------------------------- settings ----------------------------- */
 function reflectSettings() {
@@ -1523,7 +1208,14 @@ document.addEventListener('selectionchange', () => { if (!$('#bkmPop').contains(
 document.addEventListener('mousemove', (e) => { lastMouse = { x: (e as MouseEvent).clientX, y: (e as MouseEvent).clientY }; });
 document.addEventListener('mouseup', (e) => { const m = e as MouseEvent; const inTerm = !!(m.target as HTMLElement)?.closest?.('.xterm, .term-host'); setTimeout(() => refreshPill(m.clientX, m.clientY, inTerm), 0); });
 document.addEventListener('mousedown', (e) => { if (!(e.target as HTMLElement).closest('#bkmPop')) hideBkmPop(); });
+// cd autocomplete popup: keep the command input focused on mousedown, accept the clicked directory.
+$('#cdPop').addEventListener('mousedown', (e) => e.preventDefault());
+$('#cdPop').addEventListener('click', (e) => {
+  const it = (e.target as HTMLElement).closest('.cd-item') as HTMLElement | null;
+  if (it && cdc.g >= 0) { cdc.sel = +it.dataset.i!; cdAccept(cdc.g, false); }
+});
 $('#bkmAddGroup').onclick = addBookmarkGroup;
+$('#bkmNew').onclick = addBookmarkManual;
 $('#bkmList').addEventListener('click', (e) => {
   const el = e.target as HTMLElement;
   const gact = (el.closest('[data-gact]') as HTMLElement | null)?.dataset.gact;
@@ -1544,8 +1236,11 @@ $('#bkmList').addEventListener('click', (e) => {
   else if (act === 'del') deleteBookmark(b.id);
 });
 $('#bkmList').addEventListener('dblclick', (e) => {
-  const n = (e.target as HTMLElement).closest('[data-grename]') as HTMLElement | null; if (!n) return;
-  makeEditable(n, (v) => renameBookmarkGroup(n.dataset.grename!, v));
+  const t = e.target as HTMLElement;
+  const g = t.closest('[data-grename]') as HTMLElement | null;
+  if (g) { makeEditable(g, (v) => renameBookmarkGroup(g.dataset.grename!, v)); return; } // rename a group
+  const bt = t.closest('[data-bktext]') as HTMLElement | null;
+  if (bt) makeEditable(bt, (v) => renameBookmark(bt.dataset.bktext!, v)); // edit a bookmark's text
 });
 // Drag-and-drop: reorder bookmarks & move them between groups; reorder groups.
 let dragBkm: string | null = null;
@@ -1640,7 +1335,8 @@ for (let g = 0; g < 4; g++) {
     reflectModel(); updateStatus();
   });
   (E(P_CMD[g]) as HTMLElement).addEventListener('keydown', (e) => bvKeydown(g, e as KeyboardEvent));
-  (E(P_CMD[g]) as HTMLElement).addEventListener('input', (e) => bvGrow(e.target as HTMLTextAreaElement));
+  (E(P_CMD[g]) as HTMLElement).addEventListener('input', (e) => { bvGrow(e.target as HTMLTextAreaElement); updateCdPop(g); });
+  (E(P_CMD[g]) as HTMLElement).addEventListener('blur', () => hideCdPop()); // dismiss cd popup on focus loss
   E(P_SCROLL[g]).addEventListener('click', onBlockAreaClick);
   // Drag-to-split zones for THIS pane's body — drop a tab on the right/bottom edge to split the
   // pane you're hovering (data-g identifies which). Created for every pane, not just pane 0.
@@ -1661,6 +1357,7 @@ $('#btnSidebar').onclick = toggleSidebar;
 $('#btnTheme').onclick = cycleTemplate; // quick-cycle through the five templates
 $('#themeGrid').addEventListener('click', (e) => { const b = (e.target as HTMLElement).closest('[data-tpl]') as HTMLElement | null; if (b) setTemplate(b.dataset.tpl!); });
 $('#btnPalette').onclick = openPalette;
+$('#winSearch').onclick = openPalette; // command-search box in the top window bar
 $('#btnOpen').onclick = addFolderTab;
 $('#stAutosave').onclick = toggleAutosave;
 $('#libSort').addEventListener('change', async (e) => { state.settings = await relay.patchSettings({ librarySort: (e.target as HTMLSelectElement).value as any }); renderLibrary(); });
@@ -1890,15 +1587,7 @@ $('#mainDivider').addEventListener('mousedown', (e) => {
 });
 
 // file browser
-$('#filesUp').onclick = () => { if (state.browse && state.browse.parent && state.browse.parent !== state.browse.path) { state.browsePath = state.browse.parent; renderFiles(); } };
-$('#fileList').addEventListener('click', async (e) => {
-  const el = (e.target as HTMLElement).closest('[data-fpath]') as HTMLElement | null; if (!el) return;
-  const p = el.dataset.fpath!;
-  if (el.dataset.dir === 'true') { state.browsePath = p; renderFiles(); return; }
-  const r = await relay.fsOpen(p);
-  const name = p.split('/').pop();
-  toast(r.method === 'vscode' ? `Opening ${name} in VS Code` : r.method === 'error' ? `Couldn't open ${name}` : `Opening ${name}`, r.method !== 'error');
-});
+initFiles({ fsList: (p: string) => relay.fsList(p), fsOpen: (p: string) => relay.fsOpen(p) }); // Files sidebar: wire events + supply the fs bridge
 
 // agent
 $('#btnAgent').onclick = openAgent;
@@ -1916,7 +1605,7 @@ $('#modelMenu').addEventListener('click', (e) => { const it = (e.target as HTMLE
 // palette
 $('#palInput').addEventListener('input', () => renderPalette(($('#palInput') as HTMLInputElement).value));
 $('#palInput').addEventListener('keydown', (e) => { const ev = e as KeyboardEvent; if (ev.key === 'ArrowDown') { ev.preventDefault(); palMove(1); } else if (ev.key === 'ArrowUp') { ev.preventDefault(); palMove(-1); } else if (ev.key === 'Enter') { ev.preventDefault(); palRun(); } else if (ev.key === 'Escape') closePalette(); });
-$('#palList').addEventListener('click', (e) => { const it = (e.target as HTMLElement).closest('[data-i]') as HTMLElement | null; if (it) { palSel = +it.dataset.i!; palRun(); } });
+$('#palList').addEventListener('click', (e) => { const it = (e.target as HTMLElement).closest('[data-i]') as HTMLElement | null; if (it) palClick(+it.dataset.i!); });
 
 // settings
 $('#btnSettings').onclick = openSettings;
@@ -1937,6 +1626,17 @@ document.querySelectorAll('.set[data-key]').forEach((b) => b.addEventListener('c
 document.addEventListener('click', (e) => { const t = e.target as HTMLElement; if ($('#modelMenu').classList.contains('show') && !t.closest('#modelMenu') && !t.closest('#modelBtn') && !t.closest('#tabModelBtn')) closeModelMenu(); });
 document.addEventListener('keydown', (e) => {
   const mod = e.ctrlKey || e.metaKey;
+  const el = e.target as HTMLElement | null;
+  const key = e.key.toLowerCase();
+  // In a modal text input (palette / history search / agent message / inline rename) the user is
+  // typing, not navigating — suppress ALL app chords. Escape still falls through below to close panels.
+  const modalInput = !!el && (el.isContentEditable || el.id === 'palInput' || el.id === 'histSearch' || el.id === 'agentInput');
+  if (mod && modalInput) return;
+  // Anywhere else that's editable (the command input, the terminal), keep every app chord working
+  // EXCEPT Ctrl+W (delete-word) — which was closing the tab while you typed. Ctrl+D stays global so
+  // highlighting text + Ctrl+D still bookmarks; Ctrl+K/T/S/L etc. keep working from the terminal.
+  const editable = !!el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable);
+  if (mod && editable && !e.shiftKey && key === 'w') return;
   if (mod && e.shiftKey && e.key.toLowerCase() === 'k') { e.preventDefault(); $('#bookmarksPanel').classList.contains('show') ? closeBookmarks() : openBookmarks(); }
   else if (mod && e.key.toLowerCase() === 'k') { e.preventDefault(); $('#palette').classList.contains('show') ? closePalette() : openPalette(); }
   else if (mod && !e.shiftKey && e.key.toLowerCase() === 'd') { e.preventDefault(); bookmarkSelection(); }
@@ -1945,6 +1645,7 @@ document.addEventListener('keydown', (e) => {
   else if (mod && e.shiftKey && e.key.toLowerCase() === 'l') { e.preventDefault(); newClaudeTab(); } // launch Claude Code (moved off Ctrl+Shift+C)
   else if (mod && e.shiftKey && e.key.toLowerCase() === 'h') { e.preventDefault(); $('#historyPanel').classList.contains('show') ? closeHistory() : openHistory(); }
   else if (mod && e.shiftKey && e.key.toLowerCase() === 'b') { e.preventDefault(); toggleBlocksView(); }
+  else if (mod && !e.shiftKey && e.key.toLowerCase() === 'b') { e.preventDefault(); toggleSidebar(); } // toggle the left sidebar
   else if (mod && e.shiftKey && e.key.toLowerCase() === 'e') { e.preventDefault(); splitClone('row'); }
   else if (mod && e.key === '\\') { e.preventDefault(); splitClone('row'); }                                    // VS Code: split
   else if (mod && e.altKey && e.key === 'ArrowRight') { e.preventDefault(); moveActiveToGroup(1); }              // move tab to right group
@@ -1960,14 +1661,15 @@ document.addEventListener('keydown', (e) => {
   else if (mod && e.key.toLowerCase() === 's') { e.preventDefault(); saveActive(); }
   else if (mod && e.key.toLowerCase() === 'l') { e.preventDefault(); clearActive(); }
   else if (mod && e.key.toLowerCase() === 'w') { e.preventDefault(); state.active && closeTab(state.active); }
-  else if (e.key === 'Escape') { closeConfirm(false); closeModelMenu(); closePalette(); closeSettings(); closeTabMenu(); closeColorPop(); closeHistory(); closeBookmarks(); hideBkmPop(); }
+  else if (e.key === 'Escape') { closeConfirm(false); closeModelMenu(); closePalette(); closeSettings(); closeTabMenu(); closeColorPop(); closeHistory(); closeBookmarks(); hideBkmPop(); hideCdPop(); }
 });
 
 relay.onPtyData((id: string, data: string) => { state.tabs.find((t) => t.id === id)?.term.write(data); persistWorkspace(); });
 // Final flush on close — synchronous so the latest scrollback reaches disk before teardown.
 // Wrapped so a failed flush can never throw mid-unload (which would abort a clean close).
 window.addEventListener('beforeunload', () => {
-  try { if (state.settings.autoSave) relay.flushWorkspace({ active: state.active, tabs: snapshotTabs(), gv: state.gv, focus: state.focus, layout: state.layout }); } catch { /* ignore */ }
+  // !booting: never let a close mid-restore flush a partial tab set over the full saved workspace.
+  try { if (state.settings.autoSave && !booting) relay.flushWorkspace({ active: state.active, tabs: snapshotTabs(), gv: state.gv, focus: state.focus, layout: state.layout }); } catch { /* ignore */ }
 });
 relay.onPtyExit((id: string) => { state.tabs.find((x) => x.id === id)?.term.write('\r\n\x1b[90m[process exited]\x1b[0m\r\n'); });
 relay.onApproval((req: ApprovalRequest) => showApproval(req));
