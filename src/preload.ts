@@ -1,6 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import * as os from 'node:os';
-import type { Settings, SavedSession, AgentEvent, ApprovalRequest, ChatTurn, Workspace, Block } from './shared/types';
+import type { Settings, SavedSession, AgentEvent, ApprovalRequest, ChatTurn, Workspace, WorkspaceDef, Block } from './shared/types';
 
 // Real identity for the Blocks-view prompt line (user@host + home for ~ shortening).
 function sysInfo() { try { return { user: os.userInfo().username, host: os.hostname().split('.')[0], home: os.homedir() }; } catch { return { user: 'user', host: 'relay', home: '' }; } }
@@ -48,11 +48,17 @@ const api = {
   deleteSession: (id: string): Promise<SavedSession[]> => ipcRenderer.invoke('sessions:delete', id),
   reorderSessions: (ids: string[]): Promise<SavedSession[]> => ipcRenderer.invoke('sessions:reorder', ids),
 
-  // --- workspace (open tabs restored on relaunch) ---
+  // --- workspace (open tabs restored on relaunch) — operate on the ACTIVE workspace ---
   getWorkspace: (): Promise<Workspace> => ipcRenderer.invoke('workspace:get'),
   setWorkspace: (ws: Workspace) => ipcRenderer.send('workspace:set', ws),
   // Synchronous write for the final flush on window close (blocks until it's on disk).
   flushWorkspace: (ws: Workspace) => ipcRenderer.sendSync('workspace:set-sync', ws),
+
+  // --- named workspaces (definitions + per-id snapshots) ---
+  getWorkspaceMeta: (): Promise<{ workspaces: WorkspaceDef[]; activeWorkspaceId: string }> => ipcRenderer.invoke('workspaces:meta'),
+  saveWorkspaceMeta: (workspaces: WorkspaceDef[], activeWorkspaceId: string) => ipcRenderer.send('workspaces:save-meta', { workspaces, activeWorkspaceId }),
+  getWorkspaceSnapshot: (id: string): Promise<Workspace> => ipcRenderer.invoke('workspace:get-snapshot', id),
+  saveWorkspaceSnapshot: (id: string, ws: Workspace) => ipcRenderer.send('workspace:save-snapshot', { id, ws }),
 
   // --- Claude Code integration ---
   claudeDetect: (): Promise<{ installed: boolean; path?: string }> => ipcRenderer.invoke('claude:detect'),

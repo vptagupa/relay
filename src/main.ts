@@ -254,6 +254,11 @@ ipcMain.on('workspace:set-sync', (e, ws) => {
   try { store.setWorkspaceSync(ws); } catch (err) { logFatal('flush', err); }
   e.returnValue = true;
 });
+// Named workspaces: definitions + active id (rare) and per-workspace snapshots (used on switch).
+ipcMain.handle('workspaces:meta', () => store.getWorkspaceMeta());
+ipcMain.on('workspaces:save-meta', (_e, { workspaces, activeWorkspaceId }) => { void store.saveWorkspaceMeta(workspaces, activeWorkspaceId); });
+ipcMain.handle('workspace:get-snapshot', (_e, id: string) => store.getWorkspaceSnapshot(id));
+ipcMain.on('workspace:save-snapshot', (_e, { id, ws }) => { void store.saveWorkspaceSnapshot(id, ws); });
 
 /* -------------------- agent (with approval round-trip) -------------------- */
 const pendingApprovals = new Map<string, (ok: boolean) => void>();

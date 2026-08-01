@@ -50,12 +50,27 @@ export interface OpenTab extends TermColors {
   group?: number;                   // which split group (pane) this tab belongs to
 }
 
+// A workspace's live tab snapshot (its split layout + open terminals), stored by workspace id in
+// workspace.json (frequent writes). One per WorkspaceDef.
 export interface Workspace {
   active: string;
   tabs: OpenTab[];
   gv?: string[];                    // visible tab id per group (split-layout restore)
   focus?: number;
   layout?: unknown;                 // nested split-tree layout (opaque; renderer-owned shape)
+}
+
+// A named workspace: identity + root folder + scoped overrides (the "definition"; rare writes →
+// relay.json). Kept separate from the Workspace snapshot so a definition edit doesn't re-serialize
+// the whole tab state, and a snapshot autosave doesn't touch the definition.
+export interface WorkspaceDef {
+  id: string;
+  name: string;
+  color: string;                    // switcher orientation cue
+  root: string | null;              // absolute project folder (null = none)
+  themeId: string | null;           // per-workspace theme override; null = inherit the global theme
+  createdAt: number;
+  lastOpenedAt: number;
 }
 
 // A saved command snippet — created by highlighting text in a block and bookmarking it.
