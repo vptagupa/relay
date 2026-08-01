@@ -124,6 +124,8 @@ button{font-family:inherit;color:inherit;cursor:pointer;border:none;background:n
 .tpl-btn.pri:hover{filter:brightness(1.08)}
 .tpl-btn.ghost{background:transparent;color:var(--text-dim)}
 .tpl-btn.ghost:hover{color:var(--text)}
+.tpl-btn:disabled{opacity:.45;cursor:not-allowed}
+.tpl-btn.pri:disabled:hover{filter:none}
 .te-name{width:100%;background:var(--surface-2);border:1px solid var(--border-strong);border-radius:9px;padding:9px 11px;color:var(--text);font:600 13.5px var(--sans);margin-bottom:14px}
 .te-name:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-ghost)}
 .te-row{border:1px solid var(--border);border-radius:10px;background:var(--surface-2);padding:11px 12px;margin-bottom:9px}

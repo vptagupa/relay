@@ -905,8 +905,12 @@ function newFromBlueprint(id: string): void {
   const params = scanParams(bp);
   if (params.length) openParamPrompt(bp, params); else void spawnBlueprint(bp, {});
 }
-function deleteBlueprint(id: string): void {
+async function deleteBlueprint(id: string): Promise<void> {
+  const bp = blueprints.find((b) => b.id === id); if (!bp) return;
+  closeTplMenu();
+  if (!(await confirmDialog('Delete template?', `“${bp.name}” will be removed — this can’t be undone.`, 'Delete'))) return;
   blueprints = blueprints.filter((b) => b.id !== id); saveBlueprints(); renderTplMenu();
+  toast(`Deleted “${bp.name}”`);
 }
 
 // A self-contained modal overlay (own scrim; Escape or scrim-click closes). Themed via the app's CSS vars.
@@ -967,12 +971,18 @@ function openParamPrompt(bp: WorkspaceBlueprint, params: string[]): void {
       ? cmds.map((t) => `<div class="pp-cmd"><span class="who">${esc(t.name || 'terminal')} ›</span> ${esc(t.command!).replace(paramRe(), (_m, n) => v[n] ? `<span class="fill">${esc(v[n])}</span>` : `<span class="tok">[${esc(n)}]</span>`)}</div>`).join('')
       : '<div class="pp-cmd te-mut">no commands — just opens the folders</div>';
   };
-  inps.forEach((i) => i.addEventListener('input', refresh)); refresh();
+  const okBtn = root.querySelector('[data-ok]') as HTMLButtonElement;
+  const filled = () => inps.every((i) => i.value.trim() !== ''); // every [param] must be filled — a blank would break the command
+  const sync = () => { refresh(); okBtn.disabled = !filled(); };
+  inps.forEach((i) => i.addEventListener('input', sync)); sync();
   setTimeout(() => inps[0]?.focus(), 30);
-  const go = () => { const v = values(); close(); void spawnBlueprint(bp, v); };
+  const go = () => { if (!filled()) return; const v = values(); close(); void spawnBlueprint(bp, v); };
+  okBtn.addEventListener('click', go);
   root.querySelector('[data-x]')?.addEventListener('click', close);
-  root.querySelector('[data-ok]')?.addEventListener('click', go);
-  inps.forEach((i) => i.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); go(); } }));
+  inps.forEach((i) => i.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter') return; e.preventDefault();
+    if (filled()) go(); else (inps.find((x) => !x.value.trim()) ?? inps[0]).focus(); // Enter → next empty field, else submit
+  }));
 }
 function renderTplMenu(): void {
   const rows = blueprints.length
