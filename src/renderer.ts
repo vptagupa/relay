@@ -86,7 +86,7 @@ initBlockView(relay.sys as { user: string; host: string; home: string } | undefi
 function baseName(p: string): string { const s = p.replace(/[\\/]+$/, ''); const i = Math.max(s.lastIndexOf('\\'), s.lastIndexOf('/')); return (i >= 0 ? s.slice(i + 1) : s) || s; }
 
 /* ----------------------------- terminals ----------------------------- */
-async function newTab(seed?: Partial<OpenTab> & { libId?: string }, activate = true): Promise<Tab> {
+async function newTab(seed?: Partial<OpenTab> & { libId?: string; runCmd?: string }, activate = true): Promise<Tab> {
   // Don't open the same terminal twice — switch to it instead.
   if (seed?.id) { const ex = state.tabs.find((t) => t.id === seed.id); if (ex) { if (activate) switchTab(ex.id); return ex; } }
   const id = seed?.id || uid();
@@ -139,7 +139,7 @@ async function newTab(seed?: Partial<OpenTab> & { libId?: string }, activate = t
   renderTabs();
   // Reattach to a live shell if one exists (replays its real output); otherwise spawn a
   // fresh shell, seeded with the saved snapshot as scrollback (main handles ordering).
-  const reattached = await relay.ptyCreate(id, cwd, term.cols || 80, term.rows || 24, seed?.scrollback);
+  const reattached = await relay.ptyCreate(id, cwd, term.cols || 80, term.rows || 24, seed?.scrollback, seed?.runCmd);
   // A restored tab whose shell was NOT reattached (cold restart) gets a fresh block-id namespace so the
   // new shell's blocks can't collide with the restored ones. A reattached (keep-alive) shell keeps the
   // saved nonce, so its continuing/flushed block ids line up with the restored blocks.
@@ -1737,7 +1737,11 @@ new ResizeObserver(() => { clearTimeout(_roT); _roT = setTimeout(() => { fitPane
   state.settings = await relay.getSettings();
   state.library = await relay.listSessions();
   initWorkspaces({ newTab, snapshotTabs, reconcilePanes, fitPanes, renderTabs, updateStatus, reflectModel, renderChat, updateMainView, reflectSettings, persistWorkspace, applyTheme, blocksMode, confirmDialog, shortCwd, sendCommand, pcmd: P_CMD });
-  initIssues({ closeOtherPanels: () => { closeAgent(); closeHistory(); closeBookmarks(); } });
+  initIssues({
+    closeOtherPanels: () => { closeAgent(); closeHistory(); closeBookmarks(); },
+    // Assign → open a fresh terminal tab rooted in the issue's worktree, seeded to launch the agent.
+    openAgentTab: (o) => { void newTab({ cwd: o.cwd, name: o.name, runCmd: o.runCmd }); },
+  });
   await loadWorkspaceMeta(); // load workspace defs + blueprints, mirror the active workspace's folder + theme into settings before first paint
   ($('#libSort') as HTMLSelectElement).value = state.settings.librarySort || 'recent';
   applyTheme(); applySidebarWidth(); applySidebar(); applyToolbar(); applySplit(); reflectAutosave(); renderLibrary(); updateStatus(); reflectModel(); reflectSettings();

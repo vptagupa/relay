@@ -10,7 +10,7 @@ type BlockEvt = { type: 'start' | 'update' | 'end'; block: Block } | { type: 'cw
 // The only surface the renderer can touch. No Node, no fs, no API keys here.
 const api = {
   // --- terminals (real PTYs) ---
-  ptyCreate: (id: string, cwd: string, cols: number, rows: number, restore?: string): Promise<boolean> => ipcRenderer.invoke('pty:create', { id, cwd, cols, rows, restore }),
+  ptyCreate: (id: string, cwd: string, cols: number, rows: number, restore?: string, runCmd?: string): Promise<boolean> => ipcRenderer.invoke('pty:create', { id, cwd, cols, rows, restore, runCmd }),
   ptyWrite: (id: string, data: string) => ipcRenderer.send('pty:write', { id, data }),
   ptyResize: (id: string, cols: number, rows: number) => ipcRenderer.send('pty:resize', { id, cols, rows }),
   ptyDetach: (id: string) => ipcRenderer.send('pty:detach', { id }),
@@ -68,6 +68,8 @@ const api = {
   githubIssues: (repo: string): Promise<{ ok: boolean; issues?: Issue[]; error?: string }> => ipcRenderer.invoke('github:issues', repo),
   // Open a URL in the user's default browser (e.g. an issue on GitHub).
   openExternal: (url: string): Promise<void> => ipcRenderer.invoke('open:external', url),
+  // Assign: create (or reuse) an isolated worktree for an issue and drop the edited brief inside it.
+  worktreeAdd: (dir: string, number: number, brief: string): Promise<{ ok: boolean; path?: string; branch?: string; base?: string; reused?: boolean; briefRel?: string; error?: string }> => ipcRenderer.invoke('git:worktree-add', { dir, number, brief }),
 
   // --- workspace blueprints (reusable "Templates") ---
   getBlueprints: (): Promise<WorkspaceBlueprint[]> => ipcRenderer.invoke('blueprints:get'),

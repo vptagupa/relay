@@ -3,6 +3,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { promises as fsp, appendFileSync } from 'node:fs';
 import { exec, execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { createTerm, writeTerm, resizeTerm, detachTerm, killTerm, killAll } from './pty';
 import * as store from './store';
 import * as keys from './keys';
@@ -174,10 +175,10 @@ if (!isSquirrel) {
 }
 
 /* -------------------- PTY IPC -------------------- */
-ipcMain.handle('pty:create', async (e, { id, cwd, cols, rows, restore }) => {
+ipcMain.handle('pty:create', async (e, { id, cwd, cols, rows, restore, runCmd }) => {
   try {
     const integrate = (await store.getSettings()).shellIntegration;
-    return createTerm(id, cwd, e.sender, cols, rows, restore, integrate);
+    return createTerm(id, cwd, e.sender, cols, rows, restore, integrate, typeof runCmd === 'string' ? runCmd : undefined);
   } catch (err) { logFatal('pty:create', err); return false; } // a spawn failure must not reject into the renderer
 });
 ipcMain.on('pty:write', (_e, { id, data }) => writeTerm(id, data));
@@ -254,6 +255,15 @@ function ghRepoFromRemote(url: string): string | null {
   const m = url.trim().match(/github\.com[:/]([^/\s]+\/[^/\s]+?)(?:\.git)?\/?$/i);
   return m ? m[1] : null;
 }
+// Run a resolved binary with an ARG ARRAY (never a shell string — no injection). Resolves to the
+// outcome and never rejects, so callers can compose a sequence of git steps with plain awaits.
+function runBin(bin: string, args: string[], opts: { cwd?: string; timeout?: number } = {}): Promise<{ ok: boolean; stdout: string; stderr: string }> {
+  return new Promise((resolve) => {
+    execFile(bin, args, { timeout: opts.timeout ?? 15000, windowsHide: true, cwd: opts.cwd, maxBuffer: 4 * 1024 * 1024 }, (err, stdout, stderr) => {
+      resolve({ ok: !err, stdout: (stdout || '').toString(), stderr: (stderr || '').toString() });
+    });
+  });
+}
 
 // Is the GitHub CLI installed, and logged in? (keyless — its own session, no token in the app.)
 ipcMain.handle('github:detect', () => new Promise<{ gh: boolean; authed: boolean; account?: string }>((resolve) => {
@@ -301,6 +311,73 @@ ipcMain.handle('github:issues', (_e, repo: string) => new Promise<{ ok: boolean;
 
 ipcMain.handle('open:external', (_e, url: string) => {
   if (typeof url === 'string' && /^https?:\/\//i.test(url)) shell.openExternal(url);
+});
+
+// Create (or reuse) an ISOLATED git worktree for an issue: a per-issue working dir on branch
+// issue-<n>, so several issues can be worked in parallel without disturbing the main checkout.
+// Also drops the (edited) issue brief as .slayer/issue-<n>.md and locally git-excludes it, so the
+// agent's PR never carries the brief. Returns the worktree path + brief's repo-relative path.
+ipcMain.handle('git:worktree-add', async (_e, p: { dir: string; number: number; brief?: string }) => {
+  try {
+    const dir = p?.dir, num = p?.number;
+    if (typeof dir !== 'string' || !dir || !Number.isInteger(num) || num <= 0) return { ok: false, error: 'Invalid request' };
+    const git = await resolveBin('git');
+    if (!git) return { ok: false, error: 'git not found on PATH' };
+    const top = await runBin(git, ['-C', dir, 'rev-parse', '--show-toplevel']);
+    if (!top.ok) return { ok: false, error: 'This folder is not a git repository' };
+    const repoRoot = top.stdout.trim();
+    // An unborn repo (git init, no commits) can't seed a worktree branch — say so plainly instead of
+    // surfacing git's raw "invalid reference" from the add below.
+    if (!(await runBin(git, ['-C', repoRoot, 'rev-parse', '--verify', '--quiet', 'HEAD'])).ok)
+      return { ok: false, error: 'This repository has no commits yet — make an initial commit first.' };
+    // Base the fix branch on the repo's default branch (origin/HEAD), falling back to the current branch.
+    let base = '';
+    const dh = await runBin(git, ['-C', repoRoot, 'symbolic-ref', '--short', 'refs/remotes/origin/HEAD']);
+    if (dh.ok) base = dh.stdout.trim().replace(/^origin\//, '');
+    if (!base) { const cur = await runBin(git, ['-C', repoRoot, 'rev-parse', '--abbrev-ref', 'HEAD']); base = (cur.ok && cur.stdout.trim()) || 'HEAD'; }
+    const branch = `issue-${num}`;
+    // Disambiguate by a short hash of the repo's absolute path, so two different repos that share a
+    // basename (…/a/app and …/b/app) never collide onto the same worktree folder.
+    const folder = `${path.basename(repoRoot) || 'repo'}-${createHash('sha1').update(repoRoot.replace(/\\/g, '/').toLowerCase()).digest('hex').slice(0, 8)}`;
+    const wtPath = path.join(app.getPath('userData'), 'worktrees', folder, branch);
+    const norm = (s: string) => s.replace(/\\/g, '/').toLowerCase();
+    // Drop registrations for worktrees whose folders were deleted by hand, so a re-assign can recreate them.
+    await runBin(git, ['-C', repoRoot, 'worktree', 'prune']);
+    // Already have a worktree for this issue? Reuse it (re-assigning the same issue is idempotent).
+    const list = await runBin(git, ['-C', repoRoot, 'worktree', 'list', '--porcelain']);
+    const reused = list.ok && norm(list.stdout).split('\n').some((ln) => ln.startsWith('worktree ') && norm(ln.slice(9).trim()) === norm(wtPath));
+    if (!reused) {
+      // Branch may already exist from a prior run whose worktree was pruned — re-attach it instead of -b.
+      const hasBranch = (await runBin(git, ['-C', repoRoot, 'rev-parse', '--verify', '--quiet', `refs/heads/${branch}`])).ok;
+      const addArgs = hasBranch
+        ? ['-C', repoRoot, 'worktree', 'add', wtPath, branch]
+        : ['-C', repoRoot, 'worktree', 'add', wtPath, '-b', branch, base];
+      const add = await runBin(git, addArgs, { timeout: 60000 });
+      if (!add.ok) {
+        const msg = (add.stderr || add.stdout || 'git worktree add failed').trim().split('\n').filter(Boolean).pop() || 'git worktree add failed';
+        return { ok: false, error: msg };
+      }
+    }
+    // Drop the brief inside the worktree and locally exclude .slayer/ so it never shows up / gets committed.
+    let briefRel: string | undefined;
+    const brief = typeof p?.brief === 'string' ? p.brief : '';
+    if (brief) {
+      try {
+        await fsp.mkdir(path.join(wtPath, '.slayer'), { recursive: true });
+        briefRel = `.slayer/issue-${num}.md`;
+        await fsp.writeFile(path.join(wtPath, briefRel), brief, 'utf8');
+        const gp = await runBin(git, ['-C', wtPath, 'rev-parse', '--git-path', 'info/exclude']);
+        if (gp.ok) {
+          const excl = path.isAbsolute(gp.stdout.trim()) ? gp.stdout.trim() : path.join(wtPath, gp.stdout.trim());
+          const curExcl = await fsp.readFile(excl, 'utf8').catch(() => '');
+          // Strip CR before the presence test — on a CRLF exclude the line is ".slayer/\r", which /$/m
+          // (matching just before \n) would miss, re-appending a duplicate on every re-assign.
+          if (!/^\.slayer\/?$/m.test(curExcl.replace(/\r/g, ''))) await fsp.writeFile(excl, (!curExcl || curExcl.endsWith('\n') ? curExcl : curExcl + '\n') + '.slayer/\n', 'utf8');
+        }
+      } catch (err) { logFatal('git:worktree-add/brief', err); briefRel = undefined; } // brief is best-effort; the worktree still opens
+    }
+    return { ok: true, path: wtPath, branch, base, reused, briefRel };
+  } catch (err) { logFatal('git:worktree-add', err); return { ok: false, error: 'Worktree creation failed' }; }
 });
 
 /* -------------------- session export -------------------- */
