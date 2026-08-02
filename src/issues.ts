@@ -203,11 +203,12 @@ ${body}
 ---
 
 ## Task
-Implement a fix for the issue described above in this repository.
-- Make the smallest change that correctly resolves it.
-- Run the project's checks/tests if there are any.
-- When you're done, summarize what you changed and why.
-- If the fix looks good, open a pull request with \`gh pr create\`.
+1. **Validate the issue first.** Before changing anything, check whether the reported problem is real, correct, and reproducible in this codebase. If it is already fixed, not reproducible, or the report is inaccurate/invalid, say so clearly with evidence and stop — do not force a change.
+2. If it is valid, implement a fix:
+   - Make the smallest change that correctly resolves it.
+   - Run the project's checks/tests if there are any.
+3. Summarize what you did — the fix and why, or (if no change was needed) why the issue isn't valid.
+4. If the fix looks good, open a pull request with \`gh pr create\`.
 `;
 }
 
