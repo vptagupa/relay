@@ -134,6 +134,11 @@ export interface Settings {
   bookmarks: Bookmark[];            // saved command snippets
   bookmarkGroups: BookmarkGroup[];  // groups for organizing bookmarks (display order = array order)
   hasKey: Record<string, boolean>;  // provider -> whether a key is stored (never the key itself)
+  issueTags?: Record<string, string[]>; // private local tags, keyed "repo#number" → ["mine","reviewing"] (never touch GitHub)
+  sidebarView?: 'library' | 'files' | 'issues'; // which rail panel is active in the sidebar
+  issueRepos?: string[]; // repos tracked via Sources (owner/name)
+  issueRepo?: string;    // the active repo (owner/name); empty → infer from the open folder's git remote
+  issueAgent?: string;   // preferred coding agent id for Assign (claude/gemini/codex/aider/antigravity)
 }
 
 // Streaming events emitted by the agent loop to the renderer.
@@ -162,4 +167,16 @@ export interface ApprovalRequest {
 export interface ChatTurn {
   role: 'user' | 'assistant';
   content: string;
+}
+
+// --- Issue Agent (Phase 1: read-only) ---
+// A provider issue, normalized by the adapter. Phase 1 pulls GitHub issues via the `gh` CLI.
+export interface IssueLabel { name: string; color?: string; }
+export interface Issue {
+  number: number;
+  title: string;
+  body: string;
+  labels: IssueLabel[];
+  state: string;
+  url: string;
 }

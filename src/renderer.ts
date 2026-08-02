@@ -20,6 +20,7 @@ import { initFiles, renderFiles } from './files';
 import { initBlockView, blockHtml, bvBlockHtml, collapsedBlocks, fmtDur } from './block-view';
 import { openTplMenu, saveAsTemplate, runStartupIfPending } from './blueprints';
 import { initWorkspaces, loadWorkspaceMeta, restoreWorkspaceSnapshot, settleDeeplink, createWorkspace, openWsMenu, closeWsMenu, handleDeeplink, setActiveWsRoot, setActiveWsTheme, getActiveWsId, duplicateWorkspace, exportWorkspace, importWorkspace, toggleTrust, copyWorkspaceLink, activeWorkspaceDef, isWorkspaceTrusted } from './workspaces';
+import { initIssues, pullIssues } from './issues';
 import type { Settings, SavedSession, AgentEvent, ApprovalRequest, ChatTurn, OpenTab, Workspace, WorkspaceDef, Block, Bookmark, BookmarkGroup } from './shared/types';
 
 // TEMP DIAG: surface full stacks (minify is off) for the init crash.
@@ -85,7 +86,7 @@ initBlockView(relay.sys as { user: string; host: string; home: string } | undefi
 function baseName(p: string): string { const s = p.replace(/[\\/]+$/, ''); const i = Math.max(s.lastIndexOf('\\'), s.lastIndexOf('/')); return (i >= 0 ? s.slice(i + 1) : s) || s; }
 
 /* ----------------------------- terminals ----------------------------- */
-async function newTab(seed?: Partial<OpenTab> & { libId?: string }, activate = true): Promise<Tab> {
+async function newTab(seed?: Partial<OpenTab> & { libId?: string; runCmd?: string }, activate = true): Promise<Tab> {
   // Don't open the same terminal twice — switch to it instead.
   if (seed?.id) { const ex = state.tabs.find((t) => t.id === seed.id); if (ex) { if (activate) switchTab(ex.id); return ex; } }
   const id = seed?.id || uid();
@@ -138,7 +139,7 @@ async function newTab(seed?: Partial<OpenTab> & { libId?: string }, activate = t
   renderTabs();
   // Reattach to a live shell if one exists (replays its real output); otherwise spawn a
   // fresh shell, seeded with the saved snapshot as scrollback (main handles ordering).
-  const reattached = await relay.ptyCreate(id, cwd, term.cols || 80, term.rows || 24, seed?.scrollback);
+  const reattached = await relay.ptyCreate(id, cwd, term.cols || 80, term.rows || 24, seed?.scrollback, seed?.runCmd);
   // A restored tab whose shell was NOT reattached (cold restart) gets a fresh block-id namespace so the
   // new shell's blocks can't collide with the restored ones. A reattached (keep-alive) shell keeps the
   // saved nonce, so its continuing/flushed block ids line up with the restored blocks.
@@ -661,12 +662,17 @@ async function setTemplate(id: string) {
 async function cycleTemplate() { const i = TEMPLATES.findIndex((t) => t.id === curTemplate()); await setTemplate(TEMPLATES[(i + 1) % TEMPLATES.length].id); }
 function applySidebar() { $('#main').classList.toggle('collapsed', state.settings.sidebarCollapsed); const t = activeTab(); if (t) setTimeout(() => { t.fit.fit(); relay.ptyResize(t.id, t.term.cols, t.term.rows); }, 210); }
 function applyToolbar() { document.querySelector('.titlebar')?.classList.toggle('shown', state.settings.toolbarShown); }
-// Size the Library section from the saved fraction of the sidebar height; Files fills the rest.
-function applySplit() {
-  const sb = document.querySelector('.sidebar') as HTMLElement | null; if (!sb) return;
-  const h = sb.clientHeight; const min = 80, max = h - 160; if (max < min) return;
-  const frac = state.settings.librarySplit ?? 0.4;
-  ($('#viewLibrary') as HTMLElement).style.height = Math.max(min, Math.min(max, Math.round(h * frac))) + 'px';
+// Rail model: the active view fills the sidebar body — no Library/Files height split.
+function applySplit() { /* no-op (kept: still called on boot + sidebar resize) */ }
+// Which sidebar panel (Files / Library / Issues) the rail has active.
+function applySidebarView() {
+  const v = state.settings.sidebarView || 'library';
+  const map: Record<string, string> = { library: '#viewLibrary', files: '#viewFiles', issues: '#viewIssues' };
+  for (const [name, id] of Object.entries(map)) (document.querySelector(id) as HTMLElement | null)?.classList.toggle('active', name === v);
+  document.querySelectorAll<HTMLElement>('.rail-btn[data-view]').forEach((b) => b.classList.toggle('on', b.dataset.view === v));
+}
+function switchSidebarView(v: 'library' | 'files' | 'issues') {
+  state.settings.sidebarView = v; applySidebarView(); void relay.patchSettings({ sidebarView: v });
 }
 function applySidebarWidth() { ($('#main') as HTMLElement).style.setProperty('--sidebar-w', (state.settings.sidebarWidth || 260) + 'px'); }
 async function toggleToolbar() { state.settings = await relay.patchSettings({ toolbarShown: !state.settings.toolbarShown }); applyToolbar(); }
@@ -1180,6 +1186,7 @@ function paletteActions(): PalAction[] {
     { g: 'View', t: 'Ask the agent', run: openAgent },
     { g: 'View', t: 'Command history', run: openHistory },
     { g: 'View', t: 'Bookmarks', run: openBookmarks },
+    { g: 'View', t: 'Issues — pull GitHub issues', run: pullIssues },
     { g: 'View', t: 'Bookmark highlighted text', run: bookmarkSelection },
     { g: 'View', t: 'Add bookmark manually', run: addBookmarkManual },
     { g: 'View', t: 'Toggle Blocks / Classic terminal', run: toggleBlocksView },
@@ -1591,8 +1598,13 @@ $('#libList').addEventListener('drop', async (e) => {
 $('#libList').addEventListener('dragend', endLibDrag);
 function r(el: HTMLElement) { return el.getBoundingClientRect(); }
 
-// resizable sidebar divider (Library ⟷ Files)
-$('#sideDivider').addEventListener('mousedown', (e) => {
+// rail: New (new terminal) · Files/Library/Issues (switch the active panel) · Agent (open agent panel)
+document.querySelectorAll<HTMLElement>('.rail-btn[data-view]').forEach((b) => { b.onclick = () => switchSidebarView(b.dataset.view as 'library' | 'files' | 'issues'); });
+(document.querySelector('.rail-btn[data-act="new"]') as HTMLElement | null)?.addEventListener('click', () => void newTab());
+(document.querySelector('.rail-btn[data-act="agent"]') as HTMLElement | null)?.addEventListener('click', () => openAgent());
+
+// resizable sidebar divider (legacy stacked layout — guarded; the element is gone in the rail model)
+document.querySelector('#sideDivider')?.addEventListener('mousedown', (e) => {
   e.preventDefault();
   const libEl = $('#viewLibrary'); const divider = $('#sideDivider');
   const startY = (e as MouseEvent).clientY; const startH = libEl.getBoundingClientRect().height;
@@ -1735,9 +1747,13 @@ new ResizeObserver(() => { clearTimeout(_roT); _roT = setTimeout(() => { fitPane
   state.settings = await relay.getSettings();
   state.library = await relay.listSessions();
   initWorkspaces({ newTab, snapshotTabs, reconcilePanes, fitPanes, renderTabs, updateStatus, reflectModel, renderChat, updateMainView, reflectSettings, persistWorkspace, applyTheme, blocksMode, confirmDialog, shortCwd, sendCommand, pcmd: P_CMD });
+  initIssues({
+    // Assign → open a fresh terminal tab rooted in the issue's worktree, seeded to launch the agent.
+    openAgentTab: (o) => { void newTab({ cwd: o.cwd, name: o.name, runCmd: o.runCmd }); },
+  });
   await loadWorkspaceMeta(); // load workspace defs + blueprints, mirror the active workspace's folder + theme into settings before first paint
   ($('#libSort') as HTMLSelectElement).value = state.settings.librarySort || 'recent';
-  applyTheme(); applySidebarWidth(); applySidebar(); applyToolbar(); applySplit(); reflectAutosave(); renderLibrary(); updateStatus(); reflectModel(); reflectSettings();
+  applyTheme(); applySidebarWidth(); applySidebar(); applyToolbar(); applySplit(); applySidebarView(); reflectAutosave(); renderLibrary(); updateStatus(); reflectModel(); reflectSettings();
   ($('#storeText') as HTMLElement).textContent = 'Saved on this machine';
   tickClock(); setInterval(tickClock, 20000);
 

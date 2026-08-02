@@ -1,14 +1,16 @@
 import { app, BrowserWindow, ipcMain, dialog, Menu, shell } from 'electron';
 import path from 'node:path';
 import os from 'node:os';
-import { promises as fsp, appendFileSync } from 'node:fs';
+import { promises as fsp, appendFileSync, existsSync } from 'node:fs';
 import { exec, execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import * as https from 'node:https';
 import { createTerm, writeTerm, resizeTerm, detachTerm, killTerm, killAll } from './pty';
 import * as store from './store';
 import * as keys from './keys';
 import { runAgent } from './agent/agent';
 import squirrelStartup from 'electron-squirrel-startup';
-import type { ApprovalRequest, ChatTurn } from './shared/types';
+import type { ApprovalRequest, ChatTurn, Issue } from './shared/types';
 import type { Provider } from './shared/models';
 
 // On Windows, the Squirrel installer/uninstaller launches the app with a --squirrel-* arg
@@ -174,10 +176,10 @@ if (!isSquirrel) {
 }
 
 /* -------------------- PTY IPC -------------------- */
-ipcMain.handle('pty:create', async (e, { id, cwd, cols, rows, restore }) => {
+ipcMain.handle('pty:create', async (e, { id, cwd, cols, rows, restore, runCmd }) => {
   try {
     const integrate = (await store.getSettings()).shellIntegration;
-    return createTerm(id, cwd, e.sender, cols, rows, restore, integrate);
+    return createTerm(id, cwd, e.sender, cols, rows, restore, integrate, typeof runCmd === 'string' ? runCmd : undefined);
   } catch (err) { logFatal('pty:create', err); return false; } // a spawn failure must not reject into the renderer
 });
 ipcMain.on('pty:write', (_e, { id, data }) => writeTerm(id, data));
@@ -231,6 +233,258 @@ ipcMain.handle('claude:auth', async () => {
     relayKey: !!hk['anthropic'],
     ambient: !!(process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN),
   };
+});
+
+/* -------------------- Issue Agent (Phase 1: read-only GitHub via gh) -------------------- */
+// Resolve an executable's absolute path once. Windows execFile won't PATHEXT-resolve a bare name,
+// so look it up like claude:detect and cache. Names are hardcoded literals, never user input.
+const binCache = new Map<string, string | null>();
+function resolveBin(name: string): Promise<string | null> {
+  if (binCache.has(name)) return Promise.resolve(binCache.get(name)!);
+  return new Promise((resolve) => {
+    const cmd = process.platform === 'win32' ? `where ${name}` : `command -v ${name}`;
+    exec(cmd, { timeout: 6000, windowsHide: true }, (err, stdout) => {
+      const p = (stdout || '').trim().split(/\r?\n/)[0] || '';
+      const r = !err && p ? p : null;
+      binCache.set(name, r);
+      resolve(r);
+    });
+  });
+}
+// git@github.com:owner/name.git | https://github.com/owner/name(.git) -> owner/name
+function ghRepoFromRemote(url: string): string | null {
+  const m = url.trim().match(/github\.com[:/]([^/\s]+\/[^/\s]+?)(?:\.git)?\/?$/i);
+  return m ? m[1] : null;
+}
+// Run a resolved binary with an ARG ARRAY (never a shell string — no injection). Resolves to the
+// outcome and never rejects, so callers can compose a sequence of git steps with plain awaits.
+function runBin(bin: string, args: string[], opts: { cwd?: string; timeout?: number } = {}): Promise<{ ok: boolean; stdout: string; stderr: string }> {
+  return new Promise((resolve) => {
+    execFile(bin, args, { timeout: opts.timeout ?? 15000, windowsHide: true, cwd: opts.cwd, maxBuffer: 4 * 1024 * 1024 }, (err, stdout, stderr) => {
+      resolve({ ok: !err, stdout: (stdout || '').toString(), stderr: (stderr || '').toString() });
+    });
+  });
+}
+
+// --- GitHub, app-owned auth (OAuth device flow) ---------------------------------------------------
+// Public OAuth App client id (device flow uses NO client secret — safe to embed in a desktop app).
+const GH_CLIENT_ID = 'Ov23li0p7Bql1ilOiKXT';
+// A minimal HTTPS request that resolves to {status,text} and never rejects.
+function httpsReq(host: string, pathname: string, method: string, headers: Record<string, string>, body?: string): Promise<{ status: number; text: string }> {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (v: { status: number; text: string }) => { if (!done) { done = true; resolve(v); } };
+    const req = https.request({ host, path: pathname, method, headers: { 'User-Agent': 'SlayerT', ...headers }, timeout: 20000 }, (res) => {
+      let data = ''; res.on('data', (c) => (data += c)); res.on('end', () => finish({ status: res.statusCode || 0, text: data }));
+    });
+    req.on('error', () => finish({ status: 0, text: '' }));
+    req.on('timeout', () => { req.destroy(); finish({ status: 0, text: '' }); }); // a hung connection must not stall the panel/poll forever
+    if (body) req.write(body);
+    req.end();
+  });
+}
+// Call the GitHub REST API with the stored OAuth token (the app authenticates itself — no gh CLI).
+async function ghApi(pathname: string): Promise<{ ok: boolean; status: number; json: unknown }> {
+  const token = await keys.getSecret('github_oauth');
+  if (!token) return { ok: false, status: 401, json: null };
+  const r = await httpsReq('api.github.com', pathname, 'GET', { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' });
+  let json: unknown = null; try { json = JSON.parse(r.text); } catch { /* non-json error body */ }
+  return { ok: r.status >= 200 && r.status < 300, status: r.status, json };
+}
+
+// The app's OWN GitHub auth state — an OAuth token encrypted in the OS keychain. No gh CLI, no token
+// in relay.json; the renderer never sees the token, only whether we're connected + as whom.
+ipcMain.handle('github:auth-state', async () => {
+  const token = await keys.getSecret('github_oauth');
+  if (!token) return { connected: false };
+  const who = await ghApi('/user');
+  if (who.status === 401) return { connected: false };  // ONLY a real 401 means the token is revoked/invalid
+  // A network blip (status 0) or a GitHub 5xx must NOT masquerade as "disconnected" — the token is still
+  // there; stay connected (login may be blank) and let the actual pull surface the transient error.
+  return { connected: true, login: String((who.json as { login?: string })?.login || '') };
+});
+// Start the OAuth device flow: returns the one-time user code + verification URL for the renderer to show.
+ipcMain.handle('github:device-start', async () => {
+  const r = await httpsReq('github.com', '/login/device/code', 'POST', { Accept: 'application/json', 'Content-Type': 'application/x-www-form-urlencoded' }, `client_id=${GH_CLIENT_ID}&scope=repo`);
+  try {
+    const j = JSON.parse(r.text) as Record<string, unknown>;
+    if (j.device_code) return { ok: true, userCode: String(j.user_code || ''), verificationUri: String(j.verification_uri || 'https://github.com/login/device'), deviceCode: String(j.device_code), interval: Number(j.interval) || 5, expiresIn: Number(j.expires_in) || 900 };
+    return { ok: false, error: String(j.error_description || j.error || 'Could not start device flow') };
+  } catch { return { ok: false, error: 'Could not start device flow' }; }
+});
+// One poll of the token endpoint. The renderer loops this on the interval until it's no longer pending.
+ipcMain.handle('github:device-poll', async (_e, { deviceCode }: { deviceCode: string }) => {
+  if (typeof deviceCode !== 'string' || !deviceCode) return { status: 'error', error: 'bad request' };
+  const r = await httpsReq('github.com', '/login/oauth/access_token', 'POST', { Accept: 'application/json', 'Content-Type': 'application/x-www-form-urlencoded' }, `client_id=${GH_CLIENT_ID}&device_code=${deviceCode}&grant_type=urn:ietf:params:oauth:grant-type:device_code`);
+  let j: Record<string, unknown> = {}; try { j = JSON.parse(r.text) as Record<string, unknown>; } catch { /* */ }
+  if (j.access_token) {
+    await keys.setSecret('github_oauth', String(j.access_token));   // encrypted in the OS keychain
+    const who = await ghApi('/user');
+    return { status: 'ok', login: String((who.json as { login?: string })?.login || '') };
+  }
+  if (r.status === 0) return { status: 'pending' }; // transient network/timeout mid-authorization — keep waiting, don't abort
+  const err = String(j.error || '');
+  if (err === 'authorization_pending') return { status: 'pending' };
+  if (err === 'slow_down') return { status: 'slow_down', interval: Number(j.interval) || 5 };
+  if (err === 'expired_token') return { status: 'expired' };
+  if (err === 'access_denied') return { status: 'denied' };
+  return { status: 'error', error: String(j.error_description || err || 'authorization failed') };
+});
+// Forget the token (sign out).
+ipcMain.handle('github:disconnect', async () => { await keys.setSecret('github_oauth', ''); return { ok: true }; });
+
+// owner/name from a folder's git origin remote.
+ipcMain.handle('github:repo', (_e, dir: string) => new Promise<string | null>((resolve) => {
+  if (!dir || typeof dir !== 'string') return resolve(null);
+  resolveBin('git').then((git) => {
+    if (!git) return resolve(null);
+    execFile(git, ['-C', dir, 'remote', 'get-url', 'origin'], { timeout: 6000, windowsHide: true }, (err, stdout) => {
+      resolve(err ? null : ghRepoFromRemote(stdout || ''));
+    });
+  });
+}));
+
+// Pull open issues for owner/name via the app's OAuth token (REST). GitHub's issues endpoint mixes
+// PRs in — filter them out.
+ipcMain.handle('github:issues', async (_e, repo: string) => {
+  if (typeof repo !== 'string' || !/^[\w.-]+\/[\w.-]+$/.test(repo)) return { ok: false, error: 'Invalid repository' };
+  const r = await ghApi(`/repos/${repo}/issues?state=open&per_page=50`);
+  if (!r.ok || !Array.isArray(r.json)) {
+    const msg = (r.json as { message?: string } | null)?.message || '';
+    if (r.status === 401) return { ok: false, error: 'Not connected — reconnect GitHub in Sources.' };
+    if (r.status === 403 || r.status === 404) return { ok: false, error: `${msg || 'No access'} (HTTP ${r.status}). If this repo is in an organization, an org owner may need to approve the Slayer T OAuth app (Org → Settings → Third-party Access).` };
+    return { ok: false, error: `${msg || 'Could not pull issues'} (HTTP ${r.status})` };
+  }
+  const issues: Issue[] = (r.json as Array<Record<string, unknown>>).filter((i) => !i.pull_request).map((i) => ({
+    number: Number(i.number) || 0, title: String(i.title || ''), body: String(i.body || ''),
+    state: String(i.state || 'open'), url: String(i.html_url || ''),
+    labels: Array.isArray(i.labels) ? (i.labels as Array<Record<string, unknown>>).map((l) => ({ name: String(l.name || ''), color: l.color ? String(l.color) : undefined })) : [],
+  }));
+  return { ok: true, issues };
+});
+
+// List the connected user's GitHub repos (for the Sources picker) via the app's OAuth token.
+ipcMain.handle('github:repos', async () => {
+  const r = await ghApi('/user/repos?per_page=100&sort=updated&affiliation=owner,collaborator,organization_member');
+  if (!r.ok || !Array.isArray(r.json)) return { ok: false, error: r.status === 401 ? 'Not connected to GitHub' : 'Could not list repos' };
+  const repos = (r.json as Array<Record<string, unknown>>).map((x) => ({ repo: String(x.full_name || ''), desc: String(x.description || ''), priv: !!x.private })).filter((x) => /^[\w.-]+\/[\w.-]+$/.test(x.repo));
+  return { ok: true, repos };
+});
+
+// Open PRs for a repo (app OAuth token) — to light up an assigned issue whose branch (issue-N) has a PR.
+ipcMain.handle('github:prs', async (_e, repo: string) => {
+  if (typeof repo !== 'string' || !/^[\w.-]+\/[\w.-]+$/.test(repo)) return { ok: false, error: 'Invalid repository' };
+  const r = await ghApi(`/repos/${repo}/pulls?state=open&per_page=100`);
+  if (!r.ok || !Array.isArray(r.json)) return { ok: false, error: 'Could not list PRs' };
+  const prs = (r.json as Array<Record<string, unknown>>).map((p) => ({ number: Number(p.number) || 0, branch: String((p.head as { ref?: string })?.ref || ''), url: String(p.html_url || ''), draft: !!p.draft })).filter((p) => p.branch);
+  return { ok: true, prs };
+});
+
+// Which coding agents are installed on PATH (for the Assign-to picker). Names are hardcoded literals.
+ipcMain.handle('agents:detect', async () => {
+  const bins = ['claude', 'gemini', 'codex', 'aider', 'antigravity'];
+  const out: Record<string, boolean> = {};
+  await Promise.all(bins.map(async (b) => { out[b] = !!(await resolveBin(b)); }));
+  return out;
+});
+
+ipcMain.handle('open:external', (_e, url: string) => {
+  if (typeof url === 'string' && /^https?:\/\//i.test(url)) shell.openExternal(url);
+});
+
+// Create (or reuse) an ISOLATED git worktree for an issue: a per-issue working dir on branch
+// issue-<n>, so several issues can be worked in parallel without disturbing the main checkout.
+// Also drops the (edited) issue brief as .slayer/issue-<n>.md and locally git-excludes it, so the
+// agent's PR never carries the brief. Returns the worktree path + brief's repo-relative path.
+ipcMain.handle('git:worktree-add', async (_e, p: { repo: string; dir: string; number: number; brief?: string }) => {
+  try {
+    const repo = p?.repo, dir = p?.dir, num = p?.number;
+    if (typeof repo !== 'string' || !/^[\w.-]+\/[\w.-]+$/.test(repo) || !Number.isInteger(num) || num <= 0) return { ok: false, error: 'Invalid request' };
+    const git = await resolveBin('git');
+    if (!git) return { ok: false, error: 'git not found on PATH' };
+
+    // Resolve a LOCAL clone of the SELECTED repo — NOT the open folder, which may now be a different repo
+    // (the repo selector decouples them). Prefer the open folder when its remote IS this repo; otherwise
+    // use — or create — a managed clone under %APPDATA%\Relay\repos\<owner>__<repo>. gh clone carries your
+    // GitHub login, so private + org repos clone without embedding a token in .git/config.
+    let repoRoot = '';
+    if (typeof dir === 'string' && dir) {
+      const top = await runBin(git, ['-C', dir, 'rev-parse', '--show-toplevel']);
+      if (top.ok) {
+        const root = top.stdout.trim();
+        const rem = await runBin(git, ['-C', root, 'remote', 'get-url', 'origin']);
+        if (rem.ok && ghRepoFromRemote(rem.stdout) === repo) repoRoot = root;
+      }
+    }
+    if (!repoRoot) {
+      const cacheRoot = path.join(app.getPath('userData'), 'repos', repo.replace('/', '__'));
+      if (existsSync(path.join(cacheRoot, '.git'))) {
+        repoRoot = cacheRoot;
+        await runBin(git, ['-C', cacheRoot, 'fetch', 'origin', '--prune'], { timeout: 120000 }); // freshen (best-effort)
+      } else {
+        await fsp.mkdir(path.dirname(cacheRoot), { recursive: true });
+        const gh = await resolveBin('gh');
+        const clone = gh
+          ? await runBin(gh, ['repo', 'clone', repo, cacheRoot], { timeout: 300000 })
+          : await runBin(git, ['clone', `https://github.com/${repo}.git`, cacheRoot], { timeout: 300000 });
+        if (!clone.ok || !existsSync(path.join(cacheRoot, '.git'))) {
+          const msg = (clone.stderr || clone.stdout || 'clone failed').trim().split('\n').filter(Boolean).pop() || 'clone failed';
+          return { ok: false, error: `Couldn't clone ${repo}: ${msg}` };
+        }
+        repoRoot = cacheRoot;
+      }
+    }
+    // An unborn repo (git init, no commits) can't seed a worktree branch — say so plainly.
+    if (!(await runBin(git, ['-C', repoRoot, 'rev-parse', '--verify', '--quiet', 'HEAD'])).ok)
+      return { ok: false, error: 'This repository has no commits yet — make an initial commit first.' };
+    // Base the fix branch on the repo's default branch (origin/HEAD), falling back to the current branch.
+    let base = '';
+    const dh = await runBin(git, ['-C', repoRoot, 'symbolic-ref', '--short', 'refs/remotes/origin/HEAD']);
+    if (dh.ok) base = dh.stdout.trim().replace(/^origin\//, '');
+    if (!base) { const cur = await runBin(git, ['-C', repoRoot, 'rev-parse', '--abbrev-ref', 'HEAD']); base = (cur.ok && cur.stdout.trim()) || 'HEAD'; }
+    const branch = `issue-${num}`;
+    // Disambiguate by a short hash of the repo's absolute path, so two different repos that share a
+    // basename (…/a/app and …/b/app) never collide onto the same worktree folder.
+    const folder = `${path.basename(repoRoot) || 'repo'}-${createHash('sha1').update(repoRoot.replace(/\\/g, '/').toLowerCase()).digest('hex').slice(0, 8)}`;
+    const wtPath = path.join(app.getPath('userData'), 'worktrees', folder, branch);
+    const norm = (s: string) => s.replace(/\\/g, '/').toLowerCase();
+    // Drop registrations for worktrees whose folders were deleted by hand, so a re-assign can recreate them.
+    await runBin(git, ['-C', repoRoot, 'worktree', 'prune']);
+    // Already have a worktree for this issue? Reuse it (re-assigning the same issue is idempotent).
+    const list = await runBin(git, ['-C', repoRoot, 'worktree', 'list', '--porcelain']);
+    const reused = list.ok && norm(list.stdout).split('\n').some((ln) => ln.startsWith('worktree ') && norm(ln.slice(9).trim()) === norm(wtPath));
+    if (!reused) {
+      // Branch may already exist from a prior run whose worktree was pruned — re-attach it instead of -b.
+      const hasBranch = (await runBin(git, ['-C', repoRoot, 'rev-parse', '--verify', '--quiet', `refs/heads/${branch}`])).ok;
+      const addArgs = hasBranch
+        ? ['-C', repoRoot, 'worktree', 'add', wtPath, branch]
+        : ['-C', repoRoot, 'worktree', 'add', wtPath, '-b', branch, base];
+      const add = await runBin(git, addArgs, { timeout: 60000 });
+      if (!add.ok) {
+        const msg = (add.stderr || add.stdout || 'git worktree add failed').trim().split('\n').filter(Boolean).pop() || 'git worktree add failed';
+        return { ok: false, error: msg };
+      }
+    }
+    // Drop the brief inside the worktree and locally exclude .slayer/ so it never shows up / gets committed.
+    let briefRel: string | undefined;
+    const brief = typeof p?.brief === 'string' ? p.brief : '';
+    if (brief) {
+      try {
+        await fsp.mkdir(path.join(wtPath, '.slayer'), { recursive: true });
+        briefRel = `.slayer/issue-${num}.md`;
+        await fsp.writeFile(path.join(wtPath, briefRel), brief, 'utf8');
+        const gp = await runBin(git, ['-C', wtPath, 'rev-parse', '--git-path', 'info/exclude']);
+        if (gp.ok) {
+          const excl = path.isAbsolute(gp.stdout.trim()) ? gp.stdout.trim() : path.join(wtPath, gp.stdout.trim());
+          const curExcl = await fsp.readFile(excl, 'utf8').catch(() => '');
+          // Strip CR before the presence test — on a CRLF exclude the line is ".slayer/\r", which /$/m
+          // (matching just before \n) would miss, re-appending a duplicate on every re-assign.
+          if (!/^\.slayer\/?$/m.test(curExcl.replace(/\r/g, ''))) await fsp.writeFile(excl, (!curExcl || curExcl.endsWith('\n') ? curExcl : curExcl + '\n') + '.slayer/\n', 'utf8');
+        }
+      } catch (err) { logFatal('git:worktree-add/brief', err); briefRel = undefined; } // brief is best-effort; the worktree still opens
+    }
+    return { ok: true, path: wtPath, branch, base, reused, briefRel };
+  } catch (err) { logFatal('git:worktree-add', err); return { ok: false, error: 'Worktree creation failed' }; }
 });
 
 /* -------------------- session export -------------------- */

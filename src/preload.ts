@@ -1,6 +1,6 @@
 import { contextBridge, ipcRenderer, clipboard } from 'electron';
 import * as os from 'node:os';
-import type { Settings, SavedSession, AgentEvent, ApprovalRequest, ChatTurn, Workspace, WorkspaceDef, WorkspaceBlueprint, Block } from './shared/types';
+import type { Settings, SavedSession, AgentEvent, ApprovalRequest, ChatTurn, Workspace, WorkspaceDef, WorkspaceBlueprint, Block, Issue } from './shared/types';
 
 // Real identity for the Blocks-view prompt line (user@host + home for ~ shortening).
 function sysInfo() { try { return { user: os.userInfo().username, host: os.hostname().split('.')[0], home: os.homedir() }; } catch { return { user: 'user', host: 'relay', home: '' }; } }
@@ -10,7 +10,7 @@ type BlockEvt = { type: 'start' | 'update' | 'end'; block: Block } | { type: 'cw
 // The only surface the renderer can touch. No Node, no fs, no API keys here.
 const api = {
   // --- terminals (real PTYs) ---
-  ptyCreate: (id: string, cwd: string, cols: number, rows: number, restore?: string): Promise<boolean> => ipcRenderer.invoke('pty:create', { id, cwd, cols, rows, restore }),
+  ptyCreate: (id: string, cwd: string, cols: number, rows: number, restore?: string, runCmd?: string): Promise<boolean> => ipcRenderer.invoke('pty:create', { id, cwd, cols, rows, restore, runCmd }),
   ptyWrite: (id: string, data: string) => ipcRenderer.send('pty:write', { id, data }),
   ptyResize: (id: string, cols: number, rows: number) => ipcRenderer.send('pty:resize', { id, cols, rows }),
   ptyDetach: (id: string) => ipcRenderer.send('pty:detach', { id }),
@@ -59,6 +59,27 @@ const api = {
   saveWorkspaceMeta: (workspaces: WorkspaceDef[], activeWorkspaceId: string) => ipcRenderer.send('workspaces:save-meta', { workspaces, activeWorkspaceId }),
   getWorkspaceSnapshot: (id: string): Promise<Workspace> => ipcRenderer.invoke('workspace:get-snapshot', id),
   saveWorkspaceSnapshot: (id: string, ws: Workspace) => ipcRenderer.send('workspace:save-snapshot', { id, ws }),
+
+  // --- Issue Agent (Phase 1: read-only GitHub issues via the gh CLI, keyless) ---
+  // App-owned GitHub auth (OAuth device flow; token encrypted in the OS keychain, never in the renderer).
+  githubAuthState: (): Promise<{ connected: boolean; login?: string }> => ipcRenderer.invoke('github:auth-state'),
+  githubDeviceStart: (): Promise<{ ok: boolean; userCode?: string; verificationUri?: string; deviceCode?: string; interval?: number; expiresIn?: number; error?: string }> => ipcRenderer.invoke('github:device-start'),
+  githubDevicePoll: (deviceCode: string): Promise<{ status: string; login?: string; interval?: number; error?: string }> => ipcRenderer.invoke('github:device-poll', { deviceCode }),
+  githubDisconnect: (): Promise<{ ok: boolean }> => ipcRenderer.invoke('github:disconnect'),
+  // Resolve owner/name from a folder's git `origin` remote (null if not a git repo / no GitHub remote).
+  githubRepo: (dir: string): Promise<string | null> => ipcRenderer.invoke('github:repo', dir),
+  // Pull open issues for owner/name via `gh issue list`.
+  githubIssues: (repo: string): Promise<{ ok: boolean; issues?: Issue[]; error?: string }> => ipcRenderer.invoke('github:issues', repo),
+  // List the user's GitHub repos for the Sources picker.
+  githubRepos: (): Promise<{ ok: boolean; repos?: { repo: string; desc: string; priv: boolean }[]; error?: string }> => ipcRenderer.invoke('github:repos'),
+  // Open PRs for a repo — to link an assigned issue's branch to its PR (review → ship).
+  githubPrs: (repo: string): Promise<{ ok: boolean; prs?: { number: number; branch: string; url: string; draft: boolean }[]; error?: string }> => ipcRenderer.invoke('github:prs', repo),
+  // Which coding agents are installed on PATH (for the Assign-to picker).
+  agentsDetect: (): Promise<Record<string, boolean>> => ipcRenderer.invoke('agents:detect'),
+  // Open a URL in the user's default browser (e.g. an issue on GitHub).
+  openExternal: (url: string): Promise<void> => ipcRenderer.invoke('open:external', url),
+  // Assign: create (or reuse) an isolated worktree for an issue and drop the edited brief inside it.
+  worktreeAdd: (repo: string, dir: string, number: number, brief: string): Promise<{ ok: boolean; path?: string; branch?: string; base?: string; reused?: boolean; briefRel?: string; error?: string }> => ipcRenderer.invoke('git:worktree-add', { repo, dir, number, brief }),
 
   // --- workspace blueprints (reusable "Templates") ---
   getBlueprints: (): Promise<WorkspaceBlueprint[]> => ipcRenderer.invoke('blueprints:get'),
