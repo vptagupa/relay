@@ -74,6 +74,8 @@ const api = {
   githubRepos: (): Promise<{ ok: boolean; repos?: { repo: string; desc: string; priv: boolean }[]; error?: string }> => ipcRenderer.invoke('github:repos'),
   // Open PRs for a repo — to link an assigned issue's branch to its PR (review → ship).
   githubPrs: (repo: string): Promise<{ ok: boolean; prs?: { number: number; branch: string; url: string; draft: boolean }[]; error?: string }> => ipcRenderer.invoke('github:prs', repo),
+  // Which coding agents are installed on PATH (for the Assign-to picker).
+  agentsDetect: (): Promise<Record<string, boolean>> => ipcRenderer.invoke('agents:detect'),
   // Open a URL in the user's default browser (e.g. an issue on GitHub).
   openExternal: (url: string): Promise<void> => ipcRenderer.invoke('open:external', url),
   // Assign: create (or reuse) an isolated worktree for an issue and drop the edited brief inside it.

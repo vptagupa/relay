@@ -380,6 +380,14 @@ ipcMain.handle('github:prs', async (_e, repo: string) => {
   return { ok: true, prs };
 });
 
+// Which coding agents are installed on PATH (for the Assign-to picker). Names are hardcoded literals.
+ipcMain.handle('agents:detect', async () => {
+  const bins = ['claude', 'gemini', 'codex', 'aider', 'antigravity'];
+  const out: Record<string, boolean> = {};
+  await Promise.all(bins.map(async (b) => { out[b] = !!(await resolveBin(b)); }));
+  return out;
+});
+
 ipcMain.handle('open:external', (_e, url: string) => {
   if (typeof url === 'string' && /^https?:\/\//i.test(url)) shell.openExternal(url);
 });

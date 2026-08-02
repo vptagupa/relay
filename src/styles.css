@@ -605,6 +605,10 @@ body.tabdrag .dz{display:block;pointer-events:auto}
 .iss-agent.no{background:rgba(240,170,70,.12);color:#e0a44a}
 .iss-lbl{display:block;font:600 11px/1 var(--sans);color:var(--text-dim);margin-bottom:6px}
 .iss-lbl .mut{font-weight:400;color:var(--muted)}
+.iss-agentrow{display:flex;align-items:center;gap:10px;margin-bottom:11px}
+.iss-agentsel{flex:1;background:var(--surface-2);border:1px solid var(--border-strong);border-radius:8px;padding:7px 10px;color:var(--text);font:600 12.5px var(--sans);cursor:pointer}
+.iss-agentsel:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-ghost)}
+.iss-agentsel:disabled{opacity:.5;cursor:not-allowed}
 .iss-brief{width:100%;box-sizing:border-box;resize:vertical;min-height:200px;background:var(--surface-2);border:1px solid var(--border-strong);border-radius:9px;padding:10px 12px;color:var(--text);font:12px/1.55 var(--mono)}
 .iss-brief:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-ghost)}
 .iss-wt{margin-top:11px;font:11.5px/1.5 var(--mono);color:var(--muted)}

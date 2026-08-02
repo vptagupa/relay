@@ -138,6 +138,7 @@ export interface Settings {
   sidebarView?: 'library' | 'files' | 'issues'; // which rail panel is active in the sidebar
   issueRepos?: string[]; // repos tracked via Sources (owner/name)
   issueRepo?: string;    // the active repo (owner/name); empty → infer from the open folder's git remote
+  issueAgent?: string;   // preferred coding agent id for Assign (claude/gemini/codex/aider/antigravity)
 }
 
 // Streaming events emitted by the agent loop to the renderer.

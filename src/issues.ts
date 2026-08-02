@@ -211,24 +211,42 @@ Implement a fix for the issue described above in this repository.
 `;
 }
 
+// Coding agents you can assign an issue to. Each is a thin adapter: a bin to detect + how to launch it in
+// the worktree terminal, seeded with the brief FILE (never issue text on the command line). Only Claude
+// Code is verified on this machine; the others follow their documented CLIs and are best-effort.
+const AGENTS: { id: string; name: string; bin: string; launch: (rel: string) => string }[] = [
+  { id: 'claude', name: 'Claude Code', bin: 'claude', launch: (rel) => `claude "Read ${rel} and implement the fix for the GitHub issue it describes in this repository, then summarize the changes."` },
+  { id: 'gemini', name: 'Gemini CLI', bin: 'gemini', launch: (rel) => `gemini "Read ${rel} and implement the fix for the GitHub issue it describes in this repository, then summarize the changes."` },
+  { id: 'codex', name: 'Codex CLI', bin: 'codex', launch: (rel) => `codex "Read ${rel} and implement the fix for the GitHub issue it describes in this repository, then summarize the changes."` },
+  { id: 'aider', name: 'Aider', bin: 'aider', launch: (rel) => `aider --message "Read ${rel} and implement the fix for the GitHub issue it describes in this repository, then summarize the changes."` },
+  { id: 'antigravity', name: 'Antigravity', bin: 'antigravity', launch: (rel) => `antigravity "Read ${rel} and implement the fix it describes in this repository, then summarize the changes."` },
+];
+
 let assigning = false; // guard the whole create-worktree round-trip against a double submit
 async function openAssign(i: Issue): Promise<void> {
   const dir = state.settings.workspace || '';
-  const det = await relay.claudeDetect().catch(() => ({ installed: false }));
-  const agentOk = !!det.installed;
+  const detected = await relay.agentsDetect().catch(() => ({} as Record<string, boolean>));
+  const installed = AGENTS.filter((a) => detected[a.id]);
+  const agentOk = installed.length > 0;
+  // Default agent = the saved preference if still installed, else the first installed one.
+  let agentId = (state.settings.issueAgent && detected[state.settings.issueAgent]) ? state.settings.issueAgent : (installed[0]?.id || '');
+  const opts = AGENTS.map((a) => `<option value="${a.id}"${a.id === agentId ? ' selected' : ''}${detected[a.id] ? '' : ' disabled'}>${esc(a.name)}${detected[a.id] ? '' : ' — not installed'}</option>`).join('');
   const primary = agentOk ? '⚡ Assign & launch' : 'Create worktree & open';
   const { root, close } = modal(`<div class="tpl-card iss-card">
-      <div class="hd"><span class="dot" style="background:var(--accent)"></span><span class="t">Assign #${i.number} to Claude Code<small>${esc(i.title)}</small></span></div>
+      <div class="hd"><span class="dot" style="background:var(--accent)"></span><span class="t">Assign #${i.number}<small>${esc(i.title)}</small></span></div>
       <div class="bd">
-        <div class="iss-agent ${agentOk ? 'ok' : 'no'}">${agentOk ? '✓ Claude Code detected — keyless, runs in its own subscription session' : '⚠ <code>claude</code> not found — the worktree still opens; install Claude Code to auto-launch the agent.'}</div>
+        <div class="iss-agentrow"><label class="iss-lbl" style="margin:0">Assign to</label><select class="iss-agentsel" id="issAgentSel"${agentOk ? '' : ' disabled'}>${opts}</select></div>
+        <div class="iss-agent ${agentOk ? 'ok' : 'no'}">${agentOk ? '✓ runs in its own login/session (keyless where supported), in an isolated worktree' : '⚠ No coding agent on PATH — the worktree still opens; install Claude Code (or Gemini / Codex / Aider) to auto-launch.'}</div>
         <label class="iss-lbl">Brief for the agent <span class="mut">— edit before launch</span></label>
-        <textarea class="iss-brief" spellcheck="false" rows="12">${esc(defaultBrief(i))}</textarea>
+        <textarea class="iss-brief" spellcheck="false" rows="11">${esc(defaultBrief(i))}</textarea>
         <div class="iss-wt">Creates an isolated worktree on branch <code>issue-${i.number}</code> and runs the agent there.</div>
       </div>
       <div class="ft"><span class="hint">Saved as <code>.slayer/issue-${i.number}.md</code> (git-excluded)</span><span class="r"><button class="tpl-btn ghost" data-x>Cancel</button><button class="tpl-btn pri" data-ok>${primary}</button></span></div>
     </div>`);
   const ta = root.querySelector('.iss-brief') as HTMLTextAreaElement;
   const okBtn = root.querySelector('[data-ok]') as HTMLButtonElement;
+  const sel = root.querySelector('#issAgentSel') as HTMLSelectElement | null;
+  if (sel) sel.onchange = () => { agentId = sel.value; void relay.patchSettings({ issueAgent: agentId }); }; // remember the pick
   root.querySelector('[data-x]')?.addEventListener('click', close);
   setTimeout(() => ta.focus(), 30);
   okBtn.addEventListener('click', async () => {
@@ -239,13 +257,12 @@ async function openAssign(i: Issue): Promise<void> {
     if (!root.isConnected) return; // user backed out (Escape/scrim) while the worktree was being created — don't launch
     if (!res.ok) { okBtn.disabled = false; okBtn.textContent = primary; toast(res.error || 'Could not create worktree'); return; }
     const rel = res.briefRel || '';
-    const runCmd = agentOk
-      ? (rel ? `claude "Read ${rel} and implement the fix for the GitHub issue it describes in this repository, then summarize the changes."` : 'claude')
-      : undefined;
+    const agent = AGENTS.find((a) => a.id === agentId);
+    const runCmd = (agentOk && agent) ? (rel ? agent.launch(rel) : agent.bin) : undefined;
     deps.openAgentTab({ cwd: res.path!, name: `issue #${i.number}`, runCmd });
     if (agentOk) { runStatus.set(`${repo}#${i.number}`, 'working'); render(); } // the row now shows it's being worked on
     close();
-    toast(res.reused ? `Reopened worktree for #${i.number}` : (agentOk ? `Launching Claude Code on #${i.number}` : `Worktree ready for #${i.number}`), true);
+    toast(res.reused ? `Reopened worktree for #${i.number}` : (agentOk ? `Launching ${agent?.name || 'agent'} on #${i.number}` : `Worktree ready for #${i.number}`), true);
   });
 }
 
