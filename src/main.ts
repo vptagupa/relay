@@ -1,9 +1,10 @@
 import { app, BrowserWindow, ipcMain, dialog, Menu, shell } from 'electron';
 import path from 'node:path';
 import os from 'node:os';
-import { promises as fsp, appendFileSync } from 'node:fs';
+import { promises as fsp, appendFileSync, existsSync } from 'node:fs';
 import { exec, execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import * as https from 'node:https';
 import { createTerm, writeTerm, resizeTerm, detachTerm, killTerm, killAll } from './pty';
 import * as store from './store';
 import * as keys from './keys';
@@ -265,17 +266,72 @@ function runBin(bin: string, args: string[], opts: { cwd?: string; timeout?: num
   });
 }
 
-// Is the GitHub CLI installed, and logged in? (keyless — its own session, no token in the app.)
-ipcMain.handle('github:detect', () => new Promise<{ gh: boolean; authed: boolean; account?: string }>((resolve) => {
-  resolveBin('gh').then((gh) => {
-    if (!gh) return resolve({ gh: false, authed: false });
-    execFile(gh, ['auth', 'status'], { timeout: 8000, windowsHide: true }, (err, stdout, stderr) => {
-      const txt = (stderr || '') + (stdout || ''); // gh prints status to stderr; exit 0 = logged in
-      const acc = txt.match(/account\s+(\S+)/i)?.[1];
-      resolve({ gh: true, authed: !err, account: acc });
+// --- GitHub, app-owned auth (OAuth device flow) ---------------------------------------------------
+// Public OAuth App client id (device flow uses NO client secret — safe to embed in a desktop app).
+const GH_CLIENT_ID = 'Ov23li0p7Bql1ilOiKXT';
+// A minimal HTTPS request that resolves to {status,text} and never rejects.
+function httpsReq(host: string, pathname: string, method: string, headers: Record<string, string>, body?: string): Promise<{ status: number; text: string }> {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (v: { status: number; text: string }) => { if (!done) { done = true; resolve(v); } };
+    const req = https.request({ host, path: pathname, method, headers: { 'User-Agent': 'SlayerT', ...headers }, timeout: 20000 }, (res) => {
+      let data = ''; res.on('data', (c) => (data += c)); res.on('end', () => finish({ status: res.statusCode || 0, text: data }));
     });
+    req.on('error', () => finish({ status: 0, text: '' }));
+    req.on('timeout', () => { req.destroy(); finish({ status: 0, text: '' }); }); // a hung connection must not stall the panel/poll forever
+    if (body) req.write(body);
+    req.end();
   });
-}));
+}
+// Call the GitHub REST API with the stored OAuth token (the app authenticates itself — no gh CLI).
+async function ghApi(pathname: string): Promise<{ ok: boolean; status: number; json: unknown }> {
+  const token = await keys.getSecret('github_oauth');
+  if (!token) return { ok: false, status: 401, json: null };
+  const r = await httpsReq('api.github.com', pathname, 'GET', { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' });
+  let json: unknown = null; try { json = JSON.parse(r.text); } catch { /* non-json error body */ }
+  return { ok: r.status >= 200 && r.status < 300, status: r.status, json };
+}
+
+// The app's OWN GitHub auth state — an OAuth token encrypted in the OS keychain. No gh CLI, no token
+// in relay.json; the renderer never sees the token, only whether we're connected + as whom.
+ipcMain.handle('github:auth-state', async () => {
+  const token = await keys.getSecret('github_oauth');
+  if (!token) return { connected: false };
+  const who = await ghApi('/user');
+  if (who.status === 401) return { connected: false };  // ONLY a real 401 means the token is revoked/invalid
+  // A network blip (status 0) or a GitHub 5xx must NOT masquerade as "disconnected" — the token is still
+  // there; stay connected (login may be blank) and let the actual pull surface the transient error.
+  return { connected: true, login: String((who.json as { login?: string })?.login || '') };
+});
+// Start the OAuth device flow: returns the one-time user code + verification URL for the renderer to show.
+ipcMain.handle('github:device-start', async () => {
+  const r = await httpsReq('github.com', '/login/device/code', 'POST', { Accept: 'application/json', 'Content-Type': 'application/x-www-form-urlencoded' }, `client_id=${GH_CLIENT_ID}&scope=repo`);
+  try {
+    const j = JSON.parse(r.text) as Record<string, unknown>;
+    if (j.device_code) return { ok: true, userCode: String(j.user_code || ''), verificationUri: String(j.verification_uri || 'https://github.com/login/device'), deviceCode: String(j.device_code), interval: Number(j.interval) || 5, expiresIn: Number(j.expires_in) || 900 };
+    return { ok: false, error: String(j.error_description || j.error || 'Could not start device flow') };
+  } catch { return { ok: false, error: 'Could not start device flow' }; }
+});
+// One poll of the token endpoint. The renderer loops this on the interval until it's no longer pending.
+ipcMain.handle('github:device-poll', async (_e, { deviceCode }: { deviceCode: string }) => {
+  if (typeof deviceCode !== 'string' || !deviceCode) return { status: 'error', error: 'bad request' };
+  const r = await httpsReq('github.com', '/login/oauth/access_token', 'POST', { Accept: 'application/json', 'Content-Type': 'application/x-www-form-urlencoded' }, `client_id=${GH_CLIENT_ID}&device_code=${deviceCode}&grant_type=urn:ietf:params:oauth:grant-type:device_code`);
+  let j: Record<string, unknown> = {}; try { j = JSON.parse(r.text) as Record<string, unknown>; } catch { /* */ }
+  if (j.access_token) {
+    await keys.setSecret('github_oauth', String(j.access_token));   // encrypted in the OS keychain
+    const who = await ghApi('/user');
+    return { status: 'ok', login: String((who.json as { login?: string })?.login || '') };
+  }
+  if (r.status === 0) return { status: 'pending' }; // transient network/timeout mid-authorization — keep waiting, don't abort
+  const err = String(j.error || '');
+  if (err === 'authorization_pending') return { status: 'pending' };
+  if (err === 'slow_down') return { status: 'slow_down', interval: Number(j.interval) || 5 };
+  if (err === 'expired_token') return { status: 'expired' };
+  if (err === 'access_denied') return { status: 'denied' };
+  return { status: 'error', error: String(j.error_description || err || 'authorization failed') };
+});
+// Forget the token (sign out).
+ipcMain.handle('github:disconnect', async () => { await keys.setSecret('github_oauth', ''); return { ok: true }; });
 
 // owner/name from a folder's git origin remote.
 ipcMain.handle('github:repo', (_e, dir: string) => new Promise<string | null>((resolve) => {
@@ -288,26 +344,41 @@ ipcMain.handle('github:repo', (_e, dir: string) => new Promise<string | null>((r
   });
 }));
 
-// Pull open issues for owner/name via `gh issue list` (validated repo, arg array — no shell).
-ipcMain.handle('github:issues', (_e, repo: string) => new Promise<{ ok: boolean; issues?: Issue[]; error?: string }>((resolve) => {
-  if (typeof repo !== 'string' || !/^[\w.-]+\/[\w.-]+$/.test(repo)) return resolve({ ok: false, error: 'Invalid repository' });
-  resolveBin('gh').then((gh) => {
-    if (!gh) return resolve({ ok: false, error: 'GitHub CLI (gh) not found' });
-    execFile(gh, ['issue', 'list', '--repo', repo, '--state', 'open', '--limit', '50', '--json', 'number,title,body,labels,state,url'],
-      { timeout: 20000, windowsHide: true, maxBuffer: 8 * 1024 * 1024 }, (err, stdout, stderr) => {
-        if (err) return resolve({ ok: false, error: (stderr || err.message || 'gh failed').trim().split('\n')[0] });
-        try {
-          const raw = JSON.parse(stdout || '[]') as Array<Record<string, unknown>>;
-          const issues: Issue[] = raw.map((i) => ({
-            number: Number(i.number) || 0, title: String(i.title || ''), body: String(i.body || ''),
-            state: String(i.state || 'OPEN'), url: String(i.url || ''),
-            labels: Array.isArray(i.labels) ? (i.labels as Array<Record<string, unknown>>).map((l) => ({ name: String(l.name || ''), color: l.color ? String(l.color) : undefined })) : [],
-          }));
-          resolve({ ok: true, issues });
-        } catch { resolve({ ok: false, error: 'Could not parse gh output' }); }
-      });
-  });
-}));
+// Pull open issues for owner/name via the app's OAuth token (REST). GitHub's issues endpoint mixes
+// PRs in — filter them out.
+ipcMain.handle('github:issues', async (_e, repo: string) => {
+  if (typeof repo !== 'string' || !/^[\w.-]+\/[\w.-]+$/.test(repo)) return { ok: false, error: 'Invalid repository' };
+  const r = await ghApi(`/repos/${repo}/issues?state=open&per_page=50`);
+  if (!r.ok || !Array.isArray(r.json)) {
+    const msg = (r.json as { message?: string } | null)?.message || '';
+    if (r.status === 401) return { ok: false, error: 'Not connected — reconnect GitHub in Sources.' };
+    if (r.status === 403 || r.status === 404) return { ok: false, error: `${msg || 'No access'} (HTTP ${r.status}). If this repo is in an organization, an org owner may need to approve the Slayer T OAuth app (Org → Settings → Third-party Access).` };
+    return { ok: false, error: `${msg || 'Could not pull issues'} (HTTP ${r.status})` };
+  }
+  const issues: Issue[] = (r.json as Array<Record<string, unknown>>).filter((i) => !i.pull_request).map((i) => ({
+    number: Number(i.number) || 0, title: String(i.title || ''), body: String(i.body || ''),
+    state: String(i.state || 'open'), url: String(i.html_url || ''),
+    labels: Array.isArray(i.labels) ? (i.labels as Array<Record<string, unknown>>).map((l) => ({ name: String(l.name || ''), color: l.color ? String(l.color) : undefined })) : [],
+  }));
+  return { ok: true, issues };
+});
+
+// List the connected user's GitHub repos (for the Sources picker) via the app's OAuth token.
+ipcMain.handle('github:repos', async () => {
+  const r = await ghApi('/user/repos?per_page=100&sort=updated&affiliation=owner,collaborator,organization_member');
+  if (!r.ok || !Array.isArray(r.json)) return { ok: false, error: r.status === 401 ? 'Not connected to GitHub' : 'Could not list repos' };
+  const repos = (r.json as Array<Record<string, unknown>>).map((x) => ({ repo: String(x.full_name || ''), desc: String(x.description || ''), priv: !!x.private })).filter((x) => /^[\w.-]+\/[\w.-]+$/.test(x.repo));
+  return { ok: true, repos };
+});
+
+// Open PRs for a repo (app OAuth token) — to light up an assigned issue whose branch (issue-N) has a PR.
+ipcMain.handle('github:prs', async (_e, repo: string) => {
+  if (typeof repo !== 'string' || !/^[\w.-]+\/[\w.-]+$/.test(repo)) return { ok: false, error: 'Invalid repository' };
+  const r = await ghApi(`/repos/${repo}/pulls?state=open&per_page=100`);
+  if (!r.ok || !Array.isArray(r.json)) return { ok: false, error: 'Could not list PRs' };
+  const prs = (r.json as Array<Record<string, unknown>>).map((p) => ({ number: Number(p.number) || 0, branch: String((p.head as { ref?: string })?.ref || ''), url: String(p.html_url || ''), draft: !!p.draft })).filter((p) => p.branch);
+  return { ok: true, prs };
+});
 
 ipcMain.handle('open:external', (_e, url: string) => {
   if (typeof url === 'string' && /^https?:\/\//i.test(url)) shell.openExternal(url);
@@ -317,17 +388,45 @@ ipcMain.handle('open:external', (_e, url: string) => {
 // issue-<n>, so several issues can be worked in parallel without disturbing the main checkout.
 // Also drops the (edited) issue brief as .slayer/issue-<n>.md and locally git-excludes it, so the
 // agent's PR never carries the brief. Returns the worktree path + brief's repo-relative path.
-ipcMain.handle('git:worktree-add', async (_e, p: { dir: string; number: number; brief?: string }) => {
+ipcMain.handle('git:worktree-add', async (_e, p: { repo: string; dir: string; number: number; brief?: string }) => {
   try {
-    const dir = p?.dir, num = p?.number;
-    if (typeof dir !== 'string' || !dir || !Number.isInteger(num) || num <= 0) return { ok: false, error: 'Invalid request' };
+    const repo = p?.repo, dir = p?.dir, num = p?.number;
+    if (typeof repo !== 'string' || !/^[\w.-]+\/[\w.-]+$/.test(repo) || !Number.isInteger(num) || num <= 0) return { ok: false, error: 'Invalid request' };
     const git = await resolveBin('git');
     if (!git) return { ok: false, error: 'git not found on PATH' };
-    const top = await runBin(git, ['-C', dir, 'rev-parse', '--show-toplevel']);
-    if (!top.ok) return { ok: false, error: 'This folder is not a git repository' };
-    const repoRoot = top.stdout.trim();
-    // An unborn repo (git init, no commits) can't seed a worktree branch — say so plainly instead of
-    // surfacing git's raw "invalid reference" from the add below.
+
+    // Resolve a LOCAL clone of the SELECTED repo — NOT the open folder, which may now be a different repo
+    // (the repo selector decouples them). Prefer the open folder when its remote IS this repo; otherwise
+    // use — or create — a managed clone under %APPDATA%\Relay\repos\<owner>__<repo>. gh clone carries your
+    // GitHub login, so private + org repos clone without embedding a token in .git/config.
+    let repoRoot = '';
+    if (typeof dir === 'string' && dir) {
+      const top = await runBin(git, ['-C', dir, 'rev-parse', '--show-toplevel']);
+      if (top.ok) {
+        const root = top.stdout.trim();
+        const rem = await runBin(git, ['-C', root, 'remote', 'get-url', 'origin']);
+        if (rem.ok && ghRepoFromRemote(rem.stdout) === repo) repoRoot = root;
+      }
+    }
+    if (!repoRoot) {
+      const cacheRoot = path.join(app.getPath('userData'), 'repos', repo.replace('/', '__'));
+      if (existsSync(path.join(cacheRoot, '.git'))) {
+        repoRoot = cacheRoot;
+        await runBin(git, ['-C', cacheRoot, 'fetch', 'origin', '--prune'], { timeout: 120000 }); // freshen (best-effort)
+      } else {
+        await fsp.mkdir(path.dirname(cacheRoot), { recursive: true });
+        const gh = await resolveBin('gh');
+        const clone = gh
+          ? await runBin(gh, ['repo', 'clone', repo, cacheRoot], { timeout: 300000 })
+          : await runBin(git, ['clone', `https://github.com/${repo}.git`, cacheRoot], { timeout: 300000 });
+        if (!clone.ok || !existsSync(path.join(cacheRoot, '.git'))) {
+          const msg = (clone.stderr || clone.stdout || 'clone failed').trim().split('\n').filter(Boolean).pop() || 'clone failed';
+          return { ok: false, error: `Couldn't clone ${repo}: ${msg}` };
+        }
+        repoRoot = cacheRoot;
+      }
+    }
+    // An unborn repo (git init, no commits) can't seed a worktree branch — say so plainly.
     if (!(await runBin(git, ['-C', repoRoot, 'rev-parse', '--verify', '--quiet', 'HEAD'])).ok)
       return { ok: false, error: 'This repository has no commits yet — make an initial commit first.' };
     // Base the fix branch on the repo's default branch (origin/HEAD), falling back to the current branch.

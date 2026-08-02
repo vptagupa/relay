@@ -20,7 +20,7 @@ import { initFiles, renderFiles } from './files';
 import { initBlockView, blockHtml, bvBlockHtml, collapsedBlocks, fmtDur } from './block-view';
 import { openTplMenu, saveAsTemplate, runStartupIfPending } from './blueprints';
 import { initWorkspaces, loadWorkspaceMeta, restoreWorkspaceSnapshot, settleDeeplink, createWorkspace, openWsMenu, closeWsMenu, handleDeeplink, setActiveWsRoot, setActiveWsTheme, getActiveWsId, duplicateWorkspace, exportWorkspace, importWorkspace, toggleTrust, copyWorkspaceLink, activeWorkspaceDef, isWorkspaceTrusted } from './workspaces';
-import { initIssues, openIssues, closeIssues } from './issues';
+import { initIssues, pullIssues } from './issues';
 import type { Settings, SavedSession, AgentEvent, ApprovalRequest, ChatTurn, OpenTab, Workspace, WorkspaceDef, Block, Bookmark, BookmarkGroup } from './shared/types';
 
 // TEMP DIAG: surface full stacks (minify is off) for the init crash.
@@ -662,12 +662,17 @@ async function setTemplate(id: string) {
 async function cycleTemplate() { const i = TEMPLATES.findIndex((t) => t.id === curTemplate()); await setTemplate(TEMPLATES[(i + 1) % TEMPLATES.length].id); }
 function applySidebar() { $('#main').classList.toggle('collapsed', state.settings.sidebarCollapsed); const t = activeTab(); if (t) setTimeout(() => { t.fit.fit(); relay.ptyResize(t.id, t.term.cols, t.term.rows); }, 210); }
 function applyToolbar() { document.querySelector('.titlebar')?.classList.toggle('shown', state.settings.toolbarShown); }
-// Size the Library section from the saved fraction of the sidebar height; Files fills the rest.
-function applySplit() {
-  const sb = document.querySelector('.sidebar') as HTMLElement | null; if (!sb) return;
-  const h = sb.clientHeight; const min = 80, max = h - 160; if (max < min) return;
-  const frac = state.settings.librarySplit ?? 0.4;
-  ($('#viewLibrary') as HTMLElement).style.height = Math.max(min, Math.min(max, Math.round(h * frac))) + 'px';
+// Rail model: the active view fills the sidebar body — no Library/Files height split.
+function applySplit() { /* no-op (kept: still called on boot + sidebar resize) */ }
+// Which sidebar panel (Files / Library / Issues) the rail has active.
+function applySidebarView() {
+  const v = state.settings.sidebarView || 'library';
+  const map: Record<string, string> = { library: '#viewLibrary', files: '#viewFiles', issues: '#viewIssues' };
+  for (const [name, id] of Object.entries(map)) (document.querySelector(id) as HTMLElement | null)?.classList.toggle('active', name === v);
+  document.querySelectorAll<HTMLElement>('.rail-btn[data-view]').forEach((b) => b.classList.toggle('on', b.dataset.view === v));
+}
+function switchSidebarView(v: 'library' | 'files' | 'issues') {
+  state.settings.sidebarView = v; applySidebarView(); void relay.patchSettings({ sidebarView: v });
 }
 function applySidebarWidth() { ($('#main') as HTMLElement).style.setProperty('--sidebar-w', (state.settings.sidebarWidth || 260) + 'px'); }
 async function toggleToolbar() { state.settings = await relay.patchSettings({ toolbarShown: !state.settings.toolbarShown }); applyToolbar(); }
@@ -812,7 +817,7 @@ function renderHistory() {
   list.innerHTML = blocks.map((b) => blockHtml(b)).join('');
   list.scrollTop = (atBottom && !q) ? list.scrollHeight : prevTop; // preserve scroll while reading back
 }
-function openHistory() { closeAgent(); closeBookmarks(); closeIssues(); $('#historyPanel').classList.add('show'); renderHistory(); }
+function openHistory() { closeAgent(); closeBookmarks(); $('#historyPanel').classList.add('show'); renderHistory(); }
 function closeHistory() { $('#historyPanel').classList.remove('show'); }
 
 /* ----------------------------- bookmarks (saved command snippets, grouped) ----------------------------- */
@@ -898,7 +903,7 @@ function renderBookmarks() {
   html += `<div class="bkm-group${col('')}" data-gid=""><div class="bkm-ghead ung"><button class="bkm-gchev" data-gact="gcollapse" title="Collapse / expand">▾</button><span class="bkm-gname">Ungrouped</span><span class="bkm-gcount">${count(undefined)}</span></div><div class="bkm-gitems">${sectionItems(undefined)}</div></div>`;
   el.innerHTML = html;
 }
-function openBookmarks() { closeAgent(); closeHistory(); closeIssues(); $('#bookmarksPanel').classList.add('show'); renderBookmarks(); }
+function openBookmarks() { closeAgent(); closeHistory(); $('#bookmarksPanel').classList.add('show'); renderBookmarks(); }
 function closeBookmarks() { $('#bookmarksPanel').classList.remove('show'); }
 // Save the current highlighted text (DOM selection in a block, or the xterm selection).
 function bookmarkSelection() {
@@ -1181,7 +1186,7 @@ function paletteActions(): PalAction[] {
     { g: 'View', t: 'Ask the agent', run: openAgent },
     { g: 'View', t: 'Command history', run: openHistory },
     { g: 'View', t: 'Bookmarks', run: openBookmarks },
-    { g: 'View', t: 'Issues — pull GitHub issues', run: openIssues },
+    { g: 'View', t: 'Issues — pull GitHub issues', run: pullIssues },
     { g: 'View', t: 'Bookmark highlighted text', run: bookmarkSelection },
     { g: 'View', t: 'Add bookmark manually', run: addBookmarkManual },
     { g: 'View', t: 'Toggle Blocks / Classic terminal', run: toggleBlocksView },
@@ -1232,7 +1237,7 @@ function renameTab(id: string, v: string) { const t = state.tabs.find((x) => x.i
 async function renameLib(id: string, v: string) { const s = state.library.find((x) => x.id === id); if (s && v) { s.name = v; state.library = await relay.upsertSession(s); } renderLibrary(); }
 
 /* ----------------------------- agent open/close ----------------------------- */
-function openAgent() { closeHistory(); closeBookmarks(); closeIssues(); $('#agentPanel').classList.add('show'); renderChat(); ($('#agentInput') as HTMLElement).focus(); }
+function openAgent() { closeHistory(); closeBookmarks(); $('#agentPanel').classList.add('show'); renderChat(); ($('#agentInput') as HTMLElement).focus(); }
 function closeAgent() { $('#agentPanel').classList.remove('show'); closeModelMenu(); }
 
 /* ----------------------------- wiring ----------------------------- */
@@ -1593,8 +1598,13 @@ $('#libList').addEventListener('drop', async (e) => {
 $('#libList').addEventListener('dragend', endLibDrag);
 function r(el: HTMLElement) { return el.getBoundingClientRect(); }
 
-// resizable sidebar divider (Library ⟷ Files)
-$('#sideDivider').addEventListener('mousedown', (e) => {
+// rail: New (new terminal) · Files/Library/Issues (switch the active panel) · Agent (open agent panel)
+document.querySelectorAll<HTMLElement>('.rail-btn[data-view]').forEach((b) => { b.onclick = () => switchSidebarView(b.dataset.view as 'library' | 'files' | 'issues'); });
+(document.querySelector('.rail-btn[data-act="new"]') as HTMLElement | null)?.addEventListener('click', () => void newTab());
+(document.querySelector('.rail-btn[data-act="agent"]') as HTMLElement | null)?.addEventListener('click', () => openAgent());
+
+// resizable sidebar divider (legacy stacked layout — guarded; the element is gone in the rail model)
+document.querySelector('#sideDivider')?.addEventListener('mousedown', (e) => {
   e.preventDefault();
   const libEl = $('#viewLibrary'); const divider = $('#sideDivider');
   const startY = (e as MouseEvent).clientY; const startH = libEl.getBoundingClientRect().height;
@@ -1707,7 +1717,7 @@ document.addEventListener('keydown', (e) => {
   else if (mod && e.key.toLowerCase() === 's') { e.preventDefault(); saveActive(); }
   else if (mod && e.key.toLowerCase() === 'l') { e.preventDefault(); clearActive(); }
   else if (mod && e.key.toLowerCase() === 'w') { e.preventDefault(); state.active && closeTab(state.active); }
-  else if (e.key === 'Escape') { closeConfirm(false); closeModelMenu(); closePalette(); closeSettings(); closeTabMenu(); closeColorPop(); closeHistory(); closeBookmarks(); closeIssues(); hideBkmPop(); hideCdPop(); closeWsMenu(); }
+  else if (e.key === 'Escape') { closeConfirm(false); closeModelMenu(); closePalette(); closeSettings(); closeTabMenu(); closeColorPop(); closeHistory(); closeBookmarks(); hideBkmPop(); hideCdPop(); closeWsMenu(); }
 });
 
 // Write terminal output to a tab, or BUFFER it when the tab has no measured size yet (it was created in a
@@ -1738,13 +1748,12 @@ new ResizeObserver(() => { clearTimeout(_roT); _roT = setTimeout(() => { fitPane
   state.library = await relay.listSessions();
   initWorkspaces({ newTab, snapshotTabs, reconcilePanes, fitPanes, renderTabs, updateStatus, reflectModel, renderChat, updateMainView, reflectSettings, persistWorkspace, applyTheme, blocksMode, confirmDialog, shortCwd, sendCommand, pcmd: P_CMD });
   initIssues({
-    closeOtherPanels: () => { closeAgent(); closeHistory(); closeBookmarks(); },
     // Assign → open a fresh terminal tab rooted in the issue's worktree, seeded to launch the agent.
     openAgentTab: (o) => { void newTab({ cwd: o.cwd, name: o.name, runCmd: o.runCmd }); },
   });
   await loadWorkspaceMeta(); // load workspace defs + blueprints, mirror the active workspace's folder + theme into settings before first paint
   ($('#libSort') as HTMLSelectElement).value = state.settings.librarySort || 'recent';
-  applyTheme(); applySidebarWidth(); applySidebar(); applyToolbar(); applySplit(); reflectAutosave(); renderLibrary(); updateStatus(); reflectModel(); reflectSettings();
+  applyTheme(); applySidebarWidth(); applySidebar(); applyToolbar(); applySplit(); applySidebarView(); reflectAutosave(); renderLibrary(); updateStatus(); reflectModel(); reflectSettings();
   ($('#storeText') as HTMLElement).textContent = 'Saved on this machine';
   tickClock(); setInterval(tickClock, 20000);
 

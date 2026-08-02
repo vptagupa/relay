@@ -44,6 +44,24 @@ export async function getKey(provider: Provider): Promise<string | null> {
   return null;
 }
 
+// Generic encrypted secret store (same at-rest encryption as API keys) for tokens like the GitHub
+// OAuth access token — keyed by an arbitrary name, never exposed to the renderer.
+export async function setSecret(name: string, value: string): Promise<void> {
+  const raw = await readRaw();
+  if (!value) delete raw[name];
+  else if (safeStorage.isEncryptionAvailable()) raw[name] = 'enc:' + safeStorage.encryptString(value).toString('base64');
+  else raw[name] = 'raw:' + Buffer.from(value, 'utf8').toString('base64');
+  await fs.writeFile(keyFile(), JSON.stringify(raw), 'utf8');
+}
+export async function getSecret(name: string): Promise<string | null> {
+  const raw = await readRaw();
+  const v = raw[name];
+  if (!v) return null;
+  if (v.startsWith('enc:')) { try { return safeStorage.decryptString(Buffer.from(v.slice(4), 'base64')); } catch { return null; } }
+  if (v.startsWith('raw:')) return Buffer.from(v.slice(4), 'base64').toString('utf8');
+  return null;
+}
+
 export async function hasKeys(): Promise<Record<string, boolean>> {
   const raw = await readRaw();
   return {

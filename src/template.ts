@@ -38,20 +38,34 @@ export function appHtml(panes: string): string {
     </header>
     <div class="main" id="main">
       <aside class="sidebar">
-        <div class="side-view side-library" id="viewLibrary">
-          <div class="side-head"><span class="side-title">Library</span>
-            <select class="lib-sort" id="libSort" title="Sort saved terminals">
-              <option value="recent">Recent</option><option value="name">Name</option><option value="model">Model</option><option value="custom">Custom</option>
-            </select></div>
-          <div class="side-list" id="libList"></div>
+        <nav class="side-rail" id="sideRail">
+          <button class="rail-btn" data-act="new" title="New terminal (⌘T)"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg><span>New</span></button>
+          <button class="rail-btn" data-view="files" title="Files"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h5l2 2h9a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1z"/></svg><span>Files</span></button>
+          <button class="rail-btn" data-view="library" title="Library"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><line x1="8" y1="9" x2="16" y2="9"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="13" y2="17"/></svg><span>Library</span></button>
+          <button class="rail-btn" data-view="issues" title="Issues"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="1.7" fill="currentColor" stroke="none"/></svg><span>Issues</span></button>
+          <button class="rail-btn" data-act="agent" title="Agent"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l2.2 5.6L20 10l-5 3.4L16.5 20 12 16.4 7.5 20 9 13.4 4 10l5.8-1.4z"/></svg><span>Agent</span></button>
+        </nav>
+        <div class="side-body">
+          <div class="side-view side-library active" id="viewLibrary">
+            <div class="side-head"><span class="side-title">Library</span>
+              <select class="lib-sort" id="libSort" title="Sort saved terminals">
+                <option value="recent">Recent</option><option value="name">Name</option><option value="model">Model</option><option value="custom">Custom</option>
+              </select></div>
+            <div class="side-list" id="libList"></div>
+          </div>
+          <div class="side-view side-files" id="viewFiles">
+            <div class="side-head"><span class="side-title">Files</span><button class="files-up" id="filesUp" title="Parent folder"><svg width="15" height="15"><use href="#i-up"/></svg></button></div>
+            <div class="files-path" id="filesPath">—</div>
+            <div class="side-list" id="fileList"></div>
+          </div>
+          <div class="side-view side-issues" id="viewIssues">
+            <div class="side-head"><span class="side-title">Issues</span><button class="iss-repo-sel" id="issSideRepo" title="Switch repository"></button><button class="files-up" id="issSources" title="Sources — connect providers &amp; pick repos"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button><button class="files-up" id="issSidePull" title="Pull open issues"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v5h-5"/></svg></button></div>
+            <input class="iss-search" id="issSearch" placeholder="search issues &amp; tags…" spellcheck="false" style="display:none" />
+            <div class="iss-filters" id="issFilters" style="display:none"></div>
+            <div class="side-list" id="issSideList"></div>
+          </div>
+          <div class="side-foot"><span class="sdot" id="storeDot"></span><span id="storeText">Saved on this machine</span></div>
         </div>
-        <div class="side-divider" id="sideDivider" title="Drag to resize"></div>
-        <div class="side-view side-files" id="viewFiles">
-          <div class="side-head"><span class="side-title">Files</span><button class="files-up" id="filesUp" title="Parent folder"><svg width="15" height="15"><use href="#i-up"/></svg></button></div>
-          <div class="files-path" id="filesPath">—</div>
-          <div class="side-list" id="fileList"></div>
-        </div>
-        <div class="side-foot"><span class="sdot" id="storeDot"></span><span id="storeText">Saved on this machine</span></div>
       </aside>
       <div class="main-divider" id="mainDivider" title="Drag to resize sidebar"></div>
       <section class="term-area">
@@ -66,7 +80,6 @@ export function appHtml(panes: string): string {
           <button class="tt-icon" id="btnSplitRight" title="Split right — clone this terminal into a pane on the right (⌘⇧E)"><svg width="16" height="16"><use href="#i-split"/></svg></button>
           <button class="tt-icon" id="btnSplitDown" title="Split down — clone this terminal into a pane below"><svg width="16" height="16"><use href="#i-splitdown"/></svg></button>
           <button class="tt-icon" id="btnBookmarks" title="Bookmarks — highlight a command to save one (⌘⇧K)"><svg width="16" height="16"><use href="#i-star"/></svg></button>
-          <button class="tt-icon" id="btnIssues" title="GitHub issues — pull open issues for this repo"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="1.6" fill="currentColor" stroke="none"/></svg></button>
           <button class="tt-icon" id="btnSave" title="Save to Library (⌘S)"><svg width="16" height="16"><use href="#i-save"/></svg></button>
           <button class="tt-icon" id="btnClear" title="Clear terminal (⌃L)"><svg width="16" height="16"><use href="#i-clear"/></svg></button>
         </div>
@@ -152,12 +165,6 @@ export function appHtml(panes: string): string {
     <div class="hist-head"><div class="hist-title">★ Bookmarks</div><button class="hist-x" id="btnBookmarksClose" aria-label="Close">✕</button></div>
     <div class="hist-tools"><button class="hist-filter" id="bkmNew" title="Add a bookmark manually">＋ Bookmark</button><button class="hist-filter" id="bkmAddGroup" title="Add a group">＋ Group</button></div>
     <div class="hist-list" id="bkmList"></div>
-  </aside>
-
-  <aside class="history issues" id="issuesPanel" role="dialog" aria-label="Issues">
-    <div class="hist-head"><div class="hist-title">🎫 Issues <span class="issues-repo" id="issuesRepo"></span></div><button class="hist-x" id="btnIssuesClose" aria-label="Close">✕</button></div>
-    <div class="hist-tools"><button class="hist-filter" id="issuesRefresh" title="Pull open issues via gh">⟳ Pull</button></div>
-    <div class="hist-list" id="issuesList"></div>
   </aside>
 
   <div class="bkm-pop" id="bkmPop"><button id="bkmAdd">★ Bookmark</button></div>
