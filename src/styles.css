@@ -579,6 +579,22 @@ body.tabdrag .dz{display:block;pointer-events:auto}
 /* bookmarks */
 .bkm-pop{position:fixed;z-index:90;display:none}
 .bkm-pop.show{display:block}
+/* issue agent — issues panel (reuses .history / .hist-list chrome) */
+.issues-repo{font:11px/1 var(--mono);color:var(--muted);margin-left:8px}
+.iss-row{display:block;width:100%;text-align:left;background:var(--surface-2);border:1px solid var(--border);border-radius:10px;padding:9px 11px;margin-bottom:8px;cursor:pointer}
+.iss-row:hover{border-color:var(--accent-line);background:var(--surface-3)}
+.iss-top{display:flex;gap:8px;align-items:baseline}
+.iss-num{font:12px/1.3 var(--mono);color:var(--muted);flex:none}
+.iss-title{font:13px/1.35 var(--sans);color:var(--text)}
+.iss-labels{display:flex;gap:5px;flex-wrap:wrap;margin-top:7px}
+.iss-lb{font:10px/1.4 var(--mono);padding:1px 7px;border-radius:999px;border:1px solid var(--border-strong);color:var(--text-dim)}
+.iss-empty{display:flex;flex-direction:column;align-items:center;gap:6px;text-align:center;color:var(--muted);font:12.5px/1.5 var(--sans);padding:44px 22px}
+.iss-empty .ie-i{font-size:24px;opacity:.7}
+.iss-empty .ie-sub{font:11.5px/1.5 var(--mono);color:var(--text-dim);max-width:34ch}
+.iss-empty code{font:11px/1 var(--mono);background:var(--accent-ghost);color:var(--accent-2);padding:1px 5px;border-radius:5px}
+.iss-empty .ie-spin{width:20px;height:20px;border-radius:50%;border:2px solid var(--accent-line);border-top-color:var(--accent-2);animation:iespin .8s linear infinite}
+@keyframes iespin{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){.iss-empty .ie-spin{animation:none}}
 /* cd directory autocomplete popup (blocks-view command bar) */
 .cd-pop{position:fixed;z-index:88;display:none;background:var(--surface);border:1px solid var(--border-strong);border-radius:var(--r-lg);box-shadow:var(--shadow);padding:5px;max-width:460px}
 .cd-pop.show{display:block}

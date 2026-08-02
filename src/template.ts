@@ -66,6 +66,7 @@ export function appHtml(panes: string): string {
           <button class="tt-icon" id="btnSplitRight" title="Split right — clone this terminal into a pane on the right (⌘⇧E)"><svg width="16" height="16"><use href="#i-split"/></svg></button>
           <button class="tt-icon" id="btnSplitDown" title="Split down — clone this terminal into a pane below"><svg width="16" height="16"><use href="#i-splitdown"/></svg></button>
           <button class="tt-icon" id="btnBookmarks" title="Bookmarks — highlight a command to save one (⌘⇧K)"><svg width="16" height="16"><use href="#i-star"/></svg></button>
+          <button class="tt-icon" id="btnIssues" title="GitHub issues — pull open issues for this repo"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="1.6" fill="currentColor" stroke="none"/></svg></button>
           <button class="tt-icon" id="btnSave" title="Save to Library (⌘S)"><svg width="16" height="16"><use href="#i-save"/></svg></button>
           <button class="tt-icon" id="btnClear" title="Clear terminal (⌃L)"><svg width="16" height="16"><use href="#i-clear"/></svg></button>
         </div>
@@ -151,6 +152,12 @@ export function appHtml(panes: string): string {
     <div class="hist-head"><div class="hist-title">★ Bookmarks</div><button class="hist-x" id="btnBookmarksClose" aria-label="Close">✕</button></div>
     <div class="hist-tools"><button class="hist-filter" id="bkmNew" title="Add a bookmark manually">＋ Bookmark</button><button class="hist-filter" id="bkmAddGroup" title="Add a group">＋ Group</button></div>
     <div class="hist-list" id="bkmList"></div>
+  </aside>
+
+  <aside class="history issues" id="issuesPanel" role="dialog" aria-label="Issues">
+    <div class="hist-head"><div class="hist-title">🎫 Issues <span class="issues-repo" id="issuesRepo"></span></div><button class="hist-x" id="btnIssuesClose" aria-label="Close">✕</button></div>
+    <div class="hist-tools"><button class="hist-filter" id="issuesRefresh" title="Pull open issues via gh">⟳ Pull</button></div>
+    <div class="hist-list" id="issuesList"></div>
   </aside>
 
   <div class="bkm-pop" id="bkmPop"><button id="bkmAdd">★ Bookmark</button></div>

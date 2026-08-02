@@ -1,6 +1,6 @@
 import { contextBridge, ipcRenderer, clipboard } from 'electron';
 import * as os from 'node:os';
-import type { Settings, SavedSession, AgentEvent, ApprovalRequest, ChatTurn, Workspace, WorkspaceDef, WorkspaceBlueprint, Block } from './shared/types';
+import type { Settings, SavedSession, AgentEvent, ApprovalRequest, ChatTurn, Workspace, WorkspaceDef, WorkspaceBlueprint, Block, Issue } from './shared/types';
 
 // Real identity for the Blocks-view prompt line (user@host + home for ~ shortening).
 function sysInfo() { try { return { user: os.userInfo().username, host: os.hostname().split('.')[0], home: os.homedir() }; } catch { return { user: 'user', host: 'relay', home: '' }; } }
@@ -59,6 +59,15 @@ const api = {
   saveWorkspaceMeta: (workspaces: WorkspaceDef[], activeWorkspaceId: string) => ipcRenderer.send('workspaces:save-meta', { workspaces, activeWorkspaceId }),
   getWorkspaceSnapshot: (id: string): Promise<Workspace> => ipcRenderer.invoke('workspace:get-snapshot', id),
   saveWorkspaceSnapshot: (id: string, ws: Workspace) => ipcRenderer.send('workspace:save-snapshot', { id, ws }),
+
+  // --- Issue Agent (Phase 1: read-only GitHub issues via the gh CLI, keyless) ---
+  githubDetect: (): Promise<{ gh: boolean; authed: boolean; account?: string }> => ipcRenderer.invoke('github:detect'),
+  // Resolve owner/name from a folder's git `origin` remote (null if not a git repo / no GitHub remote).
+  githubRepo: (dir: string): Promise<string | null> => ipcRenderer.invoke('github:repo', dir),
+  // Pull open issues for owner/name via `gh issue list`.
+  githubIssues: (repo: string): Promise<{ ok: boolean; issues?: Issue[]; error?: string }> => ipcRenderer.invoke('github:issues', repo),
+  // Open a URL in the user's default browser (e.g. an issue on GitHub).
+  openExternal: (url: string): Promise<void> => ipcRenderer.invoke('open:external', url),
 
   // --- workspace blueprints (reusable "Templates") ---
   getBlueprints: (): Promise<WorkspaceBlueprint[]> => ipcRenderer.invoke('blueprints:get'),

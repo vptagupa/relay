@@ -163,3 +163,15 @@ export interface ChatTurn {
   role: 'user' | 'assistant';
   content: string;
 }
+
+// --- Issue Agent (Phase 1: read-only) ---
+// A provider issue, normalized by the adapter. Phase 1 pulls GitHub issues via the `gh` CLI.
+export interface IssueLabel { name: string; color?: string; }
+export interface Issue {
+  number: number;
+  title: string;
+  body: string;
+  labels: IssueLabel[];
+  state: string;
+  url: string;
+}

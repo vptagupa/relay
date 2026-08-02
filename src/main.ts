@@ -8,7 +8,7 @@ import * as store from './store';
 import * as keys from './keys';
 import { runAgent } from './agent/agent';
 import squirrelStartup from 'electron-squirrel-startup';
-import type { ApprovalRequest, ChatTurn } from './shared/types';
+import type { ApprovalRequest, ChatTurn, Issue } from './shared/types';
 import type { Provider } from './shared/models';
 
 // On Windows, the Squirrel installer/uninstaller launches the app with a --squirrel-* arg
@@ -231,6 +231,76 @@ ipcMain.handle('claude:auth', async () => {
     relayKey: !!hk['anthropic'],
     ambient: !!(process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN),
   };
+});
+
+/* -------------------- Issue Agent (Phase 1: read-only GitHub via gh) -------------------- */
+// Resolve an executable's absolute path once. Windows execFile won't PATHEXT-resolve a bare name,
+// so look it up like claude:detect and cache. Names are hardcoded literals, never user input.
+const binCache = new Map<string, string | null>();
+function resolveBin(name: string): Promise<string | null> {
+  if (binCache.has(name)) return Promise.resolve(binCache.get(name)!);
+  return new Promise((resolve) => {
+    const cmd = process.platform === 'win32' ? `where ${name}` : `command -v ${name}`;
+    exec(cmd, { timeout: 6000, windowsHide: true }, (err, stdout) => {
+      const p = (stdout || '').trim().split(/\r?\n/)[0] || '';
+      const r = !err && p ? p : null;
+      binCache.set(name, r);
+      resolve(r);
+    });
+  });
+}
+// git@github.com:owner/name.git | https://github.com/owner/name(.git) -> owner/name
+function ghRepoFromRemote(url: string): string | null {
+  const m = url.trim().match(/github\.com[:/]([^/\s]+\/[^/\s]+?)(?:\.git)?\/?$/i);
+  return m ? m[1] : null;
+}
+
+// Is the GitHub CLI installed, and logged in? (keyless — its own session, no token in the app.)
+ipcMain.handle('github:detect', () => new Promise<{ gh: boolean; authed: boolean; account?: string }>((resolve) => {
+  resolveBin('gh').then((gh) => {
+    if (!gh) return resolve({ gh: false, authed: false });
+    execFile(gh, ['auth', 'status'], { timeout: 8000, windowsHide: true }, (err, stdout, stderr) => {
+      const txt = (stderr || '') + (stdout || ''); // gh prints status to stderr; exit 0 = logged in
+      const acc = txt.match(/account\s+(\S+)/i)?.[1];
+      resolve({ gh: true, authed: !err, account: acc });
+    });
+  });
+}));
+
+// owner/name from a folder's git origin remote.
+ipcMain.handle('github:repo', (_e, dir: string) => new Promise<string | null>((resolve) => {
+  if (!dir || typeof dir !== 'string') return resolve(null);
+  resolveBin('git').then((git) => {
+    if (!git) return resolve(null);
+    execFile(git, ['-C', dir, 'remote', 'get-url', 'origin'], { timeout: 6000, windowsHide: true }, (err, stdout) => {
+      resolve(err ? null : ghRepoFromRemote(stdout || ''));
+    });
+  });
+}));
+
+// Pull open issues for owner/name via `gh issue list` (validated repo, arg array — no shell).
+ipcMain.handle('github:issues', (_e, repo: string) => new Promise<{ ok: boolean; issues?: Issue[]; error?: string }>((resolve) => {
+  if (typeof repo !== 'string' || !/^[\w.-]+\/[\w.-]+$/.test(repo)) return resolve({ ok: false, error: 'Invalid repository' });
+  resolveBin('gh').then((gh) => {
+    if (!gh) return resolve({ ok: false, error: 'GitHub CLI (gh) not found' });
+    execFile(gh, ['issue', 'list', '--repo', repo, '--state', 'open', '--limit', '50', '--json', 'number,title,body,labels,state,url'],
+      { timeout: 20000, windowsHide: true, maxBuffer: 8 * 1024 * 1024 }, (err, stdout, stderr) => {
+        if (err) return resolve({ ok: false, error: (stderr || err.message || 'gh failed').trim().split('\n')[0] });
+        try {
+          const raw = JSON.parse(stdout || '[]') as Array<Record<string, unknown>>;
+          const issues: Issue[] = raw.map((i) => ({
+            number: Number(i.number) || 0, title: String(i.title || ''), body: String(i.body || ''),
+            state: String(i.state || 'OPEN'), url: String(i.url || ''),
+            labels: Array.isArray(i.labels) ? (i.labels as Array<Record<string, unknown>>).map((l) => ({ name: String(l.name || ''), color: l.color ? String(l.color) : undefined })) : [],
+          }));
+          resolve({ ok: true, issues });
+        } catch { resolve({ ok: false, error: 'Could not parse gh output' }); }
+      });
+  });
+}));
+
+ipcMain.handle('open:external', (_e, url: string) => {
+  if (typeof url === 'string' && /^https?:\/\//i.test(url)) shell.openExternal(url);
 });
 
 /* -------------------- session export -------------------- */

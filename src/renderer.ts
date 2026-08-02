@@ -20,6 +20,7 @@ import { initFiles, renderFiles } from './files';
 import { initBlockView, blockHtml, bvBlockHtml, collapsedBlocks, fmtDur } from './block-view';
 import { openTplMenu, saveAsTemplate, runStartupIfPending } from './blueprints';
 import { initWorkspaces, loadWorkspaceMeta, restoreWorkspaceSnapshot, settleDeeplink, createWorkspace, openWsMenu, closeWsMenu, handleDeeplink, setActiveWsRoot, setActiveWsTheme, getActiveWsId, duplicateWorkspace, exportWorkspace, importWorkspace, toggleTrust, copyWorkspaceLink, activeWorkspaceDef, isWorkspaceTrusted } from './workspaces';
+import { initIssues, openIssues, closeIssues } from './issues';
 import type { Settings, SavedSession, AgentEvent, ApprovalRequest, ChatTurn, OpenTab, Workspace, WorkspaceDef, Block, Bookmark, BookmarkGroup } from './shared/types';
 
 // TEMP DIAG: surface full stacks (minify is off) for the init crash.
@@ -811,7 +812,7 @@ function renderHistory() {
   list.innerHTML = blocks.map((b) => blockHtml(b)).join('');
   list.scrollTop = (atBottom && !q) ? list.scrollHeight : prevTop; // preserve scroll while reading back
 }
-function openHistory() { closeAgent(); closeBookmarks(); $('#historyPanel').classList.add('show'); renderHistory(); }
+function openHistory() { closeAgent(); closeBookmarks(); closeIssues(); $('#historyPanel').classList.add('show'); renderHistory(); }
 function closeHistory() { $('#historyPanel').classList.remove('show'); }
 
 /* ----------------------------- bookmarks (saved command snippets, grouped) ----------------------------- */
@@ -897,7 +898,7 @@ function renderBookmarks() {
   html += `<div class="bkm-group${col('')}" data-gid=""><div class="bkm-ghead ung"><button class="bkm-gchev" data-gact="gcollapse" title="Collapse / expand">▾</button><span class="bkm-gname">Ungrouped</span><span class="bkm-gcount">${count(undefined)}</span></div><div class="bkm-gitems">${sectionItems(undefined)}</div></div>`;
   el.innerHTML = html;
 }
-function openBookmarks() { closeAgent(); closeHistory(); $('#bookmarksPanel').classList.add('show'); renderBookmarks(); }
+function openBookmarks() { closeAgent(); closeHistory(); closeIssues(); $('#bookmarksPanel').classList.add('show'); renderBookmarks(); }
 function closeBookmarks() { $('#bookmarksPanel').classList.remove('show'); }
 // Save the current highlighted text (DOM selection in a block, or the xterm selection).
 function bookmarkSelection() {
@@ -1180,6 +1181,7 @@ function paletteActions(): PalAction[] {
     { g: 'View', t: 'Ask the agent', run: openAgent },
     { g: 'View', t: 'Command history', run: openHistory },
     { g: 'View', t: 'Bookmarks', run: openBookmarks },
+    { g: 'View', t: 'Issues — pull GitHub issues', run: openIssues },
     { g: 'View', t: 'Bookmark highlighted text', run: bookmarkSelection },
     { g: 'View', t: 'Add bookmark manually', run: addBookmarkManual },
     { g: 'View', t: 'Toggle Blocks / Classic terminal', run: toggleBlocksView },
@@ -1230,7 +1232,7 @@ function renameTab(id: string, v: string) { const t = state.tabs.find((x) => x.i
 async function renameLib(id: string, v: string) { const s = state.library.find((x) => x.id === id); if (s && v) { s.name = v; state.library = await relay.upsertSession(s); } renderLibrary(); }
 
 /* ----------------------------- agent open/close ----------------------------- */
-function openAgent() { closeHistory(); closeBookmarks(); $('#agentPanel').classList.add('show'); renderChat(); ($('#agentInput') as HTMLElement).focus(); }
+function openAgent() { closeHistory(); closeBookmarks(); closeIssues(); $('#agentPanel').classList.add('show'); renderChat(); ($('#agentInput') as HTMLElement).focus(); }
 function closeAgent() { $('#agentPanel').classList.remove('show'); closeModelMenu(); }
 
 /* ----------------------------- wiring ----------------------------- */
@@ -1705,7 +1707,7 @@ document.addEventListener('keydown', (e) => {
   else if (mod && e.key.toLowerCase() === 's') { e.preventDefault(); saveActive(); }
   else if (mod && e.key.toLowerCase() === 'l') { e.preventDefault(); clearActive(); }
   else if (mod && e.key.toLowerCase() === 'w') { e.preventDefault(); state.active && closeTab(state.active); }
-  else if (e.key === 'Escape') { closeConfirm(false); closeModelMenu(); closePalette(); closeSettings(); closeTabMenu(); closeColorPop(); closeHistory(); closeBookmarks(); hideBkmPop(); hideCdPop(); closeWsMenu(); }
+  else if (e.key === 'Escape') { closeConfirm(false); closeModelMenu(); closePalette(); closeSettings(); closeTabMenu(); closeColorPop(); closeHistory(); closeBookmarks(); closeIssues(); hideBkmPop(); hideCdPop(); closeWsMenu(); }
 });
 
 // Write terminal output to a tab, or BUFFER it when the tab has no measured size yet (it was created in a
@@ -1735,6 +1737,7 @@ new ResizeObserver(() => { clearTimeout(_roT); _roT = setTimeout(() => { fitPane
   state.settings = await relay.getSettings();
   state.library = await relay.listSessions();
   initWorkspaces({ newTab, snapshotTabs, reconcilePanes, fitPanes, renderTabs, updateStatus, reflectModel, renderChat, updateMainView, reflectSettings, persistWorkspace, applyTheme, blocksMode, confirmDialog, shortCwd, sendCommand, pcmd: P_CMD });
+  initIssues({ closeOtherPanels: () => { closeAgent(); closeHistory(); closeBookmarks(); } });
   await loadWorkspaceMeta(); // load workspace defs + blueprints, mirror the active workspace's folder + theme into settings before first paint
   ($('#libSort') as HTMLSelectElement).value = state.settings.librarySort || 'recent';
   applyTheme(); applySidebarWidth(); applySidebar(); applyToolbar(); applySplit(); reflectAutosave(); renderLibrary(); updateStatus(); reflectModel(); reflectSettings();
