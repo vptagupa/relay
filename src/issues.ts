@@ -208,7 +208,7 @@ ${body}
    - Make the smallest change that correctly resolves it.
    - Run the project's checks/tests if there are any.
 3. Summarize what you did — the fix and why, or (if no change was needed) why the issue isn't valid.
-4. If the fix looks good, open a pull request with \`gh pr create\`.
+4. If the fix looks good, open a pull request with \`gh pr create\`, and put the exact line \`Closes #${i.number}\` in the PR body. That keyword-immediately-before-#number form is what makes GitHub close this issue automatically when the PR merges — do NOT wrap it in other words or markdown (e.g. \`Closes the ... of **#${i.number}**\` will NOT close it).
 `;
 }
 
