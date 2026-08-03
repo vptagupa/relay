@@ -4,13 +4,13 @@ import os from 'node:os';
 import { promises as fsp, appendFileSync, existsSync } from 'node:fs';
 import { exec, execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import * as https from 'node:https';
+import { httpsReq, PROVIDERS, providerOf, providerFromRemote, type ProviderId } from './providers';
 import { createTerm, writeTerm, resizeTerm, detachTerm, killTerm, killAll } from './pty';
 import * as store from './store';
 import * as keys from './keys';
 import { runAgent } from './agent/agent';
 import squirrelStartup from 'electron-squirrel-startup';
-import type { ApprovalRequest, ChatTurn, Issue } from './shared/types';
+import type { ApprovalRequest, ChatTurn } from './shared/types';
 import type { Provider } from './shared/models';
 
 // On Windows, the Squirrel installer/uninstaller launches the app with a --squirrel-* arg
@@ -251,11 +251,6 @@ function resolveBin(name: string): Promise<string | null> {
     });
   });
 }
-// git@github.com:owner/name.git | https://github.com/owner/name(.git) -> owner/name
-function ghRepoFromRemote(url: string): string | null {
-  const m = url.trim().match(/github\.com[:/]([^/\s]+\/[^/\s]+?)(?:\.git)?\/?$/i);
-  return m ? m[1] : null;
-}
 // Run a resolved binary with an ARG ARRAY (never a shell string — no injection). Resolves to the
 // outcome and never rejects, so callers can compose a sequence of git steps with plain awaits.
 function runBin(bin: string, args: string[], opts: { cwd?: string; timeout?: number } = {}): Promise<{ ok: boolean; stdout: string; stderr: string }> {
@@ -266,44 +261,13 @@ function runBin(bin: string, args: string[], opts: { cwd?: string; timeout?: num
   });
 }
 
-// --- GitHub, app-owned auth (OAuth device flow) ---------------------------------------------------
-// Public OAuth App client id (device flow uses NO client secret — safe to embed in a desktop app).
-const GH_CLIENT_ID = 'Ov23li0p7Bql1ilOiKXT';
-// A minimal HTTPS request that resolves to {status,text} and never rejects.
-function httpsReq(host: string, pathname: string, method: string, headers: Record<string, string>, body?: string): Promise<{ status: number; text: string }> {
-  return new Promise((resolve) => {
-    let done = false;
-    const finish = (v: { status: number; text: string }) => { if (!done) { done = true; resolve(v); } };
-    const req = https.request({ host, path: pathname, method, headers: { 'User-Agent': 'SlayerT', ...headers }, timeout: 20000 }, (res) => {
-      let data = ''; res.on('data', (c) => (data += c)); res.on('end', () => finish({ status: res.statusCode || 0, text: data }));
-    });
-    req.on('error', () => finish({ status: 0, text: '' }));
-    req.on('timeout', () => { req.destroy(); finish({ status: 0, text: '' }); }); // a hung connection must not stall the panel/poll forever
-    if (body) req.write(body);
-    req.end();
-  });
-}
-// Call the GitHub REST API with the stored OAuth token (the app authenticates itself — no gh CLI).
-async function ghApi(pathname: string): Promise<{ ok: boolean; status: number; json: unknown }> {
-  const token = await keys.getSecret('github_oauth');
-  if (!token) return { ok: false, status: 401, json: null };
-  const r = await httpsReq('api.github.com', pathname, 'GET', { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' });
-  let json: unknown = null; try { json = JSON.parse(r.text); } catch { /* non-json error body */ }
-  return { ok: r.status >= 200 && r.status < 300, status: r.status, json };
-}
+// --- Git providers, app-owned auth --------------------------------------------------------------
+// GitHub connects via OAuth device flow (below); GitLab/Bitbucket via a pasted read-token. All REST +
+// token storage lives in providers.ts — the renderer only ever sees { connected, login } + normalized
+// issues/repos/PRs, never a token.
+const GH_CLIENT_ID = 'Ov23li0p7Bql1ilOiKXT'; // public OAuth App client id (device flow uses NO secret)
 
-// The app's OWN GitHub auth state — an OAuth token encrypted in the OS keychain. No gh CLI, no token
-// in relay.json; the renderer never sees the token, only whether we're connected + as whom.
-ipcMain.handle('github:auth-state', async () => {
-  const token = await keys.getSecret('github_oauth');
-  if (!token) return { connected: false };
-  const who = await ghApi('/user');
-  if (who.status === 401) return { connected: false };  // ONLY a real 401 means the token is revoked/invalid
-  // A network blip (status 0) or a GitHub 5xx must NOT masquerade as "disconnected" — the token is still
-  // there; stay connected (login may be blank) and let the actual pull surface the transient error.
-  return { connected: true, login: String((who.json as { login?: string })?.login || '') };
-});
-// Start the OAuth device flow: returns the one-time user code + verification URL for the renderer to show.
+// Start the GitHub OAuth device flow: returns the one-time user code + verification URL for the renderer.
 ipcMain.handle('github:device-start', async () => {
   const r = await httpsReq('github.com', '/login/device/code', 'POST', { Accept: 'application/json', 'Content-Type': 'application/x-www-form-urlencoded' }, `client_id=${GH_CLIENT_ID}&scope=repo`);
   try {
@@ -319,8 +283,8 @@ ipcMain.handle('github:device-poll', async (_e, { deviceCode }: { deviceCode: st
   let j: Record<string, unknown> = {}; try { j = JSON.parse(r.text) as Record<string, unknown>; } catch { /* */ }
   if (j.access_token) {
     await keys.setSecret('github_oauth', String(j.access_token));   // encrypted in the OS keychain
-    const who = await ghApi('/user');
-    return { status: 'ok', login: String((who.json as { login?: string })?.login || '') };
+    const who = await PROVIDERS.github.authState();
+    return { status: 'ok', login: who.login || '' };
   }
   if (r.status === 0) return { status: 'pending' }; // transient network/timeout mid-authorization — keep waiting, don't abort
   const err = String(j.error || '');
@@ -330,54 +294,42 @@ ipcMain.handle('github:device-poll', async (_e, { deviceCode }: { deviceCode: st
   if (err === 'access_denied') return { status: 'denied' };
   return { status: 'error', error: String(j.error_description || err || 'authorization failed') };
 });
-// Forget the token (sign out).
-ipcMain.handle('github:disconnect', async () => { await keys.setSecret('github_oauth', ''); return { ok: true }; });
 
-// owner/name from a folder's git origin remote.
-ipcMain.handle('github:repo', (_e, dir: string) => new Promise<string | null>((resolve) => {
+// --- generic provider handlers (dispatch to the registry in providers.ts) ---
+const badProvider = { ok: false, error: 'Unknown provider' } as const;
+// A native repo id: owner/name (GitHub/Bitbucket) or group[/subgroup…]/project (GitLab) — 2+ segments.
+const validRepo = (repo: unknown): repo is string => typeof repo === 'string' && /^[\w.-]+(\/[\w.-]+)+$/.test(repo);
+
+// Connection state for a provider — { connected, login } (never the token). A network blip stays connected.
+ipcMain.handle('provider:auth-state', async (_e, id: ProviderId) => (await providerOf(id)?.authState()) || { connected: false });
+// Connect GitLab/Bitbucket with a pasted read-token (+ optional host for self-managed GitLab). GitHub
+// connects via the device flow above; connect() here just stores a token if the renderer ever passes one.
+ipcMain.handle('provider:connect', async (_e, p: { provider: ProviderId; token: string; host?: string }) => {
+  const a = providerOf(p?.provider); if (!a) return badProvider;
+  if (typeof p?.token !== 'string' || !p.token.trim()) return { ok: false, error: 'Paste a token first' };
+  return a.connect(p.token.trim(), typeof p?.host === 'string' ? p.host.trim() : undefined);
+});
+ipcMain.handle('provider:disconnect', async (_e, id: ProviderId) => { await providerOf(id)?.disconnect(); return { ok: true }; });
+// Infer { provider, repo } from a folder's git origin remote (null if not a recognized provider remote).
+ipcMain.handle('provider:repo-from-remote', (_e, dir: string) => new Promise<{ provider: ProviderId; repo: string } | null>((resolve) => {
   if (!dir || typeof dir !== 'string') return resolve(null);
   resolveBin('git').then((git) => {
     if (!git) return resolve(null);
     execFile(git, ['-C', dir, 'remote', 'get-url', 'origin'], { timeout: 6000, windowsHide: true }, (err, stdout) => {
-      resolve(err ? null : ghRepoFromRemote(stdout || ''));
+      resolve(err ? null : providerFromRemote(stdout || ''));
     });
   });
 }));
-
-// Pull open issues for owner/name via the app's OAuth token (REST). GitHub's issues endpoint mixes
-// PRs in — filter them out.
-ipcMain.handle('github:issues', async (_e, repo: string) => {
-  if (typeof repo !== 'string' || !/^[\w.-]+\/[\w.-]+$/.test(repo)) return { ok: false, error: 'Invalid repository' };
-  const r = await ghApi(`/repos/${repo}/issues?state=open&per_page=50`);
-  if (!r.ok || !Array.isArray(r.json)) {
-    const msg = (r.json as { message?: string } | null)?.message || '';
-    if (r.status === 401) return { ok: false, error: 'Not connected — reconnect GitHub in Sources.' };
-    if (r.status === 403 || r.status === 404) return { ok: false, error: `${msg || 'No access'} (HTTP ${r.status}). If this repo is in an organization, an org owner may need to approve the Slayer T OAuth app (Org → Settings → Third-party Access).` };
-    return { ok: false, error: `${msg || 'Could not pull issues'} (HTTP ${r.status})` };
-  }
-  const issues: Issue[] = (r.json as Array<Record<string, unknown>>).filter((i) => !i.pull_request).map((i) => ({
-    number: Number(i.number) || 0, title: String(i.title || ''), body: String(i.body || ''),
-    state: String(i.state || 'open'), url: String(i.html_url || ''),
-    labels: Array.isArray(i.labels) ? (i.labels as Array<Record<string, unknown>>).map((l) => ({ name: String(l.name || ''), color: l.color ? String(l.color) : undefined })) : [],
-  }));
-  return { ok: true, issues };
+ipcMain.handle('provider:issues', async (_e, p: { provider: ProviderId; repo: string }) => {
+  const a = providerOf(p?.provider); if (!a) return badProvider;
+  if (!validRepo(p?.repo)) return { ok: false, error: 'Invalid repository' };
+  return a.issues(p.repo);
 });
-
-// List the connected user's GitHub repos (for the Sources picker) via the app's OAuth token.
-ipcMain.handle('github:repos', async () => {
-  const r = await ghApi('/user/repos?per_page=100&sort=updated&affiliation=owner,collaborator,organization_member');
-  if (!r.ok || !Array.isArray(r.json)) return { ok: false, error: r.status === 401 ? 'Not connected to GitHub' : 'Could not list repos' };
-  const repos = (r.json as Array<Record<string, unknown>>).map((x) => ({ repo: String(x.full_name || ''), desc: String(x.description || ''), priv: !!x.private })).filter((x) => /^[\w.-]+\/[\w.-]+$/.test(x.repo));
-  return { ok: true, repos };
-});
-
-// Open PRs for a repo (app OAuth token) — to light up an assigned issue whose branch (issue-N) has a PR.
-ipcMain.handle('github:prs', async (_e, repo: string) => {
-  if (typeof repo !== 'string' || !/^[\w.-]+\/[\w.-]+$/.test(repo)) return { ok: false, error: 'Invalid repository' };
-  const r = await ghApi(`/repos/${repo}/pulls?state=open&per_page=100`);
-  if (!r.ok || !Array.isArray(r.json)) return { ok: false, error: 'Could not list PRs' };
-  const prs = (r.json as Array<Record<string, unknown>>).map((p) => ({ number: Number(p.number) || 0, branch: String((p.head as { ref?: string })?.ref || ''), url: String(p.html_url || ''), draft: !!p.draft })).filter((p) => p.branch);
-  return { ok: true, prs };
+ipcMain.handle('provider:repos', async (_e, id: ProviderId) => (await providerOf(id)?.repos()) || badProvider);
+ipcMain.handle('provider:prs', async (_e, p: { provider: ProviderId; repo: string }) => {
+  const a = providerOf(p?.provider); if (!a) return badProvider;
+  if (!validRepo(p?.repo)) return { ok: false, error: 'Invalid repository' };
+  return a.prs(p.repo);
 });
 
 // Which coding agents are installed on PATH (for the Assign-to picker). Names are hardcoded literals.
@@ -396,37 +348,40 @@ ipcMain.handle('open:external', (_e, url: string) => {
 // issue-<n>, so several issues can be worked in parallel without disturbing the main checkout.
 // Also drops the (edited) issue brief as .slayer/issue-<n>.md and locally git-excludes it, so the
 // agent's PR never carries the brief. Returns the worktree path + brief's repo-relative path.
-ipcMain.handle('git:worktree-add', async (_e, p: { repo: string; dir: string; number: number; brief?: string }) => {
+ipcMain.handle('git:worktree-add', async (_e, p: { provider?: ProviderId; repo: string; dir: string; number: number; brief?: string }) => {
   try {
     const repo = p?.repo, dir = p?.dir, num = p?.number;
-    if (typeof repo !== 'string' || !/^[\w.-]+\/[\w.-]+$/.test(repo) || !Number.isInteger(num) || num <= 0) return { ok: false, error: 'Invalid request' };
+    const adapter = providerOf(p?.provider || 'github');   // default github (back-compat for older callers)
+    if (!adapter || typeof repo !== 'string' || !/^[\w.-]+(\/[\w.-]+)+$/.test(repo) || !Number.isInteger(num) || num <= 0) return { ok: false, error: 'Invalid request' };
     const git = await resolveBin('git');
     if (!git) return { ok: false, error: 'git not found on PATH' };
 
     // Resolve a LOCAL clone of the SELECTED repo — NOT the open folder, which may now be a different repo
     // (the repo selector decouples them). Prefer the open folder when its remote IS this repo; otherwise
-    // use — or create — a managed clone under %APPDATA%\Relay\repos\<owner>__<repo>. gh clone carries your
-    // GitHub login, so private + org repos clone without embedding a token in .git/config.
+    // use — or create — a managed clone under %APPDATA%\Relay\repos\<provider>__<owner>__<repo>. The
+    // provider CLI (gh/glab) carries your login so private/org repos clone without a token in .git/config;
+    // Bitbucket (no CLI) falls back to `git clone`, which uses the OS git credential helper (e.g. GCM).
     let repoRoot = '';
     if (typeof dir === 'string' && dir) {
       const top = await runBin(git, ['-C', dir, 'rev-parse', '--show-toplevel']);
       if (top.ok) {
         const root = top.stdout.trim();
         const rem = await runBin(git, ['-C', root, 'remote', 'get-url', 'origin']);
-        if (rem.ok && ghRepoFromRemote(rem.stdout) === repo) repoRoot = root;
+        const fromRemote = rem.ok ? providerFromRemote(rem.stdout) : null;
+        if (fromRemote && fromRemote.provider === (p?.provider || 'github') && fromRemote.repo === repo) repoRoot = root;
       }
     }
     if (!repoRoot) {
-      const cacheRoot = path.join(app.getPath('userData'), 'repos', repo.replace('/', '__'));
+      const cacheRoot = path.join(app.getPath('userData'), 'repos', `${p?.provider || 'github'}__${repo.replace(/\//g, '__')}`);
       if (existsSync(path.join(cacheRoot, '.git'))) {
         repoRoot = cacheRoot;
         await runBin(git, ['-C', cacheRoot, 'fetch', 'origin', '--prune'], { timeout: 120000 }); // freshen (best-effort)
       } else {
         await fsp.mkdir(path.dirname(cacheRoot), { recursive: true });
-        const gh = await resolveBin('gh');
-        const clone = gh
-          ? await runBin(gh, ['repo', 'clone', repo, cacheRoot], { timeout: 300000 })
-          : await runBin(git, ['clone', `https://github.com/${repo}.git`, cacheRoot], { timeout: 300000 });
+        const cliBin = adapter.cli ? await resolveBin(adapter.cli) : null;
+        const clone = cliBin && adapter.cliCloneArgs
+          ? await runBin(cliBin, adapter.cliCloneArgs(repo, cacheRoot), { timeout: 300000 })
+          : await runBin(git, ['clone', await adapter.cloneUrl(repo), cacheRoot], { timeout: 300000 });
         if (!clone.ok || !existsSync(path.join(cacheRoot, '.git'))) {
           const msg = (clone.stderr || clone.stdout || 'clone failed').trim().split('\n').filter(Boolean).pop() || 'clone failed';
           return { ok: false, error: `Couldn't clone ${repo}: ${msg}` };
@@ -450,6 +405,23 @@ ipcMain.handle('git:worktree-add', async (_e, p: { repo: string; dir: string; nu
     const norm = (s: string) => s.replace(/\\/g, '/').toLowerCase();
     // Drop registrations for worktrees whose folders were deleted by hand, so a re-assign can recreate them.
     await runBin(git, ['-C', repoRoot, 'worktree', 'prune']);
+    // House-keeping: after prune, hand-deleted worktrees leave behind empty <folder>/<branch> and (once
+    // its last branch is gone) empty <folder> dirs under …\worktrees. Sweep the empties so the tree
+    // doesn't accumulate orphans and a stale-empty wtPath can't make `worktree add` fail with "already
+    // exists". Only ever removes directories that are genuinely empty — never a live worktree.
+    try {
+      const wtBase = path.join(app.getPath('userData'), 'worktrees');
+      for (const fld of await fsp.readdir(wtBase).catch(() => [] as string[])) {
+        const fldPath = path.join(wtBase, fld);
+        if (!(await fsp.stat(fldPath).catch(() => null))?.isDirectory()) continue;
+        for (const leaf of await fsp.readdir(fldPath).catch(() => [] as string[])) {
+          const leafPath = path.join(fldPath, leaf);
+          const st = await fsp.stat(leafPath).catch(() => null);
+          if (st?.isDirectory() && (await fsp.readdir(leafPath).catch(() => ['x'])).length === 0) await fsp.rmdir(leafPath).catch(() => {});
+        }
+        if ((await fsp.readdir(fldPath).catch(() => ['x'])).length === 0) await fsp.rmdir(fldPath).catch(() => {});
+      }
+    } catch (err) { logFatal('git:worktree-add/sweep', err); } // sweep is best-effort; the worktree still opens
     // Already have a worktree for this issue? Reuse it (re-assigning the same issue is idempotent).
     const list = await runBin(git, ['-C', repoRoot, 'worktree', 'list', '--porcelain']);
     const reused = list.ok && norm(list.stdout).split('\n').some((ln) => ln.startsWith('worktree ') && norm(ln.slice(9).trim()) === norm(wtPath));

@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer, clipboard } from 'electron';
 import * as os from 'node:os';
 import type { Settings, SavedSession, AgentEvent, ApprovalRequest, ChatTurn, Workspace, WorkspaceDef, WorkspaceBlueprint, Block, Issue } from './shared/types';
+import type { ProviderId } from './providers'; // type-only — erased at build, no main-process code pulled in
 
 // Real identity for the Blocks-view prompt line (user@host + home for ~ shortening).
 function sysInfo() { try { return { user: os.userInfo().username, host: os.hostname().split('.')[0], home: os.homedir() }; } catch { return { user: 'user', host: 'relay', home: '' }; } }
@@ -60,26 +61,30 @@ const api = {
   getWorkspaceSnapshot: (id: string): Promise<Workspace> => ipcRenderer.invoke('workspace:get-snapshot', id),
   saveWorkspaceSnapshot: (id: string, ws: Workspace) => ipcRenderer.send('workspace:save-snapshot', { id, ws }),
 
-  // --- Issue Agent (Phase 1: read-only GitHub issues via the gh CLI, keyless) ---
-  // App-owned GitHub auth (OAuth device flow; token encrypted in the OS keychain, never in the renderer).
-  githubAuthState: (): Promise<{ connected: boolean; login?: string }> => ipcRenderer.invoke('github:auth-state'),
+  // --- Issue Agent — multi-provider (GitHub / GitLab / Bitbucket) ---
+  // GitHub connects via OAuth device flow; GitLab/Bitbucket via a pasted read-token. All tokens are
+  // encrypted in the OS keychain in the main process — the renderer only ever sees { connected, login }.
   githubDeviceStart: (): Promise<{ ok: boolean; userCode?: string; verificationUri?: string; deviceCode?: string; interval?: number; expiresIn?: number; error?: string }> => ipcRenderer.invoke('github:device-start'),
   githubDevicePoll: (deviceCode: string): Promise<{ status: string; login?: string; interval?: number; error?: string }> => ipcRenderer.invoke('github:device-poll', { deviceCode }),
-  githubDisconnect: (): Promise<{ ok: boolean }> => ipcRenderer.invoke('github:disconnect'),
-  // Resolve owner/name from a folder's git `origin` remote (null if not a git repo / no GitHub remote).
-  githubRepo: (dir: string): Promise<string | null> => ipcRenderer.invoke('github:repo', dir),
-  // Pull open issues for owner/name via `gh issue list`.
-  githubIssues: (repo: string): Promise<{ ok: boolean; issues?: Issue[]; error?: string }> => ipcRenderer.invoke('github:issues', repo),
-  // List the user's GitHub repos for the Sources picker.
-  githubRepos: (): Promise<{ ok: boolean; repos?: { repo: string; desc: string; priv: boolean }[]; error?: string }> => ipcRenderer.invoke('github:repos'),
-  // Open PRs for a repo — to link an assigned issue's branch to its PR (review → ship).
-  githubPrs: (repo: string): Promise<{ ok: boolean; prs?: { number: number; branch: string; url: string; draft: boolean }[]; error?: string }> => ipcRenderer.invoke('github:prs', repo),
+  // Connection state for a provider (never the token).
+  providerAuthState: (provider: ProviderId): Promise<{ connected: boolean; login?: string }> => ipcRenderer.invoke('provider:auth-state', provider),
+  // Connect GitLab/Bitbucket with a pasted token (+ optional host for self-managed GitLab).
+  providerConnect: (provider: ProviderId, token: string, host?: string): Promise<{ ok: boolean; login?: string; error?: string }> => ipcRenderer.invoke('provider:connect', { provider, token, host }),
+  providerDisconnect: (provider: ProviderId): Promise<{ ok: boolean }> => ipcRenderer.invoke('provider:disconnect', provider),
+  // Infer { provider, repo } from a folder's git `origin` remote (null if not a recognized provider remote).
+  providerRepoFromRemote: (dir: string): Promise<{ provider: ProviderId; repo: string } | null> => ipcRenderer.invoke('provider:repo-from-remote', dir),
+  // Pull a repo's open issues (normalized) for the given provider.
+  providerIssues: (provider: ProviderId, repo: string): Promise<{ ok: boolean; issues?: Issue[]; error?: string }> => ipcRenderer.invoke('provider:issues', { provider, repo }),
+  // List the connected user's repos/projects for the Sources picker.
+  providerRepos: (provider: ProviderId): Promise<{ ok: boolean; repos?: { repo: string; desc: string; priv: boolean }[]; error?: string }> => ipcRenderer.invoke('provider:repos', provider),
+  // Open PRs/MRs for a repo — to link an assigned issue's branch to its PR (review → ship).
+  providerPrs: (provider: ProviderId, repo: string): Promise<{ ok: boolean; prs?: { number: number; branch: string; url: string; draft: boolean }[]; error?: string }> => ipcRenderer.invoke('provider:prs', { provider, repo }),
   // Which coding agents are installed on PATH (for the Assign-to picker).
   agentsDetect: (): Promise<Record<string, boolean>> => ipcRenderer.invoke('agents:detect'),
   // Open a URL in the user's default browser (e.g. an issue on GitHub).
   openExternal: (url: string): Promise<void> => ipcRenderer.invoke('open:external', url),
   // Assign: create (or reuse) an isolated worktree for an issue and drop the edited brief inside it.
-  worktreeAdd: (repo: string, dir: string, number: number, brief: string): Promise<{ ok: boolean; path?: string; branch?: string; base?: string; reused?: boolean; briefRel?: string; error?: string }> => ipcRenderer.invoke('git:worktree-add', { repo, dir, number, brief }),
+  worktreeAdd: (provider: ProviderId, repo: string, dir: string, number: number, brief: string): Promise<{ ok: boolean; path?: string; branch?: string; base?: string; reused?: boolean; briefRel?: string; error?: string }> => ipcRenderer.invoke('git:worktree-add', { provider, repo, dir, number, brief }),
 
   // --- workspace blueprints (reusable "Templates") ---
   getBlueprints: (): Promise<WorkspaceBlueprint[]> => ipcRenderer.invoke('blueprints:get'),

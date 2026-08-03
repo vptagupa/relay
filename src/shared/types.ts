@@ -139,6 +139,7 @@ export interface Settings {
   issueRepos?: string[]; // repos tracked via Sources (owner/name)
   issueRepo?: string;    // the active repo (owner/name); empty → infer from the open folder's git remote
   issueAgent?: string;   // preferred coding agent id for Assign (claude/gemini/codex/aider/antigravity)
+  issueConcurrency?: number; // max agents the assign queue runs at once (per repo); default 2
 }
 
 // Streaming events emitted by the agent loop to the renderer.
@@ -179,4 +180,6 @@ export interface Issue {
   labels: IssueLabel[];
   state: string;
   url: string;
+  assignees?: string[];             // GitHub logins assigned to the issue (for the "assigned to me" filter)
+  milestone?: string;               // milestone title, if any
 }
