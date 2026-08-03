@@ -375,10 +375,30 @@ function tabHtml(t: Tab): string {
   const style = (t.tabBg || t.tabFg) ? ` style="${t.tabBg ? `background:${t.tabBg};` : ''}${t.tabFg ? `color:${t.tabFg};` : ''}"` : '';
   const fgStyle = t.tabFg ? ` style="color:${t.tabFg}"` : '';
   const activeInGroup = t.id === state.gv[t.group]; // the visible tab of its own group
-  return `<div class="tab ${activeInGroup ? 'active' : ''}${(t.tabBg || t.tabFg) ? ' colored' : ''}" draggable="true" data-tab="${t.id}" title="${esc(t.name)} · ${esc(modelById(t.model).short)}"${style}>
-      <span class="tab-glyph"${fgStyle}>${svgIcon('i-term', 13)}</span><span class="tab-name" data-rename="${t.id}">${esc(t.name)}</span>
+  const running = runningTabs.has(t.id) ? ' running' : '';
+  return `<div class="tab ${activeInGroup ? 'active' : ''}${(t.tabBg || t.tabFg) ? ' colored' : ''}${running}" draggable="true" data-tab="${t.id}" title="${esc(t.name)} · ${esc(modelById(t.model).short)}"${style}>
+      <span class="tab-glyph"${fgStyle}>${svgIcon('i-term', 13)}<i class="tab-live" title="Running — live output"></i></span><span class="tab-name" data-rename="${t.id}">${esc(t.name)}</span>
       <span class="tab-close" data-close="${t.id}">✕</span>
     </div>`;
+}
+/* ---- per-tab "running" indicator: a live green pulse while a tab's terminal is producing output ---- */
+const runningTabs = new Set<string>();            // tabs currently showing the live pulse
+const tabIdleTimer = new Map<string, number>();   // tabId → timeout that clears the pulse once output stops
+// Toggle the class on the live tab node(s) directly, so we don't rebuild the whole tab strip on every chunk.
+function setTabRunning(id: string, on: boolean): void {
+  if (on) runningTabs.add(id); else runningTabs.delete(id);
+  document.querySelectorAll(`.tab[data-tab="${CSS.escape(id)}"]`).forEach((el) => el.classList.toggle('running', on));
+}
+// Output arrived → pulse the tab; a rolling idle timer clears it ~1.5s after output stops.
+function markTabActive(id: string): void {
+  if (!runningTabs.has(id)) setTabRunning(id, true);
+  const prev = tabIdleTimer.get(id); if (prev) clearTimeout(prev);
+  tabIdleTimer.set(id, window.setTimeout(() => { tabIdleTimer.delete(id); setTabRunning(id, false); }, 1500));
+}
+// The process exited (or the tab is gone) → stop the pulse now, don't wait for the idle timer.
+function clearTabActive(id: string): void {
+  const prev = tabIdleTimer.get(id); if (prev) { clearTimeout(prev); tabIdleTimer.delete(id); }
+  setTabRunning(id, false);
 }
 let editingTabId: string | null = null; // a tab whose name is being edited — don't nuke its node
 function renderTabs() {
@@ -1729,14 +1749,14 @@ function writeToTab(id: string, data: string): void {
   if (t.fitted) t.term.write(data);
   else t.replayQ = ((t.replayQ ?? '') + data).slice(-512 * 1024);
 }
-relay.onPtyData((id: string, data: string) => { writeToTab(id, data); persistWorkspace(); });
+relay.onPtyData((id: string, data: string) => { writeToTab(id, data); markTabActive(id); persistWorkspace(); });
 // Final flush on close — synchronous so the latest scrollback reaches disk before teardown.
 // Wrapped so a failed flush can never throw mid-unload (which would abort a clean close).
 window.addEventListener('beforeunload', () => {
   // !state.booting: never let a close mid-restore flush a partial tab set over the full saved workspace.
   try { if (state.settings.autoSave && !state.booting) relay.flushWorkspace({ active: state.active, tabs: snapshotTabs(), gv: state.gv, focus: state.focus, layout: state.layout }); } catch { /* ignore */ }
 });
-relay.onPtyExit((id: string) => { writeToTab(id, '\r\n\x1b[90m[process exited]\x1b[0m\r\n'); });
+relay.onPtyExit((id: string) => { writeToTab(id, '\r\n\x1b[90m[process exited]\x1b[0m\r\n'); clearTabActive(id); });
 relay.onApproval((req: ApprovalRequest) => showApproval(req));
 relay.onDeeplink(handleDeeplink);
 let _roT: any;
