@@ -31,6 +31,7 @@ export interface WsDeps {
   updateMainView: () => void;
   reflectSettings: () => void;
   renderLibrary: () => void;                         // the Library is per-workspace — re-render it on switch
+  reloadIssues: () => void;                          // Issues (tracked repos + active repo) are per-workspace — reload on switch
   persistWorkspace: (immediate?: boolean) => void;
   applyTheme: () => void;
   blocksMode: (t: Tab | undefined) => boolean;
@@ -100,6 +101,7 @@ export async function restoreWorkspaceSnapshot(ws: Workspace, alwaysRestore = fa
   // workspace switch leaves the agent panel showing the previous tab's chat and Files on the old folder.
   state.browsePath = activeTab()?.cwd || state.settings.workspace || '';
   deps.updateStatus(); deps.reflectModel(); deps.renderLibrary(); // the Library is per-workspace — show this workspace's saved sessions
+  deps.reloadIssues(); // Issues are per-workspace too — pull this workspace's active repo
   if ($('#agentPanel').classList.contains('show')) deps.renderChat();
   // Focus the active pane's input so typing and Ctrl+C reach the shell immediately after a switch (or boot)
   // — otherwise nothing is focused and a running command can't be interrupted until a click.

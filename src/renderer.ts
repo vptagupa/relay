@@ -20,7 +20,7 @@ import { initFiles, renderFiles } from './files';
 import { initBlockView, blockHtml, bvBlockHtml, collapsedBlocks, fmtDur } from './block-view';
 import { openTplMenu, saveAsTemplate, runStartupIfPending } from './blueprints';
 import { initWorkspaces, loadWorkspaceMeta, restoreWorkspaceSnapshot, settleDeeplink, createWorkspace, openWsMenu, closeWsMenu, handleDeeplink, setActiveWsRoot, setActiveWsTheme, getActiveWsId, duplicateWorkspace, exportWorkspace, importWorkspace, toggleTrust, copyWorkspaceLink, activeWorkspaceDef, isWorkspaceTrusted } from './workspaces';
-import { initIssues, pullIssues } from './issues';
+import { initIssues, pullIssues, loadIssues } from './issues';
 import type { Settings, SavedSession, AgentEvent, ApprovalRequest, ChatTurn, OpenTab, Workspace, WorkspaceDef, Block, Bookmark, BookmarkGroup } from './shared/types';
 
 // TEMP DIAG: surface full stacks (minify is off) for the init crash.
@@ -1769,10 +1769,11 @@ new ResizeObserver(() => { clearTimeout(_roT); _roT = setTimeout(() => { fitPane
 (async function boot() {
   state.settings = await relay.getSettings();
   state.library = await relay.listSessions();
-  initWorkspaces({ newTab, snapshotTabs, reconcilePanes, fitPanes, renderTabs, updateStatus, reflectModel, renderChat, updateMainView, reflectSettings, persistWorkspace, applyTheme, blocksMode, confirmDialog, shortCwd, sendCommand, renderLibrary, pcmd: P_CMD });
+  initWorkspaces({ newTab, snapshotTabs, reconcilePanes, fitPanes, renderTabs, updateStatus, reflectModel, renderChat, updateMainView, reflectSettings, persistWorkspace, applyTheme, blocksMode, confirmDialog, shortCwd, sendCommand, renderLibrary, reloadIssues: () => void loadIssues(), pcmd: P_CMD });
   initIssues({
     // Assign → open a fresh terminal tab rooted in the issue's worktree, seeded to launch the agent.
     openAgentTab: (o) => { void newTab({ cwd: o.cwd, name: o.name, runCmd: o.runCmd }); },
+    activeWsId: getActiveWsId, // Issues (tracked repos + active repo) are scoped per workspace
   });
   await loadWorkspaceMeta(); // load workspace defs + blueprints, mirror the active workspace's folder + theme into settings before first paint
   // Per-workspace Library migration: sessions saved before Libraries were per-workspace have no wsId.
@@ -1783,6 +1784,16 @@ new ResizeObserver(() => { clearTimeout(_roT); _roT = setTimeout(() => { fitPane
   if (orphans.length && legacyWs) {
     for (const s of orphans) s.wsId = legacyWs;
     void (async () => { for (const s of orphans) { try { await relay.upsertSession(s); } catch { /* best-effort persist */ } } })();
+  }
+  // Per-workspace Issues migration: earlier builds kept ONE global tracked list + active repo. Seed them
+  // into the active workspace (normalizing legacy bare "owner/name" ids to "github:owner/name") so this
+  // workspace keeps its repos and others start fresh. Runs once — subsequent picks write the per-ws maps.
+  if (legacyWs && !state.settings.issueRepoByWs && !state.settings.issueReposByWs && (state.settings.issueRepo || (state.settings.issueRepos || []).length)) {
+    const norm = (id: string) => (!id ? id : /^(github|gitlab|bitbucket):/.test(id) ? id : `github:${id}`);
+    state.settings = await relay.patchSettings({
+      issueRepoByWs: { [legacyWs]: norm(state.settings.issueRepo || '') },
+      issueReposByWs: { [legacyWs]: (state.settings.issueRepos || []).map(norm) },
+    });
   }
   ($('#libSort') as HTMLSelectElement).value = state.settings.librarySort || 'recent';
   applyTheme(); applySidebarWidth(); applySidebar(); applyToolbar(); applySplit(); applySidebarView(); reflectAutosave(); renderLibrary(); updateStatus(); reflectModel(); reflectSettings();

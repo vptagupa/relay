@@ -137,8 +137,10 @@ export interface Settings {
   hasKey: Record<string, boolean>;  // provider -> whether a key is stored (never the key itself)
   issueTags?: Record<string, string[]>; // private local tags, keyed "repo#number" → ["mine","reviewing"] (never touch GitHub)
   sidebarView?: 'library' | 'files' | 'issues'; // which rail panel is active in the sidebar
-  issueRepos?: string[]; // repos tracked via Sources (owner/name)
-  issueRepo?: string;    // the active repo (owner/name); empty → infer from the open folder's git remote
+  issueRepos?: string[]; // LEGACY (pre per-workspace): global tracked repos — migrated into issueReposByWs
+  issueRepo?: string;    // LEGACY (pre per-workspace): global active repo — migrated into issueRepoByWs
+  issueReposByWs?: Record<string, string[]>; // tracked repos per workspace id (Issues are per-workspace)
+  issueRepoByWs?: Record<string, string>;    // active repo per workspace id; empty → infer from the folder's remote
   issueAgent?: string;   // preferred coding agent id for Assign (claude/gemini/codex/aider/antigravity)
   issueConcurrency?: number; // max agents the assign queue runs at once (per repo); default 2
 }

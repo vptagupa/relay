@@ -15,8 +15,25 @@ const relay = (window as any).relay;
 
 export interface IssuesDeps {
   openAgentTab: (o: { cwd: string; name: string; runCmd?: string }) => void; // open a terminal tab in the issue worktree, launching the agent
+  activeWsId: () => string;   // the active workspace id — Issues (tracked repos + active repo) are per-workspace
 }
 let deps: IssuesDeps;
+
+/* ----------------------------- per-workspace repo selection ----------------------------- */
+// Each workspace keeps its OWN tracked repos + active repo (keyed by workspace id in Settings). The
+// provider connections/tokens stay global (you connect a provider once); only the repo picks are scoped.
+const wsKey = () => deps.activeWsId() || 'ws_default';
+const curRepo = (): string => (state.settings.issueRepoByWs || {})[wsKey()] || '';
+const trackedRepos = (): string[] => (state.settings.issueReposByWs || {})[wsKey()] || [];
+async function setActiveRepo(qid: string): Promise<void> {
+  const byWs = { ...(state.settings.issueRepoByWs || {}) }; byWs[wsKey()] = qid;
+  state.settings = await relay.patchSettings({ issueRepoByWs: byWs });
+}
+async function setTracked(list: string[], activeQid: string): Promise<void> {
+  const repos = { ...(state.settings.issueReposByWs || {}) }; repos[wsKey()] = list;
+  const active = { ...(state.settings.issueRepoByWs || {}) }; active[wsKey()] = activeQid;
+  state.settings = await relay.patchSettings({ issueReposByWs: repos, issueRepoByWs: active });
+}
 
 /* ----------------------------- providers (renderer-side display + brief config) ----------------------------- */
 type ProviderId = 'github' | 'gitlab' | 'bitbucket';
@@ -69,8 +86,8 @@ const activeFilters = new Set<string>();        // active local-tag filter chips
 const activeLabels = new Set<string>();         // active provider-label filter chips (AND)
 let mineOnly = false;                            // "assigned to me" toggle
 let myLogin = '';                                // the connected provider login (for "assigned to me")
-// The repo we're showing: an explicit Sources pick wins, else it's inferred from the open folder's remote.
-const activeKey = () => state.settings.issueRepo || state.settings.workspace || '';
+// The repo we're showing: this workspace's explicit pick wins, else it's inferred from its folder's remote.
+const activeKey = () => `${wsKey()}:${curRepo() || state.settings.workspace || ''}`;
 const runStatus = new Map<string, RunStatus>(); // "provider:repo#number" → run state (never bleeds across repos/providers)
 let prByBranch: Record<string, { url: string; draft: boolean }> = {}; // "issue-N" branch → its open PR/MR (review → ship)
 let lastKey: string | null = null; // the provider:repo the current filters/search belong to — reset them when it changes
@@ -240,9 +257,10 @@ export async function loadIssues(): Promise<void> {
   const seq = ++loadSeq;                            // a newer pull supersedes this one at each await point
   const dir = state.settings.workspace || '';
   loadedFor = activeKey(); phase = 'loading'; render();
-  // Which provider + repo? An explicit pick (issueRepo) wins; otherwise infer from the folder's git remote.
-  if (state.settings.issueRepo) {
-    const parsed = parseRepoId(state.settings.issueRepo); provider = parsed.provider; repo = parsed.repo;
+  // Which provider + repo? This workspace's explicit pick wins; otherwise infer from the folder's git remote.
+  const pick = curRepo();
+  if (pick) {
+    const parsed = parseRepoId(pick); provider = parsed.provider; repo = parsed.repo;
   } else {
     const inf = dir ? await relay.providerRepoFromRemote(dir).catch(() => null) : null; if (seq !== loadSeq) return;
     provider = inf?.provider || 'github'; repo = inf?.repo || null;
@@ -425,25 +443,14 @@ async function openAssign(i: Issue): Promise<void> {
 }
 
 /* ----------------------------- repo selector + Sources ----------------------------- */
-const trackedRepos = (): string[] => state.settings.issueRepos || [];
-
-// One-time migration: earlier builds stored bare "owner/name" ids (GitHub-only). Qualify them as
-// "github:owner/name" so the Sources checkboxes + repo-menu highlight match. Runs once, then persists.
-function migrateRepoIds(): void {
-  const norm = (id: string) => (/^(github|gitlab|bitbucket):/.test(id) ? id : `github:${id}`);
-  const repos = trackedRepos().map(norm);
-  const active = state.settings.issueRepo ? norm(state.settings.issueRepo) : state.settings.issueRepo;
-  if (JSON.stringify(repos) !== JSON.stringify(trackedRepos()) || active !== state.settings.issueRepo) {
-    state.settings.issueRepos = repos; state.settings.issueRepo = active;
-    void relay.patchSettings({ issueRepos: repos, issueRepo: active });
-  }
-}
+// (trackedRepos / curRepo / setActiveRepo / setTracked are defined at the top — Issues are per-workspace.
+//  The legacy bare-id → provider-qualified migration now runs once at boot in the renderer.)
 
 function closeRepoMenu(): void { document.getElementById('issRepoMenu')?.remove(); }
 function openRepoMenu(): void {
   const btn = $('#issSideRepo'); if (!btn) return;
   if (document.getElementById('issRepoMenu')) { closeRepoMenu(); return; }
-  const active = state.settings.issueRepo || '';
+  const active = curRepo();
   const rows = [`<button class="iss-mi ${!active ? 'on' : ''}" data-repo=""><span class="d">⌂</span> This folder’s repo</button>`];
   for (const id of trackedRepos()) {
     const { provider: p, repo: r } = parseRepoId(id);
@@ -460,8 +467,7 @@ function openRepoMenu(): void {
     mi.onclick = (e) => {
       e.stopPropagation();
       if (mi.dataset.sources) { closeRepoMenu(); void openSources(); return; }
-      state.settings.issueRepo = mi.dataset.repo || '';
-      void relay.patchSettings({ issueRepo: state.settings.issueRepo });
+      void setActiveRepo(mi.dataset.repo || '');
       closeRepoMenu(); void loadIssues();
     };
   });
@@ -598,11 +604,11 @@ async function openSources(): Promise<void> {
       box.querySelectorAll<HTMLInputElement>('input[type=checkbox]').forEach((cb) => {
         cb.onchange = async () => {
           const qid = cb.dataset.repo!;
-          // Checking a repo tracks it AND makes it the active one, so closing Sources shows its issues.
-          // Unchecking the active repo falls back to the folder.
-          if (cb.checked) { tracked.add(qid); state.settings.issueRepo = qid; }
-          else { tracked.delete(qid); if (state.settings.issueRepo === qid) state.settings.issueRepo = ''; }
-          state.settings = await relay.patchSettings({ issueRepos: [...tracked], issueRepo: state.settings.issueRepo });
+          // Per-workspace: checking a repo tracks it in THIS workspace AND makes it the active one, so
+          // closing Sources shows its issues. Unchecking the active repo falls back to the folder.
+          if (cb.checked) tracked.add(qid); else tracked.delete(qid);
+          const active = cb.checked ? qid : (curRepo() === qid ? '' : curRepo());
+          await setTracked([...tracked], active);
         };
       });
     };
@@ -614,7 +620,6 @@ async function openSources(): Promise<void> {
 // section shows the repo's issues without a click (each failure mode still renders its own hint).
 export function initIssues(d: IssuesDeps): void {
   deps = d;
-  migrateRepoIds(); // qualify any legacy bare repo ids before the first pull / Sources open
   const pull = $('#issSidePull'); if (pull) pull.onclick = () => { void loadIssues().then(() => { if (phase === 'ready') toast(`Pulled ${issues.length} issue${issues.length === 1 ? '' : 's'}`, true); }); };
   const s = $('#issSearch') as HTMLInputElement | null; if (s) s.oninput = () => { query = s.value; render(); };
   const rsel = $('#issSideRepo'); if (rsel) rsel.onclick = (e) => { e.stopPropagation(); openRepoMenu(); };
