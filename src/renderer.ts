@@ -139,7 +139,12 @@ async function newTab(seed?: Partial<OpenTab> & { libId?: string; runCmd?: strin
   renderTabs();
   // Reattach to a live shell if one exists (replays its real output); otherwise spawn a
   // fresh shell, seeded with the saved snapshot as scrollback (main handles ordering).
-  const reattached = await relay.ptyCreate(id, cwd, term.cols || 80, term.rows || 24, seed?.scrollback, seed?.runCmd);
+  const { reattached, alt } = await relay.ptyCreate(id, cwd, term.cols || 80, term.rows || 24, seed?.scrollback, seed?.runCmd);
+  // A reattached shell running a full-screen TUI (Claude Code, vim, top…) must show its LIVE terminal, not
+  // the Blocks list — newTab reset liveInteractive to false, so restore it from the shell's real alt-screen
+  // state. Without this, Blocks view hides the still-running agent after a workspace switch (Classic view is
+  // unaffected). The follow-up updateMainView (switchTab, or the caller's post-restore call) reflects it.
+  if (alt) tab.liveInteractive = true;
   // A restored tab whose shell was NOT reattached (cold restart) gets a fresh block-id namespace so the
   // new shell's blocks can't collide with the restored ones. A reattached (keep-alive) shell keeps the
   // saved nonce, so its continuing/flushed block ids line up with the restored blocks.
@@ -988,7 +993,13 @@ function updatePaneView(g: number) {
     // (Claude Code, vim, top) redraws to the exact size (its bottom line isn't clipped).
     requestAnimationFrame(() => {
       t.fit.fit();
-      if (t.term.cols > 0) { t.lastCols = t.term.cols; t.lastRows = t.term.rows; relay.ptyResize(t.id, t.term.cols, t.term.rows); }
+      if (t.term.cols > 0) {
+        // First time this (reattached) tab is actually VISIBLE: flush the output buffered while it had no
+        // measured size — otherwise a full-screen app reattached after a workspace switch shows a blank
+        // frame here even though its shell is alive (this was the "Blocks view shows nothing" bug).
+        if (!t.fitted) { t.fitted = true; if (t.replayQ) { t.term.write(t.replayQ); t.replayQ = undefined; } }
+        t.lastCols = t.term.cols; t.lastRows = t.term.rows; relay.ptyResize(t.id, t.term.cols, t.term.rows);
+      }
       if (g === state.focus) { t.term.focus(); t.term.scrollToBottom(); }
     });
   }

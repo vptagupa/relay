@@ -5,7 +5,7 @@ import { promises as fsp, appendFileSync, existsSync } from 'node:fs';
 import { exec, execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { httpsReq, PROVIDERS, providerOf, providerFromRemote, type ProviderId } from './providers';
-import { createTerm, writeTerm, resizeTerm, detachTerm, killTerm, killAll } from './pty';
+import { createTerm, writeTerm, resizeTerm, detachTerm, killTerm, killAll, isAltScreen } from './pty';
 import * as store from './store';
 import * as keys from './keys';
 import { runAgent } from './agent/agent';
@@ -179,8 +179,10 @@ if (!isSquirrel) {
 ipcMain.handle('pty:create', async (e, { id, cwd, cols, rows, restore, runCmd }) => {
   try {
     const integrate = (await store.getSettings()).shellIntegration;
-    return createTerm(id, cwd, e.sender, cols, rows, restore, integrate, typeof runCmd === 'string' ? runCmd : undefined);
-  } catch (err) { logFatal('pty:create', err); return false; } // a spawn failure must not reject into the renderer
+    const reattached = createTerm(id, cwd, e.sender, cols, rows, restore, integrate, typeof runCmd === 'string' ? runCmd : undefined);
+    // `alt` lets the renderer restore the live-interactive view for a reattached full-screen TUI (Claude Code).
+    return { reattached, alt: isAltScreen(id) };
+  } catch (err) { logFatal('pty:create', err); return { reattached: false, alt: false }; } // a spawn failure must not reject into the renderer
 });
 ipcMain.on('pty:write', (_e, { id, data }) => writeTerm(id, data));
 ipcMain.on('pty:resize', (_e, { id, cols, rows }) => resizeTerm(id, cols, rows));

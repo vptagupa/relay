@@ -11,7 +11,7 @@ type BlockEvt = { type: 'start' | 'update' | 'end'; block: Block } | { type: 'cw
 // The only surface the renderer can touch. No Node, no fs, no API keys here.
 const api = {
   // --- terminals (real PTYs) ---
-  ptyCreate: (id: string, cwd: string, cols: number, rows: number, restore?: string, runCmd?: string): Promise<boolean> => ipcRenderer.invoke('pty:create', { id, cwd, cols, rows, restore, runCmd }),
+  ptyCreate: (id: string, cwd: string, cols: number, rows: number, restore?: string, runCmd?: string): Promise<{ reattached: boolean; alt: boolean }> => ipcRenderer.invoke('pty:create', { id, cwd, cols, rows, restore, runCmd }),
   ptyWrite: (id: string, data: string) => ipcRenderer.send('pty:write', { id, data }),
   ptyResize: (id: string, cols: number, rows: number) => ipcRenderer.send('pty:resize', { id, cols, rows }),
   ptyDetach: (id: string) => ipcRenderer.send('pty:detach', { id }),
