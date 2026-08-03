@@ -27,6 +27,7 @@ export interface Block {
 export interface SavedSession extends TermColors {
   id: string;                       // library record id
   termId: string;                   // terminal id — reattaches to the live shell if still running
+  wsId?: string;                    // the workspace this session belongs to (its Library is per-workspace)
   name: string;
   cwd: string;
   model: string;

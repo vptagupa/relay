@@ -376,9 +376,10 @@ function tabHtml(t: Tab): string {
   const fgStyle = t.tabFg ? ` style="color:${t.tabFg}"` : '';
   const activeInGroup = t.id === state.gv[t.group]; // the visible tab of its own group
   const running = runningTabs.has(t.id) ? ' running' : '';
+  // VS Code-style: while a tab is producing live output, the close slot shows a dot (reverts to ✕ on hover).
   return `<div class="tab ${activeInGroup ? 'active' : ''}${(t.tabBg || t.tabFg) ? ' colored' : ''}${running}" draggable="true" data-tab="${t.id}" title="${esc(t.name)} · ${esc(modelById(t.model).short)}"${style}>
-      <span class="tab-glyph"${fgStyle}>${svgIcon('i-term', 13)}<i class="tab-live" title="Running — live output"></i></span><span class="tab-name" data-rename="${t.id}">${esc(t.name)}</span>
-      <span class="tab-close" data-close="${t.id}">✕</span>
+      <span class="tab-glyph"${fgStyle}>${svgIcon('i-term', 13)}</span><span class="tab-name" data-rename="${t.id}">${esc(t.name)}</span>
+      <span class="tab-close" data-close="${t.id}" title="Close"><i class="tab-live" title="Running — live output"></i><span class="tab-x">✕</span></span>
     </div>`;
 }
 /* ---- per-tab "running" indicator: a live green pulse while a tab's terminal is producing output ---- */
@@ -579,11 +580,13 @@ async function toggleAutosave() {
 }
 
 /* ----------------------------- library ----------------------------- */
-// Pure sort lives in ./library; this reads the current list + mode from state.
-const sortedLibrary = (): SavedSession[] => sortSessions(state.library, state.settings.librarySort);
+// The Library is per-workspace: each session belongs to the workspace it was saved in, and the list
+// shows only the active workspace's sessions. Pure sort lives in ./library; this reads state + mode.
+const wsLibrary = (): SavedSession[] => state.library.filter((s) => s.wsId === getActiveWsId());
+const sortedLibrary = (): SavedSession[] => sortSessions(wsLibrary(), state.settings.librarySort);
 function renderLibrary() {
   const el = $('#libList');
-  if (!state.library.length) { el.innerHTML = '<div class="lib-empty">No saved terminals yet.<br>Open one and press ⤓ Save.</div>'; return; }
+  if (!wsLibrary().length) { el.innerHTML = '<div class="lib-empty">No saved terminals in this workspace yet.<br>Open one and press ⤓ Save.</div>'; return; }
   el.innerHTML = sortedLibrary().map((s) => `
     <div class="lib-item" draggable="true" data-open="${s.id}">
       <div class="lib-row"><span class="lib-ic">${svgIcon('i-term', 14)}</span><span class="lib-name" data-libname="${s.id}">${esc(s.name)}</span>
@@ -598,7 +601,7 @@ async function saveActive() {
   const libId = t.libId || state.library.find((s) => s.termId === t.id)?.id || uid();
   const prev = state.library.find((s) => s.id === libId);
   t.libId = libId;
-  const rec: SavedSession = { id: libId, termId: t.id, name: t.name, cwd: t.cwd, model: t.model, scrollback: t.ser.serialize({ scrollback: 800 }), tabBg: t.tabBg, tabFg: t.tabFg, bodyBg: t.bodyBg, bodyFg: t.bodyFg, chat: t.chat.slice(-100), blocks: slimBlocks(t.blocks), createdAt: prev?.createdAt ?? Date.now(), lastUsed: Date.now() };
+  const rec: SavedSession = { id: libId, termId: t.id, wsId: prev?.wsId || getActiveWsId(), name: t.name, cwd: t.cwd, model: t.model, scrollback: t.ser.serialize({ scrollback: 800 }), tabBg: t.tabBg, tabFg: t.tabFg, bodyBg: t.bodyBg, bodyFg: t.bodyFg, chat: t.chat.slice(-100), blocks: slimBlocks(t.blocks), createdAt: prev?.createdAt ?? Date.now(), lastUsed: Date.now() };
   state.library = await relay.upsertSession(rec);
   renderLibrary(); persistWorkspace(); toast(prev ? `Updated "${t.name}"` : `Saved "${t.name}"`, true);
 }
@@ -613,7 +616,7 @@ function flushTabToLibrary(t: Tab) {
   const libId = t.libId || state.library.find((s) => s.termId === t.id)?.id;
   if (!libId) return; // not a saved terminal — it isn't listed in the Library, so nothing to restore
   const prev = state.library.find((s) => s.id === libId);
-  const rec: SavedSession = { id: libId, termId: t.id, name: t.name, cwd: t.cwd, model: t.model, scrollback: t.ser.serialize({ scrollback: 800 }), tabBg: t.tabBg, tabFg: t.tabFg, bodyBg: t.bodyBg, bodyFg: t.bodyFg, chat: t.chat.slice(-100), blocks: slimBlocks(t.blocks), createdAt: prev?.createdAt ?? Date.now(), lastUsed: Date.now() };
+  const rec: SavedSession = { id: libId, termId: t.id, wsId: prev?.wsId || getActiveWsId(), name: t.name, cwd: t.cwd, model: t.model, scrollback: t.ser.serialize({ scrollback: 800 }), tabBg: t.tabBg, tabFg: t.tabFg, bodyBg: t.bodyBg, bodyFg: t.bodyFg, chat: t.chat.slice(-100), blocks: slimBlocks(t.blocks), createdAt: prev?.createdAt ?? Date.now(), lastUsed: Date.now() };
   const idx = state.library.findIndex((s) => s.id === libId);
   if (idx >= 0) state.library[idx] = rec; else state.library.push(rec);
   relay.upsertSession(rec).then((lib: SavedSession[]) => { state.library = lib; renderLibrary(); }).catch(() => {});
@@ -1223,7 +1226,7 @@ function paletteActions(): PalAction[] {
     { g: 'Window', t: 'Close window', run: () => relay.winClose() },
   ];
   const models: PalAction[] = MODELS.map((m) => ({ g: 'Model · this terminal', t: `${m.name}${m.id === ((activeTab()?.model) || state.settings.defaultModel) ? '  (current)' : ''}`, run: () => setModel(m.id) }));
-  const lib: PalAction[] = state.library.map((s) => ({ g: 'Open from Library', t: `${s.name}  ·  ${modelById(s.model).short}`, run: () => openSession(s) }));
+  const lib: PalAction[] = wsLibrary().map((s) => ({ g: 'Open from Library', t: `${s.name}  ·  ${modelById(s.model).short}`, run: () => openSession(s) }));
   return base.concat(models, lib);
 }
 initPalette(paletteActions); // hand the registry to the palette module (open/close/render/keyboard)
@@ -1766,12 +1769,21 @@ new ResizeObserver(() => { clearTimeout(_roT); _roT = setTimeout(() => { fitPane
 (async function boot() {
   state.settings = await relay.getSettings();
   state.library = await relay.listSessions();
-  initWorkspaces({ newTab, snapshotTabs, reconcilePanes, fitPanes, renderTabs, updateStatus, reflectModel, renderChat, updateMainView, reflectSettings, persistWorkspace, applyTheme, blocksMode, confirmDialog, shortCwd, sendCommand, pcmd: P_CMD });
+  initWorkspaces({ newTab, snapshotTabs, reconcilePanes, fitPanes, renderTabs, updateStatus, reflectModel, renderChat, updateMainView, reflectSettings, persistWorkspace, applyTheme, blocksMode, confirmDialog, shortCwd, sendCommand, renderLibrary, pcmd: P_CMD });
   initIssues({
     // Assign → open a fresh terminal tab rooted in the issue's worktree, seeded to launch the agent.
     openAgentTab: (o) => { void newTab({ cwd: o.cwd, name: o.name, runCmd: o.runCmd }); },
   });
   await loadWorkspaceMeta(); // load workspace defs + blueprints, mirror the active workspace's folder + theme into settings before first paint
+  // Per-workspace Library migration: sessions saved before Libraries were per-workspace have no wsId.
+  // Assign them to the (now-known) active workspace so they land in one Library instead of vanishing from
+  // every filtered view. Stamp in memory immediately (so the first render is correct); persist in the background.
+  const legacyWs = getActiveWsId();
+  const orphans = state.library.filter((s) => !s.wsId);
+  if (orphans.length && legacyWs) {
+    for (const s of orphans) s.wsId = legacyWs;
+    void (async () => { for (const s of orphans) { try { await relay.upsertSession(s); } catch { /* best-effort persist */ } } })();
+  }
   ($('#libSort') as HTMLSelectElement).value = state.settings.librarySort || 'recent';
   applyTheme(); applySidebarWidth(); applySidebar(); applyToolbar(); applySplit(); applySidebarView(); reflectAutosave(); renderLibrary(); updateStatus(); reflectModel(); reflectSettings();
   ($('#storeText') as HTMLElement).textContent = 'Saved on this machine';

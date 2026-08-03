@@ -213,19 +213,20 @@ button{font-family:inherit;color:inherit;cursor:pointer;border:none;background:n
 .tab.active::before,.tab.active + .tab::before,.tab:hover::before,.tab:hover + .tab::before,.tab.colored::before,.tab.colored + .tab::before{opacity:0}
 .tab:hover{background:var(--surface-2);color:var(--text)}
 .tab.active{background:var(--canvas);color:var(--text);box-shadow:inset 0 -2px 0 var(--accent)} /* artifact: accent underline, not a box */
-.tab-glyph{position:relative;display:flex;align-items:center;color:var(--muted)}
+.tab-glyph{display:flex;align-items:center;color:var(--muted)}
 .tab.active .tab-glyph{color:var(--accent)}
-/* live "running" pulse — green dot on the glyph while the tab's terminal is producing output */
-.tab-live{position:absolute;top:-3px;right:-4px;width:6px;height:6px;border-radius:50%;background:var(--ok);box-shadow:0 0 0 1.5px var(--bg);opacity:0;transform:scale(.5);transition:opacity .16s ease,transform .16s ease;pointer-events:none}
-.tab.running .tab-live{opacity:1;transform:scale(1);animation:tab-live-pulse 1.15s ease-in-out infinite}
-.tab.active .tab-live{box-shadow:0 0 0 1.5px var(--canvas)} /* the active tab has a canvas background, not bg */
-@keyframes tab-live-pulse{0%,100%{opacity:1}50%{opacity:.38}}
-@media (prefers-reduced-motion:reduce){.tab.running .tab-live{animation:none}}
 .tab-name{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
 .tab-model{font-size:9.5px;color:var(--muted);border:1px solid var(--border);border-radius:5px;padding:1px 5px;white-space:nowrap}
 .tab.active .tab-model{color:var(--accent);border-color:var(--accent-line)}
 .tab-close{width:18px;height:18px;border-radius:5px;display:grid;place-items:center;color:var(--muted);font-size:14px}
 .tab-close:hover{background:var(--surface-3);color:var(--err)}
+/* VS Code-style running dot: a tab producing live output shows a dot in the close slot; hovering the tab
+   swaps it back to the ✕ so it stays closable. Monochrome (theme foreground), no pulse. */
+.tab-live{width:7px;height:7px;border-radius:50%;background:var(--text-dim);display:none}
+.tab.running .tab-live{display:block}
+.tab.running .tab-x{display:none}
+.tab.running:hover .tab-live{display:none}
+.tab.running:hover .tab-x{display:block}
 .tab-add{width:30px;height:30px;border-radius:7px;display:grid;place-items:center;color:var(--muted);font-size:17px}
 .tab-add:hover{background:var(--surface-2);color:var(--accent)}
 .tt-spacer{flex:1}
