@@ -493,7 +493,7 @@ async function connectGithub(): Promise<void> {
         <div class="gh-step">2 · <button class="tpl-btn ghost" id="ghOpen">Open github.com/login/device ↗</button> and paste it</div>
         <div class="gh-status" id="ghStatus"><span class="gh-spin"></span> Waiting for you to authorize…</div>
       </div>
-      <div class="ft"><span class="hint">Token stored encrypted in your OS keychain — never in <code>relay.json</code></span><span class="r"><button class="tpl-btn ghost" data-x>Cancel</button></span></div>
+      <div class="ft"><span class="hint">Token stored encrypted in your OS keychain — never in <code>slayert.json</code></span><span class="r"><button class="tpl-btn ghost" data-x>Cancel</button></span></div>
     </div>`);
   root.querySelector('[data-x]')?.addEventListener('click', () => { cancelled = true; close(); });
   root.querySelector('#ghOpen')?.addEventListener('click', () => relay.openExternal(verify));
@@ -527,7 +527,7 @@ async function connectToken(pid: ProviderId): Promise<void> {
         <div class="gh-status" id="ctStatus"></div>
         <div class="iss-wt">${esc(pc.tokenHint || '')}</div>
       </div>
-      <div class="ft"><span class="hint">Stored encrypted in your OS keychain — never in <code>relay.json</code></span><span class="r"><button class="tpl-btn ghost" data-x>Cancel</button><button class="tpl-btn pri" data-ok>Connect</button></span></div>
+      <div class="ft"><span class="hint">Stored encrypted in your OS keychain — never in <code>slayert.json</code></span><span class="r"><button class="tpl-btn ghost" data-x>Cancel</button><button class="tpl-btn pri" data-ok>Connect</button></span></div>
     </div>`);
   const tok = root.querySelector('#ctTok') as HTMLInputElement;
   const host = root.querySelector('#ctHost') as HTMLInputElement | null;
@@ -567,7 +567,7 @@ async function openSources(): Promise<void> {
         ${sections}
         <div class="src-queue"><span class="src-nm">Assign queue</span><span class="src-qctl"><span>run at most</span><button class="src-step" data-cc="-1" title="Fewer">–</button><b id="srcCC">${CAP()}</b><button class="src-step" data-cc="1" title="More">+</button><span>agents at once</span></span></div>
       </div>
-      <div class="ft"><span class="hint">Tokens encrypted in your OS keychain · picks in <code>relay.json</code></span><span class="r"><button class="tpl-btn pri" data-x>Done</button></span></div>
+      <div class="ft"><span class="hint">Tokens encrypted in your OS keychain · picks in <code>slayert.json</code></span><span class="r"><button class="tpl-btn pri" data-x>Done</button></span></div>
     </div>`, () => void loadIssues()); // reload the panel however Sources is closed (Done / Escape / scrim)
   root.querySelector('[data-x]')?.addEventListener('click', close);
   const ccEl = root.querySelector('#srcCC') as HTMLElement | null;

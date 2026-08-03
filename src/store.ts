@@ -7,10 +7,11 @@ import { DEFAULT_MODEL } from './shared/models';
 // Simple JSON persistence for saved sessions (the "Library"), named workspaces (each a split-layout
 // snapshot of open tabs), and app settings. Swap for better-sqlite3 if scrollback grows large.
 //
-// relay.json (rare writes) holds sessions + settings + the workspace DEFINITIONS + which one is
+// slayert.json (rare writes) holds sessions + settings + the workspace DEFINITIONS + which one is
 // active. workspace.json (frequent writes) holds the per-workspace tab SNAPSHOTS, keyed by id.
 
-const file = () => path.join(app.getPath('userData'), 'relay.json');      // sessions + settings + workspace defs (rare)
+const file = () => path.join(app.getPath('userData'), 'slayert.json');     // sessions + settings + workspace defs (rare)
+const legacyFile = () => path.join(app.getPath('userData'), 'relay.json'); // pre-rebrand name — read ONCE on upgrade so old data isn't orphaned
 const wsFile = () => path.join(app.getPath('userData'), 'workspace.json'); // per-workspace tab snapshots (frequent)
 
 interface DB {
@@ -53,7 +54,14 @@ async function readJson(f: string, critical: boolean): Promise<Record<string, un
 
 async function doLoad(): Promise<DB> {
   const d = defaults();
-  const main = await readJson(file(), true);
+  // Read the canonical slayert.json; on an upgrade it won't exist yet, so fall back ONCE to the legacy
+  // relay.json. From then on writes go to slayert.json (relay.json is left untouched as a backup). Fall
+  // back ONLY when slayert.json is genuinely ABSENT — not when it merely failed to read (a transient lock
+  // sets readFailed): relay.json is a permanent migration-era backup, so reading it on a blip would load
+  // STALE data. On a read failure, prefer defaults + blocked writes (readFailed already stops overwrites).
+  const canonical = await readJson(file(), true);
+  const main = canonical ?? (readFailed ? null : await readJson(legacyFile(), true));
+  const migratedFromLegacy = !canonical && !readFailed && !!main; // upgraded from relay.json → materialize slayert.json below
   const wsRaw = await readJson(wsFile(), false);
   const settings = { ...d.settings, ...(main && typeof main.settings === 'object' ? main.settings : {}) } as Settings;
 
@@ -82,6 +90,9 @@ async function doLoad(): Promise<DB> {
     blueprints: Array.isArray(main?.blueprints) ? (main!.blueprints as WorkspaceBlueprint[]) : d.blueprints,
     wsById,
   };
+  // On an upgrade, write slayert.json right away so the rename takes effect immediately (rather than lazily
+  // on the next settings change) — relay.json stays as-is, a backup. Fire-and-forget; never blocks load.
+  if (migratedFromLegacy) void flushMain();
   return cache!;
 }
 
@@ -99,7 +110,7 @@ async function atomicWrite(f: string, data: string): Promise<void> {
   await fs.rename(tmp, f);
 }
 
-// relay.json — sessions + settings + workspace definitions (the tab snapshots live in their own file).
+// slayert.json — sessions + settings + workspace definitions (the tab snapshots live in their own file).
 async function flushMain(): Promise<void> {
   if (!cache || readFailed) return;
   const data = JSON.stringify({ sessions: cache.sessions, settings: cache.settings, workspaces: cache.workspaces, activeWorkspaceId: cache.activeWorkspaceId, blueprints: cache.blueprints });

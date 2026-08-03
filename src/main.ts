@@ -1,7 +1,7 @@
 import { app, BrowserWindow, ipcMain, dialog, Menu, shell } from 'electron';
 import path from 'node:path';
 import os from 'node:os';
-import { promises as fsp, appendFileSync, existsSync } from 'node:fs';
+import { promises as fsp, appendFileSync, existsSync, mkdirSync, copyFileSync, renameSync } from 'node:fs';
 import { exec, execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { httpsReq, PROVIDERS, providerOf, providerFromRemote, type ProviderId } from './providers';
@@ -24,13 +24,44 @@ const SQUIRREL_EVENTS = ['--squirrel-install', '--squirrel-updated', '--squirrel
 const isSquirrel = squirrelStartup || process.argv.some((a) => SQUIRREL_EVENTS.includes(a));
 if (isSquirrel) app.quit();
 
+// --- Rebrand: move the data directory from the legacy "Relay" name to "SlayerT" ------------------
+// Older builds kept everything under %APPDATA%\Relay (the app's old productName). Point userData at
+// %APPDATA%\SlayerT and, on the first run of the rebranded build, copy the important files across so
+// nothing is orphaned (relay-error.log carries over as slayert-error.log). Non-destructive: the old
+// dir is left in place as a backup. Only 5 small config files are copied — the worktrees/ and repos/
+// caches are NOT: existing git worktrees keep working (they're registered by absolute path under the old
+// Relay dir, which remains), but the managed clone cache re-populates under the new dir on next use (old
+// clones become dead disk — regenerable, not a correctness issue). MUST run before any module reads
+// app.getPath('userData'). Skipped on a Squirrel (un)install run — that path already called app.quit()
+// and must do NOTHING else (no file I/O that could delay the quit and keep the exe locked, failing the
+// install). NOTE: package.json productName stays "Relay" ON PURPOSE — safeStorage's master key is scoped
+// to the app identity, so renaming it would make the migrated keys.json undecryptable (tokens lost).
+if (!isSquirrel) try {
+  const appData = app.getPath('appData');                 // %APPDATA% (Roaming)
+  const newDir = path.join(appData, 'SlayerT');
+  const oldDir = path.join(appData, 'Relay');
+  const fresh = !existsSync(path.join(newDir, 'slayert.json')) && !existsSync(path.join(newDir, 'relay.json'));
+  if (fresh && existsSync(oldDir)) {
+    mkdirSync(newDir, { recursive: true });
+    for (const f of ['slayert.json', 'relay.json', 'workspace.json', 'keys.json', 'relay-error.log']) {
+      const src = path.join(oldDir, f);
+      const dst = path.join(newDir, f === 'relay-error.log' ? 'slayert-error.log' : f);
+      // Copy atomically (temp + rename) so an interrupted first run can't leave a TRUNCATED dst — that
+      // would make `fresh` false next boot (dst exists) and permanently skip the re-copy, stranding the
+      // good data in the old dir. A rename is atomic on the same volume; a leftover .migrating is ignored.
+      if (existsSync(src)) { try { const tmp = dst + '.migrating'; copyFileSync(src, tmp); renameSync(tmp, dst); } catch { /* skip a locked/odd file */ } }
+    }
+  }
+  app.setPath('userData', newDir);
+} catch (err) { try { console.error('userData migration skipped:', err); } catch { /* */ } } // on any failure fall back to the default (Relay) dir — a fresh dir just starts clean
+
 // Last-resort diagnostics: record any uncaught main-process error to a log the user can
 // share, instead of only flashing Electron's generic "A JavaScript error occurred" dialog.
 // This is how we pin down crashes that only reproduce on a specific machine.
 function logFatal(kind: string, err: unknown): void {
   try {
     const stack = (err as { stack?: string })?.stack || String(err);
-    appendFileSync(path.join(app.getPath('userData'), 'relay-error.log'), `[${new Date().toISOString()}] ${kind}: ${stack}\n`);
+    appendFileSync(path.join(app.getPath('userData'), 'slayert-error.log'), `[${new Date().toISOString()}] ${kind}: ${stack}\n`);
   } catch { /* nothing more we can do */ }
 }
 // Async, size-capped mirror for renderer console messages — a warn-in-a-loop must never block the
@@ -41,7 +72,7 @@ let rendererLogCapped = false; // once renderer console output hits the cap we S
 async function logRenderer(text: string): Promise<void> {
   if (rendererLogCapped) return;
   try {
-    const f = path.join(app.getPath('userData'), 'relay-error.log');
+    const f = path.join(app.getPath('userData'), 'slayert-error.log');
     const line = `[${new Date().toISOString()}] renderer-console: ${text}\n`;
     rendererLogBytes += line.length;
     if (rendererLogBytes > 1_000_000) {
@@ -111,7 +142,7 @@ function createWindow(): void {
     },
   });
 
-  // TEMP DIAG: mirror renderer console errors/warnings into relay-error.log so we can
+  // TEMP DIAG: mirror renderer console errors/warnings into slayert-error.log so we can
   // diagnose init crashes that leave the UI unresponsive (no main-process exception fires).
   win.webContents.on('console-message', (_e, level, message, line, sourceId) => {
     if (level >= 2) void logRenderer(`${message}  (${sourceId}:${line})`);
