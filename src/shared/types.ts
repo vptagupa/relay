@@ -144,6 +144,7 @@ export interface Settings {
   issueAgent?: string;   // preferred coding agent id for Assign (claude/gemini/codex/aider/antigravity)
   issueConcurrency?: number; // max agents the assign queue runs at once (per repo); default 2
   issuePipeline?: string; // preferred pipeline id for Assign (validate-fix | fix-only); default validate-fix
+  pipelines?: PipelineDef[]; // user-authored custom pipelines (built-ins live in code); merged into the registry
 }
 
 // Streaming events emitted by the agent loop to the renderer.
@@ -186,4 +187,28 @@ export interface Issue {
   url: string;
   assignees?: string[];             // GitHub logins assigned to the issue (for the "assigned to me" filter)
   milestone?: string;               // milestone title, if any
+}
+
+// --- Issue Pipelines (serializable, so custom pipelines can be authored + persisted) ---
+// A pipeline is a graph of STAGES wired by conditional EDGES. Briefs are TEMPLATE STRINGS (tokens
+// {issue} {number} {title} {closeStep} {verdictRel}) so a user-authored pipeline round-trips through JSON;
+// edges reference a stage by its stable `id` (not its editable name) or the sentinel 'stop'.
+export type StageKind = 'validate' | 'fix' | 'reproduce' | 'test' | 'review' | 'custom';
+export type EdgeWhen = 'valid' | 'invalid' | 'always';
+export interface PipelineEdge { when: EdgeWhen; to: string; } // to = a stage id, or 'stop' (stop & report)
+export interface StageDef {
+  id: string;            // stable id (edge targets + canvas key); the display `name` can be renamed freely
+  name: string;
+  kind: StageKind;
+  brief: string;         // template with {issue} {number} {title} {closeStep} {verdictRel}
+  edges: PipelineEdge[]; // outgoing transitions; a conditional edge makes this a GATE, no edges = terminal
+  x?: number; y?: number; // builder-canvas layout (ignored by the runner)
+}
+export interface PipelineDef {
+  id: string;
+  name: string;
+  desc: string;
+  builtin?: boolean;     // shipped-in-code pipelines can't be deleted/renamed (they can be duplicated)
+  stages: StageDef[];
+  stopPos?: { x: number; y: number }; // builder-canvas position of the ⛔ Stop node (layout only; runner ignores)
 }

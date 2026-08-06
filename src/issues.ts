@@ -10,7 +10,8 @@ import { state } from './state';
 import { $, esc } from './dom';
 import { toast } from './ui';
 import type { Issue } from './shared/types';
-import { PIPELINES, pipelineById, isGate, nextEdge, stageIndexByName, STOP, type Pipeline, type StageCtx } from './pipelines';
+import { allPipelines, pipelineById, isGate, nextEdge, stageIndexById, STOP, renderBrief, stageStatus, type PipelineDef, type BriefCtx } from './pipelines';
+import { openPipelineBuilder } from './pipeline-editor';
 
 const relay = (window as any).relay;
 
@@ -99,7 +100,7 @@ const runStatus = new Map<string, RunStatus>(); // "provider:repo#number" → ru
 interface RunInfo {
   provider: ProviderId; repo: string; number: number; title: string;
   issue: Issue;         // the full issue — its title/body seed each stage's brief FILE
-  pipeline: Pipeline;
+  pipeline: PipelineDef; // a snapshot of the chosen pipeline (survives later edits/deletes of a custom one)
   stageIdx: number;     // the currently-active stage (or the gate that failed, for `invalid`)
   wt: string;           // the issue's worktree path (where .slayer/ briefs + verdicts live)
   agentId: string;
@@ -109,6 +110,9 @@ interface RunInfo {
 }
 const runs = new Map<string, RunInfo>();                            // "provider:repo#number" → its pipeline run
 const OCCUPYING: RunStatus[] = ['working', 'validating', 'fixing']; // statuses that hold a concurrency slot
+// User-authored pipelines (built-ins live in code); the registry merges them. Read fresh each time so a
+// pipeline created/edited in the builder is picked up on the next Assign without a reload.
+const customPipelines = (): PipelineDef[] => state.settings.pipelines || [];
 let prByBranch: Record<string, { url: string; draft: boolean }> = {}; // "issue-N" branch → its open PR/MR (review → ship)
 let lastKey: string | null = null; // the provider:repo the current filters/search belong to — reset them when it changes
 // Assign queue: at most CAP agents run at once (per repo); the rest wait here and auto-launch when a
@@ -411,23 +415,36 @@ async function launchStage(key: string, idx: number): Promise<void> {
   // Any stage with outgoing edges signals completion by writing its verdict → we poll for it (a conditional
   // gate AND an `always`-only step both advance this way). No edges → terminal (Fix), completion = its PR.
   run.stageIdx = idx; run.awaiting = !!stage.edges?.length; run.reason = undefined;
-  runStatus.set(key, stage.status); // set synchronously so workingCount() is correct before the async prep
-  const ctx: StageCtx = { i: run.issue, closeStep: PROVS[run.provider].closeStep(run.number), verdictRel: `.slayer/stage-${idx}.json` };
+  runStatus.set(key, stageStatus(stage.kind)); // set synchronously so workingCount() is correct before the async prep
   const briefRel = idx === 0 ? run.brief0Rel : `.slayer/stage-${idx}.md`;
   // Write the brief for later stages (stage 0's is already there) + clear this stage's stale verdict so a
   // reused worktree can't read a previous run's pass/fail. Then launch the agent on the brief FILE.
-  await relay.pipelinePrep(run.wt, idx === 0 ? null : briefRel, idx === 0 ? null : stage.brief(ctx), idx).catch(() => {});
+  const brief = renderBrief(stage.brief, briefCtx(run.issue, run.provider, idx));
+  await relay.pipelinePrep(run.wt, idx === 0 ? null : briefRel, idx === 0 ? null : brief, idx).catch(() => {});
   const agent = AGENTS.find((a) => a.id === run.agentId);
   deps.openAgentTab({ cwd: run.wt, name: `#${run.number} · ${stage.name.toLowerCase()}`, runCmd: agent ? agent.launch(briefRel) : undefined });
   render(); ensurePolling(); ensureStagePoll();
 }
 
 // Record a run and kick it off from stage 0. Called from a fresh Assign and from the auto-drain queue.
-function startPipeline(o: { provider: ProviderId; repo: string; issue: Issue; pipeline: Pipeline; wt: string; agentId: string; brief0Rel: string }): void {
+function startPipeline(o: { provider: ProviderId; repo: string; issue: Issue; pipeline: PipelineDef; wt: string; agentId: string; brief0Rel: string }): void {
   const key = runKey(o.provider, o.repo, o.issue.number);
   runs.set(key, { provider: o.provider, repo: o.repo, number: o.issue.number, title: o.issue.title, issue: o.issue, pipeline: o.pipeline, stageIdx: 0, wt: o.wt, agentId: o.agentId, brief0Rel: o.brief0Rel, awaiting: false });
-  runStatus.set(key, o.pipeline.stages[0].status); // synchronous, so a drain loop can't over-launch past CAP
+  runStatus.set(key, stageStatus(o.pipeline.stages[0].kind)); // synchronous, so a drain loop can't over-launch past CAP
   void launchStage(key, 0);
+}
+
+// Launch a prepared run now, or queue it if at capacity (its worktree + stage-0 brief already exist, so a
+// queued run auto-launches the instant a slot frees). Shared by Assign and the mapping board.
+function launchOrQueue(o: { provider: ProviderId; repo: string; issue: Issue; pipeline: PipelineDef; wt: string; agentId: string; agentName: string; brief0Rel: string }): 'queued' | 'launched' {
+  if (workingCount() >= CAP()) {
+    if (!queue.some((q) => q.provider === o.provider && q.repo === o.repo && q.number === o.issue.number)) // don't double-queue
+      queue.push({ provider: o.provider, repo: o.repo, number: o.issue.number, title: o.issue.title, cwd: o.wt, agentId: o.agentId, agentName: o.agentName, issue: o.issue, pipelineId: o.pipeline.id, brief0Rel: o.brief0Rel });
+    runStatus.set(runKey(o.provider, o.repo, o.issue.number), 'queued'); ensurePolling();
+    return 'queued';
+  }
+  startPipeline(o);
+  return 'launched';
 }
 
 // Fast verdict poll — the engine that advances GATE stages. Runs only while some run awaits a verdict.
@@ -449,7 +466,7 @@ async function pollStages(): Promise<void> {
       run.awaiting = false;
       // Follow the matching conditional edge out of this gate stage.
       const edge = nextEdge(run.pipeline.stages[run.stageIdx], !!v.passed);
-      const target = edge && edge.to !== STOP ? stageIndexByName(run.pipeline, edge.to) : -1;
+      const target = edge && edge.to !== STOP ? stageIndexById(run.pipeline, edge.to) : -1;
       if (edge && edge.to !== STOP && target >= 0) {
         // A stage target → run it.
         toast(`#${run.number} ${v.passed ? 'validated ✓' : 'gate: ' + edge.when} — starting ${run.pipeline.stages[target].name}`, true);
@@ -477,7 +494,7 @@ async function pollStages(): Promise<void> {
 function overrideInvalid(key: string): void {
   const run = runs.get(key); if (!run) return;
   const edge = nextEdge(run.pipeline.stages[run.stageIdx], true); // pretend the verdict was valid
-  const target = edge && edge.to !== STOP ? stageIndexByName(run.pipeline, edge.to) : -1;
+  const target = edge && edge.to !== STOP ? stageIndexById(run.pipeline, edge.to) : -1;
   if (target < 0) { toast('Nothing to run after this stage'); return; }
   toast(`#${run.number} — running ${run.pipeline.stages[target].name} anyway`, true);
   void launchStage(key, target);
@@ -496,19 +513,24 @@ function modal(html: string, onClose?: () => void): { root: HTMLElement; close: 
   return { root, close };
 }
 
-// The seed brief for a stage — the issue itself plus that stage's task. Editable before launch. The
-// provider-specific "open the PR/MR + close keyword" step is passed in via closeStep; the gate verdict path
-// is the stage's own `.slayer/stage-<idx>.json`. `prov` is pinned by the caller (no mid-dialog drift).
-function stageBriefText(p: Pipeline, idx: number, i: Issue, prov: ProviderId): string {
+// The token context a brief template is rendered against. `{issue}` = the issue head (# + title + body);
+// `{closeStep}` is provider-specific; `{verdictRel}` is this stage's own verdict file. `prov` is pinned by
+// the caller (no mid-dialog drift).
+function briefCtx(i: Issue, prov: ProviderId, idx: number): BriefCtx {
+  const body = (i.body || '').trim() || '_(no description provided)_';
+  return { issue: `# Issue #${i.number}: ${i.title}\n\n${body}`, number: i.number, title: i.title, closeStep: PROVS[prov].closeStep(i.number), verdictRel: `.slayer/stage-${idx}.json` };
+}
+// The rendered seed brief for a stage — editable in Assign before launch.
+function stageBriefText(p: PipelineDef, idx: number, i: Issue, prov: ProviderId): string {
   const stage = p.stages[idx]; if (!stage) return '';
-  return stage.brief({ i, closeStep: PROVS[prov].closeStep(i.number), verdictRel: `.slayer/stage-${idx}.json` });
+  return renderBrief(stage.brief, briefCtx(i, prov, idx));
 }
 
 // The sequence graph — the issue as the head node, wired left-to-right through the pipeline's stages, with
 // the condition on each gate edge and the invalid → Stop off-ramp. Used as a static preview in Assign
 // (opts.preview) and as a LIVE graph in Details that lights up stage-by-stage as the run advances.
 //   opts.stageIdx = the active stage · opts.invalid = a gate closed at stageIdx · opts.review = a PR is open.
-function seqGraph(p: Pipeline, issueNumber: number, opts: { stageIdx?: number; invalid?: boolean; review?: boolean; preview?: boolean } = {}): string {
+function seqGraph(p: PipelineDef, issueNumber: number, opts: { stageIdx?: number; invalid?: boolean; review?: boolean; preview?: boolean } = {}): string {
   const preview = !!opts.preview;
   const cur = opts.stageIdx ?? -1;
   const failedIdx = opts.invalid ? cur : -1;
@@ -602,11 +624,12 @@ async function openAssign(i: Issue): Promise<void> {
   // Default agent = the saved preference if still installed, else the first installed one.
   let agentId = (state.settings.issueAgent && detected[state.settings.issueAgent]) ? state.settings.issueAgent : (installed[0]?.id || '');
   const opts = AGENTS.map((a) => `<option value="${a.id}"${a.id === agentId ? ' selected' : ''}${detected[a.id] ? '' : ' disabled'}>${esc(a.name)}${detected[a.id] ? '' : ' — not installed'}</option>`).join('');
-  // Default pipeline = the saved preference if it still exists, else the first (Validate → Fix).
-  let pipelineId = (state.settings.issuePipeline && PIPELINES.some((p) => p.id === state.settings.issuePipeline)) ? state.settings.issuePipeline! : PIPELINES[0].id;
-  const pipeOpts = PIPELINES.map((p) => `<option value="${p.id}"${p.id === pipelineId ? ' selected' : ''}>${esc(p.name)}</option>`).join('');
+  // Default pipeline = the saved preference if it still exists (built-in or custom), else the first.
+  const pipes = () => allPipelines(customPipelines());
+  let pipelineId = (state.settings.issuePipeline && pipes().some((p) => p.id === state.settings.issuePipeline)) ? state.settings.issuePipeline! : pipes()[0].id;
+  const pipeOpts = () => pipes().map((p) => `<option value="${p.id}"${p.id === pipelineId ? ' selected' : ''}>${esc(p.name)}${p.builtin ? '' : ' ✎'}</option>`).join('');
   const asgProvider = provider, asgRepo = repo; // pin the target so a mid-dialog repo switch can't retarget
-  let pipeline = pipelineById(pipelineId);
+  let pipeline = pipelineById(pipelineId, customPipelines());
   let briefDirty = false;                    // once the user edits the brief, stop re-seeding it on pipeline change
   const primary = agentOk ? '⚡ Run pipeline' : 'Create worktree & open';
   const { root, close } = modal(`<div class="tpl-card iss-card">
@@ -614,7 +637,7 @@ async function openAssign(i: Issue): Promise<void> {
       <div class="bd">
         <div class="iss-agentrow"><label class="iss-lbl" style="margin:0">Assign to</label><select class="iss-agentsel" id="issAgentSel"${agentOk ? '' : ' disabled'}>${opts}</select></div>
         <div class="iss-agent ${agentOk ? 'ok' : 'no'}">${agentOk ? '✓ runs in its own login/session (keyless where supported), in an isolated worktree' : '⚠ No coding agent on PATH — the worktree still opens; install Claude Code (or Gemini / Codex / Aider) to auto-launch.'}</div>
-        <div class="iss-agentrow"><label class="iss-lbl" style="margin:0">Pipeline</label><select class="iss-agentsel" id="issPipeSel">${pipeOpts}</select></div>
+        <div class="iss-agentrow"><label class="iss-lbl" style="margin:0">Pipeline</label><select class="iss-agentsel" id="issPipeSel">${pipeOpts()}</select><button class="iss-pipebuild" id="issPipeBuild" title="Build / edit pipelines">✎ Build</button></div>
         <div class="pipe-preview" id="issGraph">${seqGraph(pipeline, i.number, { preview: true })}</div>
         <div class="iss-pipedesc" id="issPipeDesc">${esc(pipeline.desc)}</div>
         <label class="iss-lbl">Brief · <span id="issBriefStage">${esc(pipeline.stages[0].name)}</span> stage <span class="mut">— edit before launch</span></label>
@@ -628,14 +651,29 @@ async function openAssign(i: Issue): Promise<void> {
   const sel = root.querySelector('#issAgentSel') as HTMLSelectElement | null;
   if (sel) sel.onchange = () => { agentId = sel.value; void relay.patchSettings({ issueAgent: agentId }); }; // remember the pick
   const psel = root.querySelector('#issPipeSel') as HTMLSelectElement | null;
-  if (psel) psel.onchange = () => {
-    pipelineId = psel.value; pipeline = pipelineById(pipelineId);
-    void relay.patchSettings({ issuePipeline: pipelineId }).then((s: typeof state.settings) => { state.settings = s; }).catch(() => {});
+  // Reflect the currently-selected `pipeline` into the preview graph, description, brief-stage label, and
+  // (if unedited) the brief textarea. Reused by the dropdown onchange and after the builder saves.
+  const syncPipe = () => {
+    pipeline = pipelineById(pipelineId, customPipelines());
     const g = root.querySelector('#issGraph'); if (g) g.innerHTML = seqGraph(pipeline, i.number, { preview: true });
     const d = root.querySelector('#issPipeDesc'); if (d) d.textContent = pipeline.desc;
-    const bs = root.querySelector('#issBriefStage'); if (bs) bs.textContent = pipeline.stages[0].name;
-    if (!briefDirty) ta.value = stageBriefText(pipeline, 0, i, asgProvider); // re-seed the (unedited) brief for the new first stage
+    const bs = root.querySelector('#issBriefStage'); if (bs) bs.textContent = pipeline.stages[0]?.name || '';
+    if (!briefDirty) ta.value = stageBriefText(pipeline, 0, i, asgProvider);
   };
+  if (psel) psel.onchange = () => {
+    pipelineId = psel.value;
+    void relay.patchSettings({ issuePipeline: pipelineId }).then((s: typeof state.settings) => { state.settings = s; }).catch(() => {});
+    syncPipe();
+  };
+  // Build / edit pipelines — opens the visual builder; on save we refresh the dropdown + preview and select
+  // the (possibly new) pipeline. Built-ins open read-only with a "Duplicate to edit".
+  root.querySelector('#issPipeBuild')?.addEventListener('click', () => {
+    openPipelineBuilder(pipeline, async (savedId) => {
+      if (savedId) { pipelineId = savedId; try { state.settings = await relay.patchSettings({ issuePipeline: pipelineId }); } catch { /* keep in-memory */ } }
+      if (psel) psel.innerHTML = pipeOpts();      // rebuild options (a new/renamed pipeline may have appeared)
+      syncPipe();
+    });
+  });
   ta.oninput = () => { briefDirty = true; };
   root.querySelector('[data-x]')?.addEventListener('click', close);
   setTimeout(() => ta.focus(), 30);
@@ -656,20 +694,102 @@ async function openAssign(i: Issue): Promise<void> {
       toast(res.reused ? `Reopened worktree for #${i.number}` : `Worktree ready for #${i.number}`, true);
       return;
     }
-    // At capacity → queue the whole pipeline. The worktree + stage-0 brief are already prepared, so it
-    // auto-launches (from stage 0) the instant a running agent reaches review and frees a slot.
-    if (workingCount() >= CAP()) {
-      if (!queue.some((q) => q.provider === asgProvider && q.repo === (asgRepo || '') && q.number === i.number)) // don't double-queue
-        queue.push({ provider: asgProvider, repo: asgRepo || '', number: i.number, title: i.title, cwd: res.path!, agentId, agentName: agent.name, issue: i, pipelineId: pipeline.id, brief0Rel });
-      runStatus.set(runKey(asgProvider, asgRepo || '', i.number), 'queued');
-      render(); ensurePolling(); close();
-      toast(`Queued #${i.number} — starts when a slot frees (${workingCount()}/${CAP()} running)`, true);
-      return;
-    }
-    startPipeline({ provider: asgProvider, repo: asgRepo || '', issue: i, pipeline, wt: res.path!, agentId, brief0Rel });
-    close();
-    toast(res.reused ? `Reopened worktree for #${i.number} · ${pipeline.name}` : `Launching ${pipeline.name} on #${i.number}`, true);
+    // Launch now, or queue at capacity (the worktree + stage-0 brief are prepared → instant auto-launch).
+    const r = launchOrQueue({ provider: asgProvider, repo: asgRepo || '', issue: i, pipeline, wt: res.path!, agentId, agentName: agent.name, brief0Rel });
+    render(); close();
+    toast(r === 'queued' ? `Queued #${i.number} — starts when a slot frees (${workingCount()}/${CAP()} running)`
+      : res.reused ? `Reopened worktree for #${i.number} · ${pipeline.name}` : `Launching ${pipeline.name} on #${i.number}`, true);
   });
+}
+
+/* ----------------------------- mapping board (issues → pipelines, at scale) ----------------------------- */
+// A canvas: idle issues on the left, the pipeline registry on the right. Drag from an issue's port onto a
+// pipeline to map it; "Run mapped" creates each worktree and launches (or queues) the run. Bulk assign.
+async function openIssueMap(): Promise<void> {
+  if (phase !== 'ready' || !repo) { toast('Pull a repo’s issues first'); return; }
+  const dir = state.settings.workspace || '';
+  const detected = await relay.agentsDetect().catch(() => ({} as Record<string, boolean>));
+  const agentOk = AGENTS.some((a) => detected[a.id]);
+  const agentId = (state.settings.issueAgent && detected[state.settings.issueAgent]) ? state.settings.issueAgent! : (AGENTS.find((a) => detected[a.id])?.id || '');
+  const asgProvider = provider, asgRepo = repo || '';    // pin the target
+  const mappable = issues.filter((i) => statusOf(i.number) === 'idle'); // only idle+open issues can be assigned
+  const pipes = allPipelines(customPipelines());
+  const mapping = new Map<number, string>();             // issueNumber → pipelineId
+  let connecting: { from: number; x: number; y: number } | null = null;
+
+  const IW = 244, IH = 58, PW = 250, PH = 72, IX = 16, PX = 548, W = 840;
+  const IY = (k: number) => 22 + k * (IH + 12);
+  const PY = (k: number) => 26 + k * (PH + 14);
+  const H = Math.max(mappable.length ? IY(mappable.length) : 70, pipes.length ? PY(pipes.length) : 70) + 20;
+  const iIndex = (n: number) => mappable.findIndex((i) => i.number === n);
+  const pIndex = (pid: string) => pipes.findIndex((p) => p.id === pid);
+
+  const root = document.createElement('div'); root.className = 'tpl-modal im-modal';
+  root.innerHTML = `<div class="tpl-sc"></div><div class="tpl-card im-card">
+      <div class="pb-head"><span class="dot" style="background:var(--accent)"></span><span class="im-title">Map issues → pipelines</span><span class="pb-sp"></span>
+        <span class="im-count" id="imCount"></span><button class="tpl-btn ghost" id="imCancel">Close</button><button class="tpl-btn pri" id="imRun" disabled>Run mapped</button></div>
+      <div class="im-body"><div class="im-canvas" id="imCanvas" style="width:${W}px;height:${H}px"></div></div>
+      <div class="pb-foot">Drag from an issue’s right dot onto a pipeline to map it. Click a mapped issue to clear it.${agentOk ? '' : ' <span style="color:#e0a44a">⚠ no coding agent on PATH — worktrees open but won’t auto-run.</span>'}</div>
+    </div>`;
+  document.body.appendChild(root);
+  const canvas = root.querySelector('#imCanvas') as HTMLElement;
+  const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') { e.preventDefault(); close(); } };
+  const close = () => { root.remove(); document.removeEventListener('keydown', onKey); };
+  document.addEventListener('keydown', onKey);
+  root.querySelector('.tpl-sc')?.addEventListener('click', close);
+  root.querySelector('#imCancel')?.addEventListener('click', close);
+  const canvasPoint = (e: PointerEvent) => { const r = canvas.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; };
+
+  function renderMap(): void {
+    const paths: string[] = [];
+    for (const [n, pid] of mapping) {
+      const ii = iIndex(n), pi = pIndex(pid); if (ii < 0 || pi < 0) continue;
+      const ax = IX + IW, ay = IY(ii) + IH / 2, tx = PX, ty = PY(pi) + PH / 2;
+      paths.push(`<path d="M${ax},${ay} C${ax + 70},${ay} ${tx - 70},${ty} ${tx},${ty}" fill="none" style="stroke:var(--accent);stroke-width:2" marker-end="url(#imah)"/><circle cx="${ax}" cy="${ay}" r="4" style="fill:var(--accent)"/><circle cx="${tx}" cy="${ty}" r="4" style="fill:var(--accent)"/>`);
+    }
+    if (connecting) { const ii = iIndex(connecting.from); if (ii >= 0) { const ax = IX + IW, ay = IY(ii) + IH / 2; paths.push(`<path d="M${ax},${ay} L${connecting.x},${connecting.y}" fill="none" style="stroke:var(--accent-2);stroke-width:2;stroke-dasharray:5 4"/>`); } }
+    const svg = `<svg class="pb-svg" width="${W}" height="${H}"><defs><marker id="imah" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 Z" fill="#6e7bff"/></marker></defs>${paths.join('')}</svg>`;
+    const issueNodes = mappable.length ? mappable.map((i, k) => `<div class="im-issue${mapping.has(i.number) ? ' mapped' : ''}" data-num="${i.number}" style="left:${IX}px;top:${IY(k)}px;width:${IW}px">
+        <div class="im-hash">#${i.number}</div><div class="im-t">${esc(i.title)}</div><span class="pb-port out" data-inum="${i.number}"></span></div>`).join('')
+      : `<div class="im-none" style="left:${IX}px;top:22px">No idle open issues to map.</div>`;
+    const pipeNodes = pipes.map((p, k) => `<div class="im-pipe" data-pid="${esc(p.id)}" style="left:${PX}px;top:${PY(k)}px;width:${PW}px">
+        <span class="pb-port in"></span><div class="im-pn">${esc(p.name)}${p.builtin ? '' : ' <i class="im-cust">custom</i>'}</div><div class="im-ps">${p.stages.map((s) => esc(s.name)).join(' → ') || '—'}</div></div>`).join('');
+    canvas.innerHTML = svg + issueNodes + pipeNodes;
+    canvas.querySelectorAll<HTMLElement>('.im-issue').forEach((node) => node.onclick = (e) => { if ((e.target as HTMLElement).closest('.pb-port')) return; const n = Number(node.dataset.num); if (mapping.has(n)) { mapping.delete(n); renderMap(); } });
+    canvas.querySelectorAll<HTMLElement>('.pb-port.out').forEach((port) => port.onpointerdown = (e) => {
+      e.stopPropagation(); e.preventDefault();
+      const from = Number(port.dataset.inum); connecting = { from, ...canvasPoint(e) };
+      const move = (ev: PointerEvent) => { if (connecting) { const p = canvasPoint(ev); connecting.x = p.x; connecting.y = p.y; renderMap(); } };
+      const up = (ev: PointerEvent) => {
+        window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up);
+        const tgt = (document.elementFromPoint(ev.clientX, ev.clientY) as HTMLElement)?.closest('.im-pipe') as HTMLElement | null;
+        connecting = null; if (tgt?.dataset.pid) mapping.set(from, tgt.dataset.pid); renderMap();
+      };
+      window.addEventListener('pointermove', move); window.addEventListener('pointerup', up);
+    });
+    const cnt = root.querySelector('#imCount'); if (cnt) cnt.textContent = mapping.size ? `${mapping.size} mapped` : '';
+    (root.querySelector('#imRun') as HTMLButtonElement).disabled = mapping.size === 0;
+  }
+
+  let running = false;
+  root.querySelector('#imRun')?.addEventListener('click', async () => {
+    if (running || !mapping.size) return; running = true;
+    const runBtn = root.querySelector('#imRun') as HTMLButtonElement; runBtn.disabled = true; runBtn.textContent = 'Running…';
+    let ok = 0;
+    for (const [n, pid] of mapping) {
+      const i = mappable.find((x) => x.number === n); const pipeline = pipes.find((p) => p.id === pid); if (!i || !pipeline) continue;
+      const res = await relay.worktreeAdd(asgProvider, asgRepo, dir, i.number, stageBriefText(pipeline, 0, i, asgProvider)).catch(() => ({ ok: false } as { ok: boolean; path?: string; briefRel?: string }));
+      if (!res.ok) { toast(`Worktree failed for #${n}`); continue; }
+      const agent = AGENTS.find((a) => a.id === agentId);
+      if (agentOk && agent) launchOrQueue({ provider: asgProvider, repo: asgRepo, issue: i, pipeline, wt: res.path!, agentId, agentName: agent.name, brief0Rel: res.briefRel || '' });
+      else deps.openAgentTab({ cwd: res.path!, name: `issue #${i.number}`, runCmd: undefined });
+      ok++;
+    }
+    render(); running = false; close();
+    toast(`Mapped ${ok} issue${ok === 1 ? '' : 's'} to ${agentOk ? 'their pipelines' : 'worktrees'}`, true);
+  });
+
+  renderMap();
 }
 
 /* ----------------------------- repo selector + Sources ----------------------------- */
@@ -854,6 +974,7 @@ export function initIssues(d: IssuesDeps): void {
   const s = $('#issSearch') as HTMLInputElement | null; if (s) s.oninput = () => { query = s.value; render(); };
   const rsel = $('#issSideRepo'); if (rsel) rsel.onclick = (e) => { e.stopPropagation(); openRepoMenu(); };
   const srcBtn = $('#issSources'); if (srcBtn) srcBtn.onclick = () => void openSources();
+  const mapBtn = $('#issMap'); if (mapBtn) mapBtn.onclick = () => void openIssueMap();
   // Open/Closed state filter — re-pull the repo with the chosen state (default open).
   $('#issState')?.querySelectorAll<HTMLElement>('.iss-seg').forEach((b) => {
     b.onclick = () => { const s = b.dataset.st === 'closed' ? 'closed' : 'open'; if (s === issueState) return; issueState = s; void loadIssues(); }; // loadIssues re-renders immediately
