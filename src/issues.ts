@@ -78,7 +78,7 @@ type Phase = 'idle' | 'loading' | 'ready' | 'error' | 'noauth' | 'norepo';
 type RunStatus = 'idle' | 'queued' | 'working' | 'validating' | 'fixing' | 'invalid' | 'review';
 // A prepared-but-not-yet-launched assignment: its worktree + stage-0 brief already exist, so the whole
 // pipeline auto-launches (from stage 0) the instant a slot frees.
-interface QueueItem { provider: ProviderId; repo: string; number: number; title: string; cwd: string; agentId: string; agentName: string; issue: Issue; pipelineId: string; brief0Rel: string; }
+interface QueueItem { provider: ProviderId; repo: string; number: number; title: string; cwd: string; agentId: string; agentName: string; issue: Issue; pipeline: PipelineDef; brief0Rel: string; }
 let phase: Phase = 'idle';
 let provider: ProviderId = 'github';   // which provider the active repo belongs to
 let repo: string | null = null;        // native repo id (owner/name | group/project | workspace/repo)
@@ -113,6 +113,23 @@ const OCCUPYING: RunStatus[] = ['working', 'validating', 'fixing']; // statuses 
 // User-authored pipelines (built-ins live in code); the registry merges them. Read fresh each time so a
 // pipeline created/edited in the builder is picked up on the next Assign without a reload.
 const customPipelines = (): PipelineDef[] => state.settings.pipelines || [];
+// A defensive copy of a pipeline captured at assign time — so an in-flight run keeps the wiring it started
+// with even if the (custom) pipeline is later edited or deleted in the builder.
+const clonePipeline = (p: PipelineDef): PipelineDef => JSON.parse(JSON.stringify(p));
+// The wired success path: from the entry (stages[0]), follow each stage's `valid` (else `always`) edge to a
+// stage until a terminal or a repeat. This is the order the runner actually executes — the display follows it.
+function wiredPath(p: PipelineDef): number[] {
+  const path: number[] = []; if (!p.stages.length) return path;
+  const seen = new Set<number>(); let idx = 0;
+  while (idx >= 0 && idx < p.stages.length && !seen.has(idx)) {
+    seen.add(idx); path.push(idx);
+    const st = p.stages[idx];
+    const e = (st.edges || []).find((x) => x.when === 'valid') || (st.edges || []).find((x) => x.when === 'always');
+    if (!e || e.to === STOP) break;
+    idx = stageIndexById(p, e.to);
+  }
+  return path;
+}
 let prByBranch: Record<string, { url: string; draft: boolean }> = {}; // "issue-N" branch → its open PR/MR (review → ship)
 let lastKey: string | null = null; // the provider:repo the current filters/search belong to — reset them when it changes
 // Assign queue: at most CAP agents run at once (per repo); the rest wait here and auto-launch when a
@@ -357,7 +374,7 @@ function applyPrs(prs: { branch: string; url: string; draft: boolean }[]): void 
 
 // A queued item is a fully-prepared pipeline run — launch it from stage 0 (the worktree already exists).
 function launchQueued(item: QueueItem, auto: boolean): void {
-  startPipeline({ provider: item.provider, repo: item.repo, issue: item.issue, pipeline: pipelineById(item.pipelineId), wt: item.cwd, agentId: item.agentId, brief0Rel: item.brief0Rel });
+  startPipeline({ provider: item.provider, repo: item.repo, issue: item.issue, pipeline: item.pipeline, wt: item.cwd, agentId: item.agentId, brief0Rel: item.brief0Rel });
   toast(`${auto ? 'Auto-launching' : 'Launching'} ${item.agentName} on #${item.number}`, true);
 }
 
@@ -439,7 +456,7 @@ function startPipeline(o: { provider: ProviderId; repo: string; issue: Issue; pi
 function launchOrQueue(o: { provider: ProviderId; repo: string; issue: Issue; pipeline: PipelineDef; wt: string; agentId: string; agentName: string; brief0Rel: string }): 'queued' | 'launched' {
   if (workingCount() >= CAP()) {
     if (!queue.some((q) => q.provider === o.provider && q.repo === o.repo && q.number === o.issue.number)) // don't double-queue
-      queue.push({ provider: o.provider, repo: o.repo, number: o.issue.number, title: o.issue.title, cwd: o.wt, agentId: o.agentId, agentName: o.agentName, issue: o.issue, pipelineId: o.pipeline.id, brief0Rel: o.brief0Rel });
+      queue.push({ provider: o.provider, repo: o.repo, number: o.issue.number, title: o.issue.title, cwd: o.wt, agentId: o.agentId, agentName: o.agentName, issue: o.issue, pipeline: o.pipeline, brief0Rel: o.brief0Rel });
     runStatus.set(runKey(o.provider, o.repo, o.issue.number), 'queued'); ensurePolling();
     return 'queued';
   }
@@ -471,6 +488,12 @@ async function pollStages(): Promise<void> {
         // A stage target → run it.
         toast(`#${run.number} ${v.passed ? 'validated ✓' : 'gate: ' + edge.when} — starting ${run.pipeline.stages[target].name}`, true);
         await launchStage(key, target);
+      } else if (edge && edge.to === STOP && edge.when !== 'invalid') {
+        // A `valid`/`always` edge wired to Stop = an intentional clean end (e.g. a validate-only pipeline),
+        // NOT a failure. End the run without an `invalid` verdict.
+        runStatus.delete(key); runs.delete(key);
+        toast(`#${run.number} — ${run.pipeline.stages[run.stageIdx].name} passed; pipeline complete`, true);
+        drainQueue(); render();
       } else if (edge && edge.to === STOP) {
         // The invalid off-ramp: stop & report. No fix, no PR. Keep the run for an override.
         run.reason = v.summary || 'The agent judged this issue not valid.';
@@ -526,21 +549,30 @@ function stageBriefText(p: PipelineDef, idx: number, i: Issue, prov: ProviderId)
   return renderBrief(stage.brief, briefCtx(i, prov, idx));
 }
 
-// The sequence graph — the issue as the head node, wired left-to-right through the pipeline's stages, with
-// the condition on each gate edge and the invalid → Stop off-ramp. Used as a static preview in Assign
-// (opts.preview) and as a LIVE graph in Details that lights up stage-by-stage as the run advances.
-//   opts.stageIdx = the active stage · opts.invalid = a gate closed at stageIdx · opts.review = a PR is open.
+// The sequence graph — the issue as the head node, then the pipeline's WIRED success path (from the entry,
+// following each stage's valid/always edge), with the condition on each gate edge and the invalid → Stop
+// off-ramp. Following the edges (not array order) means a custom/reordered/forked pipeline shows in its true
+// run order and lights up correctly. Used as a static preview in Assign (opts.preview) and a LIVE graph in
+// Details. opts.stageIdx = the active stage (array index) · opts.invalid = that gate closed · opts.review = PR open.
 function seqGraph(p: PipelineDef, issueNumber: number, opts: { stageIdx?: number; invalid?: boolean; review?: boolean; preview?: boolean } = {}): string {
   const preview = !!opts.preview;
-  const cur = opts.stageIdx ?? -1;
-  const failedIdx = opts.invalid ? cur : -1;
+  const cur = opts.stageIdx ?? -1;   // the run's current stage, as an array index into p.stages
+  const invalid = !!opts.invalid;
   const review = !!opts.review;
-  const stateFor = (k: number): string => {
+
+  // The success path exactly as the runner would take it (follow valid/always edges from the entry).
+  const path = wiredPath(p);
+  if (cur >= 0 && !path.includes(cur)) path.push(cur); // the run took a branch off the success path → still show it
+
+  const curPos = path.indexOf(cur);
+  const failedPos = invalid ? curPos : -1;
+  const stateFor = (pos: number): string => {
     if (preview) return 'idle';
-    if (k === failedIdx) return 'failed';
-    if (failedIdx >= 0 && k > failedIdx) return 'skipped';
-    if (review || k < cur) return 'done';
-    if (k === cur) return 'running';
+    if (pos === failedPos) return 'failed';
+    if (review) return 'done';
+    if (curPos < 0) return 'pending';
+    if (pos < curPos) return 'done';
+    if (pos === curPos) return 'running';
     return 'pending';
   };
   const badge = (s: string): string =>
@@ -549,16 +581,19 @@ function seqGraph(p: PipelineDef, issueNumber: number, opts: { stageIdx?: number
     `<span class="sg-edge ${cls}">${label ? `<span class="sg-lab">${esc(label)}</span>` : ''}<span class="sg-arr"></span></span>`;
 
   const out: string[] = [`<span class="sg-node sg-issue"><b class="sg-k">issue</b>#${issueNumber}</span>`, edge('assign')];
-  for (let k = 0; k < p.stages.length; k++) {
-    const s = p.stages[k]; const state = stateFor(k);
+  for (let pos = 0; pos < path.length; pos++) {
+    const s = p.stages[path[pos]]; if (!s) continue;
+    const state = stateFor(pos);
     out.push(`<span class="sg-node sg-stage k-${s.kind} sg-${state}"><span class="sg-dot"></span>${esc(s.name)}${badge(state)}</span>`);
-    if (k === failedIdx) { // gate closed → invalid branch → Stop; the rest of the happy path never ran
-      out.push(edge('if invalid', 'no'), `<span class="sg-node sg-stop">⛔ Stop</span>`);
+    if (pos === failedPos) { // this gate closed → its invalid edge → Stop (or the stage it routes to); the rest never ran
+      const inv = (s.edges || []).find((x) => x.when === 'invalid');
+      const invTo = inv && inv.to !== STOP ? p.stages[stageIndexById(p, inv.to)]?.name : null;
+      out.push(edge('if invalid', 'no'), `<span class="sg-node sg-stop">${invTo ? esc(invTo) : '⛔ Stop'}</span>`);
       return `<div class="sg-wrap"><div class="sg">${out.join('')}</div></div>`;
     }
-    if (k < p.stages.length - 1) out.push(edge(isGate(s) ? 'if valid' : '', isGate(s) ? 'ok' : ''));
+    if (pos < path.length - 1) out.push(edge(isGate(s) ? 'if valid' : '', isGate(s) ? 'ok' : ''));
   }
-  // happy-path terminal → PR
+  // the last stage on the path has no success edge → it opens the PR
   out.push(edge(''), `<span class="sg-node sg-term ${review ? 'on' : ''}">${review ? '✅ PR → review' : 'PR'}</span>`);
   return `<div class="sg-wrap"><div class="sg">${out.join('')}</div></div>`;
 }
@@ -695,7 +730,7 @@ async function openAssign(i: Issue): Promise<void> {
       return;
     }
     // Launch now, or queue at capacity (the worktree + stage-0 brief are prepared → instant auto-launch).
-    const r = launchOrQueue({ provider: asgProvider, repo: asgRepo || '', issue: i, pipeline, wt: res.path!, agentId, agentName: agent.name, brief0Rel });
+    const r = launchOrQueue({ provider: asgProvider, repo: asgRepo || '', issue: i, pipeline: clonePipeline(pipeline), wt: res.path!, agentId, agentName: agent.name, brief0Rel });
     render(); close();
     toast(r === 'queued' ? `Queued #${i.number} — starts when a slot frees (${workingCount()}/${CAP()} running)`
       : res.reused ? `Reopened worktree for #${i.number} · ${pipeline.name}` : `Launching ${pipeline.name} on #${i.number}`, true);
@@ -753,7 +788,7 @@ async function openIssueMap(): Promise<void> {
         <div class="im-hash">#${i.number}</div><div class="im-t">${esc(i.title)}</div><span class="pb-port out" data-inum="${i.number}"></span></div>`).join('')
       : `<div class="im-none" style="left:${IX}px;top:22px">No idle open issues to map.</div>`;
     const pipeNodes = pipes.map((p, k) => `<div class="im-pipe" data-pid="${esc(p.id)}" style="left:${PX}px;top:${PY(k)}px;width:${PW}px">
-        <span class="pb-port in"></span><div class="im-pn">${esc(p.name)}${p.builtin ? '' : ' <i class="im-cust">custom</i>'}</div><div class="im-ps">${p.stages.map((s) => esc(s.name)).join(' → ') || '—'}</div></div>`).join('');
+        <span class="pb-port in"></span><div class="im-pn">${esc(p.name)}${p.builtin ? '' : ' <i class="im-cust">custom</i>'}</div><div class="im-ps">${wiredPath(p).map((k) => esc(p.stages[k].name)).join(' → ') || '—'}</div></div>`).join('');
     canvas.innerHTML = svg + issueNodes + pipeNodes;
     canvas.querySelectorAll<HTMLElement>('.im-issue').forEach((node) => node.onclick = (e) => { if ((e.target as HTMLElement).closest('.pb-port')) return; const n = Number(node.dataset.num); if (mapping.has(n)) { mapping.delete(n); renderMap(); } });
     canvas.querySelectorAll<HTMLElement>('.pb-port.out').forEach((port) => port.onpointerdown = (e) => {
@@ -781,7 +816,7 @@ async function openIssueMap(): Promise<void> {
       const res = await relay.worktreeAdd(asgProvider, asgRepo, dir, i.number, stageBriefText(pipeline, 0, i, asgProvider)).catch(() => ({ ok: false } as { ok: boolean; path?: string; briefRel?: string }));
       if (!res.ok) { toast(`Worktree failed for #${n}`); continue; }
       const agent = AGENTS.find((a) => a.id === agentId);
-      if (agentOk && agent) launchOrQueue({ provider: asgProvider, repo: asgRepo, issue: i, pipeline, wt: res.path!, agentId, agentName: agent.name, brief0Rel: res.briefRel || '' });
+      if (agentOk && agent) launchOrQueue({ provider: asgProvider, repo: asgRepo, issue: i, pipeline: clonePipeline(pipeline), wt: res.path!, agentId, agentName: agent.name, brief0Rel: res.briefRel || '' });
       else deps.openAgentTab({ cwd: res.path!, name: `issue #${i.number}`, runCmd: undefined });
       ok++;
     }

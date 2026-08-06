@@ -322,6 +322,9 @@ export function openPipelineBuilder(base: PipelineDef, onSaved: (savedId?: strin
   root.querySelector('#pbSave')?.addEventListener('click', async () => {
     def.name = (def.name || '').trim() || 'Untitled pipeline';
     if (!def.stages.length) { toast('Add at least one stage'); return; }
+    // A wired stage that never writes a verdict would stall the run forever — block save until it's fixed.
+    const stalls = def.stages.filter(willStall);
+    if (stalls.length) { selected = stalls[0].id; renderAll(); toast(`“${stalls[0].name}” has connections but won’t emit a verdict — it would stall. Use “+ Add verdict step”.`); return; }
     if (def.builtin) { def.id = newPipeId(); if (def.name === base.name) def.name = base.name + ' (copy)'; } // fork a built-in → new custom
     def.builtin = false;
     def.desc = def.desc || `${def.stages.length}-stage custom pipeline`;
