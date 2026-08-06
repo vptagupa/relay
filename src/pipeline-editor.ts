@@ -61,7 +61,11 @@ export function openPipelineBuilder(base: PipelineDef, onSaved: (savedId?: strin
   const side = root.querySelector('#pbSide') as HTMLElement;
   const hint = root.querySelector('#pbHint') as HTMLElement;
 
-  const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') { e.preventDefault(); close(); } };
+  const inField = (t: EventTarget | null): boolean => !!(t && /^(INPUT|TEXTAREA|SELECT)$/.test((t as HTMLElement).tagName));
+  const onKey = (e: KeyboardEvent) => {
+    if (e.key === 'Escape') { e.preventDefault(); close(); }
+    else if ((e.ctrlKey || e.metaKey) && (e.key === 'z' || e.key === 'Z') && !inField(e.target)) { e.preventDefault(); undo(); } // don't hijack native undo while typing a brief
+  };
   const close = () => { root.remove(); document.removeEventListener('keydown', onKey); };
   document.addEventListener('keydown', onKey);
   root.querySelector('.tpl-sc')?.addEventListener('click', close);
@@ -72,17 +76,31 @@ export function openPipelineBuilder(base: PipelineDef, onSaved: (savedId?: strin
     `<button class="pb-pchip k-${k.kind}" data-kind="${k.kind}" ${editable ? '' : 'disabled'}><span class="pb-pdot" style="background:${k.dot}"></span>${esc(k.label)}</button>`).join('');
   root.querySelectorAll<HTMLElement>('.pb-pchip').forEach((b) => b.onclick = () => { if (editable) addStage(b.dataset.kind as StageKind); });
 
+  // ---- undo (structural changes: add/remove stage, add/remove edge, move, set-start, kind) ----
+  const undoStack: PipelineDef[] = [];
+  function pushUndo(): void { undoStack.push(clone(def)); if (undoStack.length > 60) undoStack.shift(); }
+  function undo(): void {
+    const prev = undoStack.pop(); if (!prev) return;
+    def = prev; Object.assign(stopPos, def.stopPos || DEFAULT_STOP); // keep the same stopPos object (drag handler closed over it)
+    if (selected && !stageById(selected)) selected = null;
+    renderAll();
+  }
+  // A stage with outgoing edges MUST emit a verdict (write {verdictRel}) or the runner waits forever there.
+  const willStall = (s: StageDef): boolean => s.edges.length > 0 && !s.brief.includes('{verdictRel}');
+  const VERDICT_SNIPPET = `\n\nWhen done, write your verdict to \`{verdictRel}\` as JSON: {"passed": true, "summary": "why this stage passed or failed"}.`;
+
   // ---- model ops ----
   const stageById = (id: string): StageDef | undefined => def.stages.find((s) => s.id === id);
-  const dirtyLayout = () => { /* positions live in def already */ };
 
   function addStage(kind: StageKind): void {
+    pushUndo();
     const spec = kindSpec(kind);
     const n = def.stages.length;
     const s: StageDef = { id: newStageId(), name: spec.label, kind, brief: spec.brief, edges: [], x: 40 + (n % 3) * 175, y: 40 + Math.floor(n / 3) * 120 };
     def.stages.push(s); selected = s.id; renderAll();
   }
   function removeStage(id: string): void {
+    pushUndo();
     def.stages = def.stages.filter((s) => s.id !== id);
     for (const s of def.stages) s.edges = s.edges.filter((e) => e.to !== id); // drop dangling edges
     if (selected === id) selected = null;
@@ -91,6 +109,7 @@ export function openPipelineBuilder(base: PipelineDef, onSaved: (savedId?: strin
   function addEdge(from: string, to: string): void {
     const s = stageById(from); if (!s || from === to) return;
     if (s.edges.some((e) => e.to === to)) return;                 // no duplicate target
+    pushUndo();
     const used = new Set(s.edges.map((e) => e.when));
     const when: EdgeWhen = !used.has('valid') ? 'valid' : !used.has('invalid') ? 'invalid' : 'always';
     s.edges.push({ when, to });
@@ -120,7 +139,10 @@ export function openPipelineBuilder(base: PipelineDef, onSaved: (savedId?: strin
     const seq = order.map((id) => stageById(id)?.name).filter(Boolean).join(' → ') || '(add a stage)';
     const hasStop = def.stages.some((s) => s.edges.some((e) => e.to === STOP));
     const unreached = def.stages.filter((s) => !order.includes(s.id)).length;
-    hint.innerHTML = `<b>Runs:</b> ${esc(seq)}${hasStop ? ' <span style="opacity:.65">(→ Stop on a failed gate)</span>' : ''}${unreached ? ` &nbsp;·&nbsp; <span style="color:#e0a44a">⚠ ${unreached} stage${unreached === 1 ? '' : 's'} unreachable from the start</span>` : ''}`;
+    const stalls = def.stages.filter(willStall).length;
+    hint.innerHTML = `<b>Runs:</b> ${esc(seq)}${hasStop ? ' <span style="opacity:.65">(→ Stop on a failed gate)</span>' : ''}`
+      + `${unreached ? ` &nbsp;·&nbsp; <span style="color:#e0a44a">⚠ ${unreached} unreachable from start</span>` : ''}`
+      + `${stalls ? ` &nbsp;·&nbsp; <span style="color:#e0605e">⚠ ${stalls} stage${stalls === 1 ? '' : 's'} won’t emit a verdict → will stall</span>` : ''}`;
   }
 
   function nodeCenter(id: string): { x: number; y: number } {
@@ -128,9 +150,9 @@ export function openPipelineBuilder(base: PipelineDef, onSaved: (savedId?: strin
     const s = stageById(id); return { x: (s?.x ?? 0), y: (s?.y ?? 0) };
   }
 
-  function renderCanvas(): void {
-    canvas.style.width = CANVAS_W + 'px'; canvas.style.height = CANVAS_H + 'px';
-    // SVG edges first (behind the nodes)
+  // Just the SVG inner markup (defs + edge paths + labels + the live connect ghost). Rebuilding ONLY this
+  // during a drag keeps every node div (and its handlers) intact — that's the expensive part to avoid.
+  function edgesInner(): string {
     const paths: string[] = [];
     for (const s of def.stages) {
       const a = { x: (s.x ?? 0) + NW, y: (s.y ?? 0) + NH / 2 }; // output port (right-middle)
@@ -147,14 +169,22 @@ export function openPipelineBuilder(base: PipelineDef, onSaved: (savedId?: strin
       const a = nodeCenter(connecting.from); const ax = a.x + NW, ay = a.y + NH / 2;
       paths.push(`<path d="M${ax},${ay} L${connecting.x},${connecting.y}" fill="none" style="stroke:var(--accent-2);stroke-width:2;stroke-dasharray:5 4"/>`);
     }
-    const svg = `<svg class="pb-svg" width="${CANVAS_W}" height="${CANVAS_H}"><defs>
+    return `<defs>
       <marker id="pbah-valid" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 Z" fill="#6e7bff"/></marker>
       <marker id="pbah-invalid" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 Z" fill="#e0605e"/></marker>
       <marker id="pbah-always" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 Z" fill="#8a93a3"/></marker>
-    </defs>${paths.join('')}</svg>`;
+    </defs>${paths.join('')}`;
+  }
+  // Redraw ONLY the edges (used during a drag). Node divs + their handlers are untouched.
+  function renderEdges(): void {
+    const svg = canvas.querySelector('.pb-svg');
+    if (svg) svg.innerHTML = edgesInner(); else renderCanvas();
+  }
 
-    // Stop terminal + stage nodes. Number each node by its run order (BFS from the first stage) so the
-    // sequence is readable at a glance; the entry (order 1) is badged START.
+  function renderCanvas(): void {
+    canvas.style.width = CANVAS_W + 'px'; canvas.style.height = CANVAS_H + 'px';
+    const svg = `<svg class="pb-svg" width="${CANVAS_W}" height="${CANVAS_H}">${edgesInner()}</svg>`;
+    // Number each node by its run order (BFS from the first stage); the entry (order 1) is badged START.
     const order = runOrder();
     const ordOf = (id: string): number => order.indexOf(id) + 1; // 0 → unreachable
     const stopNode = `<div class="pb-node pb-stop" data-sid="${STOP}" style="left:${stopPos.x}px;top:${stopPos.y}px"><span class="pb-port in" data-in="${STOP}"></span>⛔ Stop &amp; report</div>`;
@@ -168,7 +198,7 @@ export function openPipelineBuilder(base: PipelineDef, onSaved: (savedId?: strin
         ${numBadge}
         <span class="pb-ndot" style="background:${spec.dot}"></span>
         <span class="pb-nname">${esc(s.name)}</span>
-        ${isGate(s) ? '<i class="pb-gate">gate</i>' : term ? '<i class="pb-term">→PR</i>' : ''}
+        ${willStall(s) ? '<i class="pb-warn" title="This stage has connections but its brief never writes a verdict — the run will stall here. Use “Add verdict step” in the side panel.">⚠</i>' : isGate(s) ? '<i class="pb-gate">gate</i>' : term ? '<i class="pb-term">→PR</i>' : ''}
         ${editable ? `<button class="pb-nx" data-del="${s.id}" title="Delete stage">×</button>` : ''}
         <span class="pb-port out" data-out="${s.id}" title="Drag to another stage to connect"></span>
       </div>`;
@@ -194,27 +224,31 @@ export function openPipelineBuilder(base: PipelineDef, onSaved: (savedId?: strin
         <select class="pb-eto" data-ei="${ei}" ${dis}>${targets.map((t) => `<option value="${esc(t.id)}"${e.to === t.id ? ' selected' : ''}>${esc(t.name)}</option>`).join('')}</select>
         ${editable ? `<button class="pb-erm" data-ei="${ei}" title="Remove edge">×</button>` : ''}
       </div>`).join('') || `<div class="pb-noedge">No edges → this stage is terminal (its PR ends the line).</div>`;
+    const stall = willStall(s);
     side.innerHTML = `
       ${isStart ? '<div class="pb-startrow">▶ Start — runs first</div>' : '<button class="pb-setstart">★ Make this the start</button>'}
+      ${stall ? '<div class="pb-stall">⚠ This stage has connections but its brief never writes a verdict, so the run will <b>stall</b> here.<button class="pb-addverdict">+ Add verdict step</button></div>' : ''}
       <div class="pb-srow"><label>Name</label><input class="pb-sname" spellcheck="false" value="${esc(s.name)}" ${dis} /></div>
       <div class="pb-srow"><label>Kind</label><select class="pb-skind" ${dis}>${kindOpts}</select></div>
       <div class="pb-srow"><label>Brief <span class="pb-tok">tokens: {issue} {number} {closeStep} {verdictRel}</span></label><textarea class="pb-sbrief" spellcheck="false" rows="9" ${dis}>${esc(s.brief)}</textarea></div>
       <div class="pb-srow"><label>Edges <span class="pb-tok">a conditional edge makes this a gate</span></label>${edgeRows}</div>`;
-    side.querySelector('.pb-setstart')?.addEventListener('click', () => { def.stages = [s, ...def.stages.filter((x) => x.id !== s.id)]; renderAll(); }); // move to index 0 = the entry
+    side.querySelector('.pb-setstart')?.addEventListener('click', () => { pushUndo(); def.stages = [s, ...def.stages.filter((x) => x.id !== s.id)]; renderAll(); }); // move to index 0 = the entry
+    side.querySelector('.pb-addverdict')?.addEventListener('click', () => { pushUndo(); s.brief += VERDICT_SNIPPET; renderAll(); }); // make a wired non-gate stage emit a verdict
     (side.querySelector('.pb-sname') as HTMLInputElement).oninput = (ev) => { s.name = (ev.target as HTMLInputElement).value; const el = canvas.querySelector(`.pb-node[data-sid="${s.id}"] .pb-nname`); if (el) el.textContent = s.name; };
-    (side.querySelector('.pb-skind') as HTMLSelectElement).onchange = (ev) => { s.kind = (ev.target as HTMLSelectElement).value as StageKind; renderAll(); };
-    (side.querySelector('.pb-sbrief') as HTMLTextAreaElement).oninput = (ev) => { s.brief = (ev.target as HTMLTextAreaElement).value; };
-    side.querySelectorAll<HTMLSelectElement>('.pb-ewhen').forEach((sel) => sel.onchange = () => { s.edges[Number(sel.dataset.ei)].when = sel.value as EdgeWhen; renderCanvas(); });
-    side.querySelectorAll<HTMLSelectElement>('.pb-eto').forEach((sel) => sel.onchange = () => { s.edges[Number(sel.dataset.ei)].to = sel.value; renderCanvas(); });
-    side.querySelectorAll<HTMLElement>('.pb-erm').forEach((b) => b.onclick = () => { s.edges.splice(Number(b.dataset.ei), 1); renderAll(); });
+    (side.querySelector('.pb-skind') as HTMLSelectElement).onchange = (ev) => { pushUndo(); s.kind = (ev.target as HTMLSelectElement).value as StageKind; renderAll(); };
+    (side.querySelector('.pb-sbrief') as HTMLTextAreaElement).oninput = (ev) => { s.brief = (ev.target as HTMLTextAreaElement).value; updateFoot(); }; // brief edits aren't on the undo stack (retype), but refresh the stall check
+    side.querySelectorAll<HTMLSelectElement>('.pb-ewhen').forEach((sel) => sel.onchange = () => { pushUndo(); s.edges[Number(sel.dataset.ei)].when = sel.value as EdgeWhen; renderAll(); });
+    side.querySelectorAll<HTMLSelectElement>('.pb-eto').forEach((sel) => sel.onchange = () => { pushUndo(); s.edges[Number(sel.dataset.ei)].to = sel.value; renderAll(); });
+    side.querySelectorAll<HTMLElement>('.pb-erm').forEach((b) => b.onclick = () => { pushUndo(); s.edges.splice(Number(b.dataset.ei), 1); renderAll(); });
   }
 
   // ---- canvas pointer handling: move nodes + drag-to-connect ----
   function wireCanvas(): void {
-    // edge-label click → remove that connection (its condition is editable via the source stage's side panel)
+    // edge-label click → remove that connection (undoable; its condition is editable via the side panel)
     canvas.querySelectorAll<HTMLElement>('.pb-elab').forEach((b) => b.onclick = (e) => {
       e.stopPropagation();
       const s = stageById(b.dataset.efrom!); if (!s) return;
+      pushUndo();
       s.edges = s.edges.filter((ed) => ed.to !== b.dataset.eto);
       renderAll();
     });
@@ -225,13 +259,13 @@ export function openPipelineBuilder(base: PipelineDef, onSaved: (savedId?: strin
         e.stopPropagation(); e.preventDefault();
         const from = port.dataset.out!;
         connecting = { from, ...canvasPoint(e) };
-        const move = (ev: PointerEvent) => { if (connecting) { const p = canvasPoint(ev); connecting.x = p.x; connecting.y = p.y; renderCanvas(); } };
+        const move = (ev: PointerEvent) => { if (connecting) { const p = canvasPoint(ev); connecting.x = p.x; connecting.y = p.y; renderEdges(); } }; // redraw edges only (cheap)
         const up = (ev: PointerEvent) => {
           window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up);
           const tgt = (document.elementFromPoint(ev.clientX, ev.clientY) as HTMLElement)?.closest('.pb-node') as HTMLElement | null;
           const to = tgt?.dataset.sid;
           connecting = null;
-          if (to && to !== from) addEdge(from, to); else renderCanvas();
+          if (to && to !== from) addEdge(from, to); else renderCanvas(); // addEdge → renderAll; else full render to clear the ghost + rewire
         };
         window.addEventListener('pointermove', move); window.addEventListener('pointerup', up);
       };
@@ -247,17 +281,20 @@ export function openPipelineBuilder(base: PipelineDef, onSaved: (savedId?: strin
         const s = isStop ? null : stageById(sid); if (!isStop && !s) return;
         const cur = isStop ? stopPos : { x: s!.x ?? 0, y: s!.y ?? 0 };
         const start = canvasPoint(e); const ox = cur.x - start.x, oy = cur.y - start.y;
+        const snap = clone(def); // pre-move state for undo (pushed only if it actually moves)
         let moved = false;
         const move = (ev: PointerEvent) => {
           const p = canvasPoint(ev);
           const nx = Math.max(0, Math.min(CANVAS_W - NW, p.x + ox)), ny = Math.max(0, Math.min(CANVAS_H - NH, p.y + oy));
-          moved = true; node.style.left = nx + 'px'; node.style.top = ny + 'px';
+          moved = true; node.style.left = nx + 'px'; node.style.top = ny + 'px'; // move the node div directly…
           if (isStop) { stopPos.x = nx; stopPos.y = ny; def.stopPos = { x: nx, y: ny }; } else { s!.x = nx; s!.y = ny; }
-          renderCanvas();
+          renderEdges(); // …and redraw only the edges (node divs + handlers stay intact)
         };
         const up = () => {
           window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up);
-          if (!moved && !isStop) { selected = sid; renderAll(); } else dirtyLayout(); // Stop isn't editable, so a plain click does nothing
+          if (!moved) { if (!isStop) { selected = sid; renderAll(); } return; } // a plain click selects a stage (Stop isn't editable)
+          undoStack.push(snap); if (undoStack.length > 60) undoStack.shift();
+          renderCanvas(); // rebuild once at the end so labels/handlers are re-wired at the final positions
         };
         window.addEventListener('pointermove', move); window.addEventListener('pointerup', up);
       };
