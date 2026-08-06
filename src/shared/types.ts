@@ -145,7 +145,8 @@ export interface Settings {
   issueConcurrency?: number; // max agents the assign queue runs at once (per repo); default 2
   issuePipelineByKey?: Record<string, string>; // per-issue pipeline id, keyed "provider:repo#number"; unset → default validate-fix
   pipelines?: PipelineDef[]; // user-authored custom pipelines (built-ins live in code); merged into the registry
-  bitbucketWorkspaces?: string[]; // Bitbucket workspace ids to list repos from (Atlassian removed cross-workspace discovery, CHANGE-2770)
+  bitbucketWorkspacesByWs?: Record<string, string[]>; // Bitbucket workspace ids to list repos from, per Slayer T workspace id (CHANGE-2770)
+  providersScopedMigrated?: boolean; // one-shot flag: the pre-scoping global provider secrets have been moved into a workspace
 }
 
 // Streaming events emitted by the agent loop to the renderer.

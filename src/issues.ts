@@ -374,11 +374,31 @@ function render(): void {
   });
 }
 
+// One-shot: before per-workspace scoping, provider secrets were global. Move them (+ the old global Bitbucket
+// workspaces list) into the currently-active workspace once, so an existing connection isn't orphaned; other
+// workspaces start empty. Guarded by a settings flag so it runs exactly once, for the first workspace to load.
+async function maybeMigrateProviders(ws: string): Promise<void> {
+  if (state.settings.providersScopedMigrated) return;              // one-shot; flag is set only AFTER a clean run
+  // keys.json writes are serialized + atomic, so this single migration completes without the lost-update race
+  // that partially broke an earlier attempt; if the app is killed mid-migration the flag stays unset and it re-runs.
+  await relay.providerMigrateGlobal(ws).catch(() => {});           // tokens + OAuth-app creds: global → this workspace
+  const patch: Record<string, unknown> = { providersScopedMigrated: true };
+  const legacyBb = (state.settings as unknown as { bitbucketWorkspaces?: string[] }).bitbucketWorkspaces;
+  if (Array.isArray(legacyBb) && legacyBb.length) {
+    const byWs = { ...(state.settings.bitbucketWorkspacesByWs || {}) };
+    if (!byWs[ws]) byWs[ws] = legacyBb;                            // carry the old global list into this workspace
+    patch.bitbucketWorkspacesByWs = byWs;
+  }
+  try { state.settings = await relay.patchSettings(patch); } catch { /* not fatal — retried next boot */ }
+}
+
 /* ----------------------------- pull ----------------------------- */
 // Resolve the active provider+repo (an explicit Sources pick, else inferred from the open folder's remote)
 // → check auth → pull its open issues. Each failure lands on a specific, actionable state.
 export async function loadIssues(): Promise<void> {
   const seq = ++loadSeq;                            // a newer pull supersedes this one at each await point
+  const ws = wsKey();                               // provider connections are per Slayer T workspace
+  await maybeMigrateProviders(ws); if (seq !== loadSeq) return;    // one-time global→workspace secret migration
   const dir = state.settings.workspace || '';
   loadedFor = activeKey(); phase = 'loading'; render();
   // Which provider + repo? This workspace's explicit pick wins; otherwise infer from the folder's git remote.
@@ -389,7 +409,7 @@ export async function loadIssues(): Promise<void> {
     const inf = dir ? await relay.providerRepoFromRemote(dir).catch(() => null) : null; if (seq !== loadSeq) return;
     provider = inf?.provider || 'github'; repo = inf?.repo || null;
   }
-  const auth = await relay.providerAuthState(provider); if (seq !== loadSeq) return;
+  const auth = await relay.providerAuthState(ws, provider); if (seq !== loadSeq) return;
   if (!auth.connected) { phase = 'noauth'; render(); return; }
   myLogin = (auth.login as string) || '';           // for the "assigned to me" filter
   if (!repo) { phase = 'norepo'; errMsg = dir ? 'This folder’s git remote isn’t on a supported provider.' : 'No project folder is open.'; render(); return; }
@@ -397,12 +417,12 @@ export async function loadIssues(): Promise<void> {
   // every issue with no visible chip to clear). Run-status is provider+repo-keyed, no clearing needed.
   const curKey = `${provider}:${repo}:${issueState}`;
   if (curKey !== lastKey) { lastKey = curKey; activeFilters.clear(); activeLabels.clear(); activeAuthors.clear(); mineOnly = false; query = ''; const sEl = $('#issSearch') as HTMLInputElement | null; if (sEl) sEl.value = ''; }
-  const r = await relay.providerIssues(provider, repo, issueState); if (seq !== loadSeq) return;
+  const r = await relay.providerIssues(ws, provider, repo, issueState); if (seq !== loadSeq) return;
   if (!r.ok) { phase = 'error'; errMsg = r.error || 'Could not pull issues'; render(); return; }
   issues = r.issues || []; phase = 'ready'; prByBranch = {}; render(); ensurePolling();
   // review → ship: light up issues whose issue-N branch already has an open PR/MR (best-effort, non-blocking).
   const forProvider = provider, forRepo = repo;
-  relay.providerPrs(forProvider, forRepo).then((pr: { ok: boolean; prs?: { branch: string; url: string; draft: boolean }[] }) => {
+  relay.providerPrs(ws, forProvider, forRepo).then((pr: { ok: boolean; prs?: { branch: string; url: string; draft: boolean }[] }) => {
     if (seq !== loadSeq || !pr.ok || !pr.prs) return;
     applyPrs(pr.prs); // a pre-existing PR/MR may free a slot for a queued issue
   }).catch(() => { /* PRs/MRs are a nice-to-have; the list still renders without them */ });
@@ -454,9 +474,9 @@ function drainQueue(): void {
 // Background PR/MR poll — the engine that lets the queue drain while you're away. Runs only while there's
 // something to drive (a queued item or a working agent for this repo), and stops itself otherwise.
 async function pollPrs(): Promise<void> {
-  const forProvider = provider, forRepo = repo;
+  const forProvider = provider, forRepo = repo, ws = wsKey();
   if (!forRepo) { ensurePolling(); return; }
-  const pr = await relay.providerPrs(forProvider, forRepo).catch(() => null);
+  const pr = await relay.providerPrs(ws, forProvider, forRepo).catch(() => null);
   if (!pr || !pr.ok || !pr.prs || forProvider !== provider || forRepo !== repo) return; // switched mid-flight → drop
   applyPrs(pr.prs); // a newly-opened PR/MR may free a slot; also refreshes review chips / PR buttons
 }
@@ -947,7 +967,7 @@ function connectProvider(pid: ProviderId): void {
 // user cancels the one-time setup. Providers without an oauthApp (GitLab) pass straight through.
 async function ensureOAuthApp(pid: ProviderId): Promise<boolean> {
   if (!PROVS[pid].oauthApp) return true;
-  const cur = await relay.providerOAuthConfigGet(pid).catch(() => null);
+  const cur = await relay.providerOAuthConfigGet(wsKey(), pid).catch(() => null);
   if (cur && cur.configured) return true;
   return configOAuthApp(pid);
 }
@@ -956,9 +976,10 @@ async function ensureOAuthApp(pid: ProviderId): Promise<boolean> {
 // Resolves true once saved, false if cancelled. Also used from Sources to re-enter/rotate credentials.
 function configOAuthApp(pid: ProviderId): Promise<boolean> {
   const cfg = PROVS[pid].oauthApp; if (!cfg) return Promise.resolve(true);
+  const ws = wsKey();                                                  // credentials are scoped to the active workspace
   return new Promise<boolean>((resolve) => {
     let done = false; const settle = (v: boolean) => { if (!done) { done = true; resolve(v); } };
-    void relay.providerOAuthConfigGet(pid).catch(() => ({ clientId: '', hasSecret: false })).then((cur: { clientId: string; hasSecret: boolean }) => {
+    void relay.providerOAuthConfigGet(ws, pid).catch(() => ({ clientId: '', hasSecret: false })).then((cur: { clientId: string; hasSecret: boolean }) => {
       const { root, close } = modal(`<div class="tpl-card iss-card">
           <div class="hd"><span class="dot" style="background:var(--accent)"></span><span class="t">${esc(cfg.title)}<small>one-time setup · stored encrypted</small></span></div>
           <div class="bd">
@@ -980,7 +1001,7 @@ function configOAuthApp(pid: ProviderId): Promise<boolean> {
       const submit = async () => {
         const id = idEl.value.trim(); if (!id) { idEl.focus(); return; }
         okBtn.disabled = true; okBtn.textContent = 'Saving…'; statusEl.textContent = '';
-        const r = await relay.providerOAuthConfigSet(pid, id, secEl?.value.trim() || undefined).catch(() => ({ ok: false, error: 'Save failed' }));
+        const r = await relay.providerOAuthConfigSet(ws, pid, id, secEl?.value.trim() || undefined).catch(() => ({ ok: false, error: 'Save failed' }));
         if (!root.isConnected) return;
         if (r.ok) { settle(true); close(); return; }        // settle before close so the onClose(false) is ignored
         okBtn.disabled = false; okBtn.textContent = 'Save'; statusEl.textContent = r.error || 'Could not save';
@@ -998,6 +1019,7 @@ function configOAuthApp(pid: ProviderId): Promise<boolean> {
 // (access + refresh) are stored encrypted in main; the renderer only ever learns connected/login.
 async function connectBitbucket(): Promise<void> {
   let cancelled = false;
+  const ws = wsKey();                                                  // pin the workspace for the whole browser round trip
   const { root, close } = modal(`<div class="tpl-card iss-card">
       <div class="hd"><span class="dot" style="background:var(--accent)"></span><span class="t">Connect Bitbucket<small>authorize Slayer T in your browser</small></span></div>
       <div class="bd">
@@ -1007,7 +1029,7 @@ async function connectBitbucket(): Promise<void> {
       <div class="ft"><span class="hint">Tokens stored encrypted in your OS keychain — never in <code>slayert.json</code></span><span class="r"><button class="tpl-btn ghost" data-x>Cancel</button></span></div>
     </div>`);
   root.querySelector('[data-x]')?.addEventListener('click', () => { cancelled = true; close(); });
-  const r = await relay.bitbucketOAuth().catch(() => ({ ok: false, error: 'Connect failed' }));
+  const r = await relay.bitbucketOAuth(ws).catch(() => ({ ok: false, error: 'Connect failed' }));
   if (cancelled || !root.isConnected) return;                        // user closed the modal mid-flow
   if (r.ok) { close(); toast(`Connected to Bitbucket as ${r.login || 'you'}`, true); void loadIssues(); return; }
   const statusEl = root.querySelector('#bbStatus') as HTMLElement | null;
@@ -1017,7 +1039,8 @@ async function connectBitbucket(): Promise<void> {
 // GitHub OAuth device flow: show the one-time code, open github.com/login/device, poll until authorized.
 // The token is exchanged + stored (encrypted) entirely in main — the renderer only sees connected/login.
 async function connectGithub(): Promise<void> {
-  const start = await relay.githubDeviceStart().catch(() => ({ ok: false, error: 'Could not start' }));
+  const ws = wsKey();                                                  // pin the workspace for the whole device-flow poll loop
+  const start = await relay.githubDeviceStart(ws).catch(() => ({ ok: false, error: 'Could not start' }));
   if (!start.ok || !start.deviceCode) { toast(start.error || 'Could not start GitHub connect'); return; }
   const verify = start.verificationUri || 'https://github.com/login/device';
   const code = start.userCode || '';
@@ -1042,7 +1065,7 @@ async function connectGithub(): Promise<void> {
   while (!cancelled && root.isConnected && Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, wait * 1000));
     if (cancelled || !root.isConnected) break;
-    const p = await relay.githubDevicePoll(start.deviceCode).catch(() => ({ status: 'error', error: 'poll failed' }));
+    const p = await relay.githubDevicePoll(ws, start.deviceCode).catch(() => ({ status: 'error', error: 'poll failed' }));
     if (p.status === 'ok') { close(); toast(`Connected to GitHub as ${p.login || 'you'}`, true); void loadIssues(); return; }
     if (p.status === 'slow_down') { wait = Number(p.interval) || wait + 5; continue; }
     if (p.status === 'pending') continue;
@@ -1055,6 +1078,7 @@ async function connectGithub(): Promise<void> {
 // Token connect (GitLab PAT): paste it, validate in main, store encrypted.
 async function connectToken(pid: ProviderId): Promise<void> {
   const pc = PROVS[pid];
+  const ws = wsKey();                                                  // token is stored for the active workspace only
   const { root, close } = modal(`<div class="tpl-card iss-card">
       <div class="hd"><span class="dot" style="background:var(--accent)"></span><span class="t">Connect ${esc(pc.name)}<small>paste a read-scoped token</small></span></div>
       <div class="bd">
@@ -1074,7 +1098,7 @@ async function connectToken(pid: ProviderId): Promise<void> {
   const submit = async () => {
     const t = tok.value.trim(); if (!t) { tok.focus(); return; }
     okBtn.disabled = true; okBtn.textContent = 'Connecting…'; statusEl.textContent = '';
-    const r = await relay.providerConnect(pid, t, host?.value.trim()).catch(() => ({ ok: false, error: 'Connect failed' }));
+    const r = await relay.providerConnect(ws, pid, t, host?.value.trim()).catch(() => ({ ok: false, error: 'Connect failed' }));
     if (!root.isConnected) return;
     if (r.ok) { close(); toast(`Connected to ${pc.name} as ${r.login || 'you'}`, true); void loadIssues(); return; }
     okBtn.disabled = false; okBtn.textContent = 'Connect'; statusEl.textContent = r.error || 'Token rejected';
@@ -1086,11 +1110,12 @@ async function connectToken(pid: ProviderId): Promise<void> {
 
 // Bitbucket workspaces to list repos from — Atlassian removed cross-workspace discovery (CHANGE-2770), so
 // the user names their workspace(s) and we list each via the surviving per-workspace endpoint.
-const bbWorkspaces = (): string[] => (Array.isArray(state.settings.bitbucketWorkspaces) ? state.settings.bitbucketWorkspaces : []);
-async function setBbWorkspaces(ws: string[]): Promise<void> {
-  const uniq = [...new Set(ws.map((w) => w.trim()).filter(Boolean))];
-  state.settings.bitbucketWorkspaces = uniq;
-  try { state.settings = await relay.patchSettings({ bitbucketWorkspaces: uniq }); } catch { /* keep the local copy */ }
+const bbWorkspaces = (): string[] => ((state.settings.bitbucketWorkspacesByWs || {})[wsKey()] || []);
+async function setBbWorkspaces(list: string[]): Promise<void> {
+  const uniq = [...new Set(list.map((w) => w.trim()).filter(Boolean))];
+  const byWs = { ...(state.settings.bitbucketWorkspacesByWs || {}) }; byWs[wsKey()] = uniq;
+  state.settings.bitbucketWorkspacesByWs = byWs;
+  try { state.settings = await relay.patchSettings({ bitbucketWorkspacesByWs: byWs }); } catch { /* keep the local copy */ }
 }
 // The workspace editor shown under Bitbucket in Sources (add/remove workspace ids).
 function bbWsEditorHtml(): string {
@@ -1105,7 +1130,7 @@ function bbWsEditorHtml(): string {
 // Sources: the app's connections (GitHub / GitLab / Bitbucket) + which repos to track.
 async function openSources(): Promise<void> {
   const tracked = new Set(trackedRepos());
-  const states = await Promise.all(PROVIDER_LIST.map(async (pc) => ({ pc, auth: await relay.providerAuthState(pc.id).catch(() => ({ connected: false, login: '' })) })));
+  const states = await Promise.all(PROVIDER_LIST.map(async (pc) => ({ pc, auth: await relay.providerAuthState(wsKey(), pc.id).catch(() => ({ connected: false, login: '' })) })));
   const sections = states.map(({ pc, auth }) => {
     const st = auth.connected ? `✓ connected as <b>${esc(auth.login || '')}</b>` : '⚠ not connected';
     const appBtn = pc.oauthApp ? `<button class="tpl-btn ghost" data-oapp="${pc.id}" title="Edit the OAuth app credentials">OAuth app…</button>` : '';
@@ -1157,7 +1182,7 @@ async function openSources(): Promise<void> {
   root.querySelectorAll<HTMLElement>('[data-disc]').forEach((b) => {
     b.onclick = async () => {
       const id = b.dataset.disc as ProviderId;
-      await relay.providerDisconnect(id).catch(() => {}); close(); toast(`Disconnected from ${PROVS[id].name}`); void loadIssues();
+      await relay.providerDisconnect(wsKey(), id).catch(() => {}); close(); toast(`Disconnected from ${PROVS[id].name}`); void loadIssues();
     };
   });
   // Load-my-repos per provider → checkboxes that track (and activate) qualified repo ids.
@@ -1165,7 +1190,7 @@ async function openSources(): Promise<void> {
     b.onclick = async () => {
       const id = b.dataset.load as ProviderId;
       const btn = b as HTMLButtonElement; btn.textContent = 'Loading…'; btn.disabled = true;
-      const r = await relay.providerRepos(id, id === 'bitbucket' ? bbWorkspaces() : undefined).catch(() => ({ ok: false, error: 'failed' }));
+      const r = await relay.providerRepos(wsKey(), id, id === 'bitbucket' ? bbWorkspaces() : undefined).catch(() => ({ ok: false, error: 'failed' }));
       btn.textContent = 'Load my repos'; btn.disabled = false;
       const box = root.querySelector(`#srcList-${id}`) as HTMLElement;
       if (!r.ok || !r.repos || !r.repos.length) { box.innerHTML = `<div class="src-empty">${esc(r.error || 'No repos found')}</div>`; return; }

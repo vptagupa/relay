@@ -5,7 +5,7 @@ import { promises as fsp, appendFileSync, existsSync, mkdirSync, copyFileSync, r
 import { exec, execFile } from 'node:child_process';
 import http from 'node:http';
 import { createHash, randomBytes } from 'node:crypto';
-import { httpsReq, PROVIDERS, providerOf, providerFromRemote, bitbucketExchangeCode, bitbucketAuthorizeUrl, bbOAuthConfigured, BB_OAUTH_PORT, BB_REDIRECT_URI, getOAuthApp, setOAuthApp, githubClientId, type ProviderId } from './providers';
+import { httpsReq, PROVIDERS, providerOf, providerFromRemote, bitbucketExchangeCode, bitbucketAuthorizeUrl, bbOAuthConfigured, BB_OAUTH_PORT, BB_REDIRECT_URI, getOAuthApp, setOAuthApp, githubClientId, migrateGlobalSecretsToWs, type ProviderId } from './providers';
 import { createTerm, writeTerm, resizeTerm, detachTerm, killTerm, killAll, isAltScreen } from './pty';
 import * as store from './store';
 import * as keys from './keys';
@@ -304,8 +304,9 @@ function runBin(bin: string, args: string[], opts: { cwd?: string; timeout?: num
 // install point at its own OAuth App. The app must have "Device Flow" enabled in its GitHub settings.
 
 // Start the GitHub OAuth device flow: returns the one-time user code + verification URL for the renderer.
-ipcMain.handle('github:device-start', async () => {
-  const clientId = await githubClientId();
+// `ws` is the active Slayer T workspace — its client id + resulting token are scoped to it.
+ipcMain.handle('github:device-start', async (_e, { ws }: { ws: string }) => {
+  const clientId = await githubClientId(ws);
   if (!clientId) return { ok: false, error: 'GitHub OAuth app is not configured', needsConfig: true };
   const r = await httpsReq('github.com', '/login/device/code', 'POST', { Accept: 'application/json', 'Content-Type': 'application/x-www-form-urlencoded' }, `client_id=${encodeURIComponent(clientId)}&scope=repo`);
   try {
@@ -315,15 +316,15 @@ ipcMain.handle('github:device-start', async () => {
   } catch { return { ok: false, error: 'Could not start device flow' }; }
 });
 // One poll of the token endpoint. The renderer loops this on the interval until it's no longer pending.
-ipcMain.handle('github:device-poll', async (_e, { deviceCode }: { deviceCode: string }) => {
+ipcMain.handle('github:device-poll', async (_e, { ws, deviceCode }: { ws: string; deviceCode: string }) => {
   if (typeof deviceCode !== 'string' || !deviceCode) return { status: 'error', error: 'bad request' };
-  const clientId = await githubClientId();
+  const clientId = await githubClientId(ws);
   if (!clientId) return { status: 'error', error: 'GitHub OAuth app is not configured' };
   const r = await httpsReq('github.com', '/login/oauth/access_token', 'POST', { Accept: 'application/json', 'Content-Type': 'application/x-www-form-urlencoded' }, `client_id=${encodeURIComponent(clientId)}&device_code=${deviceCode}&grant_type=urn:ietf:params:oauth:grant-type:device_code`);
   let j: Record<string, unknown> = {}; try { j = JSON.parse(r.text) as Record<string, unknown>; } catch { /* */ }
   if (j.access_token) {
-    await keys.setSecret('github_oauth', String(j.access_token));   // encrypted in the OS keychain
-    const who = await PROVIDERS.github.authState();
+    await keys.setSecret(`${ws}:github_oauth`, String(j.access_token));   // encrypted in the OS keychain, scoped to the workspace
+    const who = await PROVIDERS.github.authState(ws);
     return { status: 'ok', login: who.login || '' };
   }
   if (r.status === 0) return { status: 'pending' }; // transient network/timeout mid-authorization — keep waiting, don't abort
@@ -340,8 +341,8 @@ ipcMain.handle('github:device-poll', async (_e, { deviceCode }: { deviceCode: st
 // open the system browser to the authorize page (with a CSRF `state`), catch the `?code` callback, hand it to
 // providers.bitbucketExchangeCode (which owns the secret + token storage), and resolve. The renderer only ever
 // sees { ok, login } — never a token. Resolves once: on success, denial, timeout, or a port/exchange error.
-ipcMain.handle('bitbucket:oauth', async () => {
-  if (!(await bbOAuthConfigured())) return { ok: false, error: 'Bitbucket OAuth app is not configured' };
+ipcMain.handle('bitbucket:oauth', async (_e, { ws }: { ws: string }) => {
+  if (!(await bbOAuthConfigured(ws))) return { ok: false, error: 'Bitbucket OAuth app is not configured' };
   return new Promise<{ ok: boolean; login?: string; error?: string }>((resolve) => {
   let settled = false;
   const state = randomBytes(16).toString('hex');
@@ -366,38 +367,40 @@ ipcMain.handle('bitbucket:oauth', async () => {
       if (!code || gotState !== state) { res.writeHead(400, { 'Content-Type': 'text/html' }); res.end(page('Invalid response', 'The sign-in could not be verified. Close this tab and try again.')); finish({ ok: false, error: 'Invalid authorization response (state mismatch)' }); return; }
       // Answer the browser before the (slower) token exchange so the tab shows success promptly.
       res.writeHead(200, { 'Content-Type': 'text/html' }); res.end(page('Connected to Bitbucket ✓', 'You can close this tab and return to Slayer T.'));
-      finish(await bitbucketExchangeCode(code, BB_REDIRECT_URI));
+      finish(await bitbucketExchangeCode(ws, code, BB_REDIRECT_URI));
     } catch { try { res.writeHead(500); res.end('error'); } catch { /* */ } finish({ ok: false, error: 'Callback handling error' }); }
   });
   server.on('error', (e: NodeJS.ErrnoException) => finish({ ok: false, error: e?.code === 'EADDRINUSE' ? `Port ${BB_OAUTH_PORT} is in use — close whatever is using it and try again.` : 'Could not start the local sign-in server' }));
   const timer = setTimeout(() => finish({ ok: false, error: 'Timed out waiting for authorization' }), 300000); // 5 min
-  server.listen(BB_OAUTH_PORT, '127.0.0.1', async () => { void shell.openExternal(await bitbucketAuthorizeUrl(state)); });
+  server.listen(BB_OAUTH_PORT, '127.0.0.1', async () => { void shell.openExternal(await bitbucketAuthorizeUrl(ws, state)); });
   });
 });
 
 // OAuth-app config (the provider's client id / secret used to START its login flow). Read returns the public
 // client id + a hasSecret flag, never the secret. Write validates + stores encrypted in the OS keychain.
-ipcMain.handle('provider:oauth-config-get', async (_e, id: ProviderId) => (await getOAuthApp(id)) || { clientId: '', hasSecret: false, needsSecret: false, configured: false });
-ipcMain.handle('provider:oauth-config-set', async (_e, p: { provider: ProviderId; clientId: string; secret?: string }) => {
+ipcMain.handle('provider:oauth-config-get', async (_e, p: { provider: ProviderId; ws: string }) => (await getOAuthApp(p?.ws, p?.provider)) || { clientId: '', hasSecret: false, needsSecret: false, configured: false });
+ipcMain.handle('provider:oauth-config-set', async (_e, p: { provider: ProviderId; ws: string; clientId: string; secret?: string }) => {
   const a = providerOf(p?.provider); if (!a) return { ok: false, error: 'Unknown provider' };
-  return setOAuthApp(p.provider, typeof p?.clientId === 'string' ? p.clientId : '', typeof p?.secret === 'string' ? p.secret : undefined);
+  return setOAuthApp(p?.ws, p.provider, typeof p?.clientId === 'string' ? p.clientId : '', typeof p?.secret === 'string' ? p.secret : undefined);
 });
+// One-time migration of the pre-scoping global secrets into the active workspace (renderer guards it with a flag).
+ipcMain.handle('provider:migrate-global', async (_e, { ws }: { ws: string }) => { if (typeof ws === 'string' && ws) await migrateGlobalSecretsToWs(ws); return { ok: true }; });
 
 // --- generic provider handlers (dispatch to the registry in providers.ts) ---
 const badProvider = { ok: false, error: 'Unknown provider' } as const;
 // A native repo id: owner/name (GitHub/Bitbucket) or group[/subgroup…]/project (GitLab) — 2+ segments.
 const validRepo = (repo: unknown): repo is string => typeof repo === 'string' && /^[\w.-]+(\/[\w.-]+)+$/.test(repo);
 
-// Connection state for a provider — { connected, login } (never the token). A network blip stays connected.
-ipcMain.handle('provider:auth-state', async (_e, id: ProviderId) => (await providerOf(id)?.authState()) || { connected: false });
-// Connect GitLab/Bitbucket with a pasted read-token (+ optional host for self-managed GitLab). GitHub
-// connects via the device flow above; connect() here just stores a token if the renderer ever passes one.
-ipcMain.handle('provider:connect', async (_e, p: { provider: ProviderId; token: string; host?: string }) => {
+// Connection state for a provider in workspace `ws` — { connected, login } (never the token). A network blip stays connected.
+ipcMain.handle('provider:auth-state', async (_e, p: { provider: ProviderId; ws: string }) => (await providerOf(p?.provider)?.authState(p?.ws)) || { connected: false });
+// Connect GitLab with a pasted read-token (+ optional host). GitHub/Bitbucket connect via their OAuth flows
+// above; connect() here just stores a token if the renderer ever passes one. Scoped to workspace `ws`.
+ipcMain.handle('provider:connect', async (_e, p: { provider: ProviderId; ws: string; token: string; host?: string }) => {
   const a = providerOf(p?.provider); if (!a) return badProvider;
   if (typeof p?.token !== 'string' || !p.token.trim()) return { ok: false, error: 'Paste a token first' };
-  return a.connect(p.token.trim(), typeof p?.host === 'string' ? p.host.trim() : undefined);
+  return a.connect(p?.ws, p.token.trim(), typeof p?.host === 'string' ? p.host.trim() : undefined);
 });
-ipcMain.handle('provider:disconnect', async (_e, id: ProviderId) => { await providerOf(id)?.disconnect(); return { ok: true }; });
+ipcMain.handle('provider:disconnect', async (_e, p: { provider: ProviderId; ws: string }) => { await providerOf(p?.provider)?.disconnect(p?.ws); return { ok: true }; });
 // Infer { provider, repo } from a folder's git origin remote (null if not a recognized provider remote).
 ipcMain.handle('provider:repo-from-remote', (_e, dir: string) => new Promise<{ provider: ProviderId; repo: string } | null>((resolve) => {
   if (!dir || typeof dir !== 'string') return resolve(null);
@@ -408,16 +411,16 @@ ipcMain.handle('provider:repo-from-remote', (_e, dir: string) => new Promise<{ p
     });
   });
 }));
-ipcMain.handle('provider:issues', async (_e, p: { provider: ProviderId; repo: string; state?: 'open' | 'closed' }) => {
+ipcMain.handle('provider:issues', async (_e, p: { provider: ProviderId; ws: string; repo: string; state?: 'open' | 'closed' }) => {
   const a = providerOf(p?.provider); if (!a) return badProvider;
   if (!validRepo(p?.repo)) return { ok: false, error: 'Invalid repository' };
-  return a.issues(p.repo, p?.state === 'closed' ? 'closed' : 'open');
+  return a.issues(p?.ws, p.repo, p?.state === 'closed' ? 'closed' : 'open');
 });
-ipcMain.handle('provider:repos', async (_e, p: { provider: ProviderId; workspaces?: string[] }) => (await providerOf(p?.provider)?.repos({ workspaces: Array.isArray(p?.workspaces) ? p.workspaces : undefined })) || badProvider);
-ipcMain.handle('provider:prs', async (_e, p: { provider: ProviderId; repo: string }) => {
+ipcMain.handle('provider:repos', async (_e, p: { provider: ProviderId; ws: string; workspaces?: string[] }) => (await providerOf(p?.provider)?.repos(p?.ws, { workspaces: Array.isArray(p?.workspaces) ? p.workspaces : undefined })) || badProvider);
+ipcMain.handle('provider:prs', async (_e, p: { provider: ProviderId; ws: string; repo: string }) => {
   const a = providerOf(p?.provider); if (!a) return badProvider;
   if (!validRepo(p?.repo)) return { ok: false, error: 'Invalid repository' };
-  return a.prs(p.repo);
+  return a.prs(p?.ws, p.repo);
 });
 
 // Which coding agents are installed on PATH (for the Assign-to picker). Names are hardcoded literals.
