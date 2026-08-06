@@ -89,6 +89,7 @@ let loadSeq = 0;      // supersedes an in-flight pull when a newer one starts
 let query = '';       // search box text
 const activeFilters = new Set<string>();        // active local-tag filter chips (AND)
 const activeLabels = new Set<string>();         // active provider-label filter chips (AND)
+const activeAuthors = new Set<string>();        // active "created by" filter chips (OR — an issue has one author)
 let mineOnly = false;                            // "assigned to me" toggle
 let myLogin = '';                                // the connected provider login (for "assigned to me")
 let issueState: 'open' | 'closed' = 'open';      // which issues to pull (server-side); default open
@@ -152,6 +153,12 @@ function allLabels(): { name: string; color?: string }[] {
   return [...m].map(([name, color]) => ({ name, color })).sort((a, b) => a.name.localeCompare(b.name));
 }
 const mineCount = (): number => (myLogin ? issues.filter((i) => (i.assignees || []).includes(myLogin)).length : 0);
+// Distinct issue authors across the pulled issues, with a count each, for the "created by" filter chips.
+function allAuthors(): { login: string; count: number }[] {
+  const m = new Map<string, number>();
+  for (const i of issues) if (i.author) m.set(i.author, (m.get(i.author) || 0) + 1);
+  return [...m].map(([login, count]) => ({ login, count })).sort((a, b) => b.count - a.count || a.login.localeCompare(b.login));
+}
 async function persist(): Promise<void> { try { state.settings = await relay.patchSettings({ issueTags: tagsMap() }); } catch { /* keep the in-memory tags; a failed write must never clobber */ } }
 async function addTag(n: number, raw: string): Promise<void> {
   const t = raw.trim().replace(/^#+/, '').toLowerCase().replace(/\s+/g, '-').slice(0, 24);
@@ -181,7 +188,7 @@ const chipTitle = (st: RunStatus): string =>
   : st === 'fixing' || st === 'working' ? 'Click to free this slot (mark the run done)'
   : st === 'invalid' ? 'Not valid — click for the reason (and to run Fix anyway)' : '';
 
-// Apply the search query + active tag/label filters (AND) + "assigned to me" to the pulled issues.
+// Apply the search query + tag/label filters (AND) + "assigned to me" + "created by" (OR) to the issues.
 function visibleIssues(): Issue[] {
   const q = query.trim().toLowerCase();
   return issues.filter((i) => {
@@ -189,9 +196,12 @@ function visibleIssues(): Issue[] {
     for (const f of activeFilters) if (!tags.includes(f)) return false;                 // every active tag-chip must match
     for (const l of activeLabels) if (!i.labels.some((x) => x.name === l)) return false; // every active label-chip must match
     if (mineOnly && !(i.assignees || []).includes(myLogin)) return false;               // assigned-to-me toggle
+    if (activeAuthors.size && !(i.author && activeAuthors.has(i.author))) return false; // created-by (OR — one author per issue)
     if (!q) return true;
     if (q.startsWith('#')) return tags.some((t) => t.includes(q.slice(1)));
+    if (q.startsWith('@')) return !!i.author && i.author.toLowerCase().includes(q.slice(1)); // "@login" → search by author
     return `#${i.number} ${i.title}`.toLowerCase().includes(q)
+      || (i.author ? i.author.toLowerCase().includes(q) : false)
       || i.labels.some((l) => l.name.toLowerCase().includes(q))
       || tags.some((t) => t.includes(q));
   });
@@ -202,13 +212,18 @@ function renderFilters(): void {
   const el = $('#issFilters'); if (!el) return;
   const tags = allTags();
   const labels = allLabels();
+  const authors = allAuthors();
+  const showAuthors = authors.length > 0; // always show the "created by" chips when there's author data (even a single author — so the filter is discoverable)
   const mc = mineCount();
-  const show = phase === 'ready' && (mc > 0 || labels.length > 0 || tags.length > 0);
+  const show = phase === 'ready' && (mc > 0 || showAuthors || labels.length > 0 || tags.length > 0);
   (el as HTMLElement).style.display = show ? '' : 'none';
   if (!show) { el.innerHTML = ''; return; }
   const parts: string[] = [];
-  // "assigned to me" first (only when some issue actually is), then provider labels, then local #tags.
+  // "assigned to me" first, then "created by" (author) chips, then provider labels, then local #tags.
   if (mc > 0) parts.push(`<button class="iss-fchip mine ${mineOnly ? 'on' : ''}" data-mine="1" title="Only issues assigned to you">◎ mine <b>${mc}</b></button>`);
+  if (showAuthors) for (const a of authors) {
+    parts.push(`<button class="iss-fchip auth ${activeAuthors.has(a.login) ? 'on' : ''}" data-author="${esc(a.login)}" title="Created by ${esc(a.login)}">✍ ${esc(a.login)} <b>${a.count}</b></button>`);
+  }
   for (const l of labels) {
     const c = hexColor(l.color);
     parts.push(`<button class="iss-fchip lab ${activeLabels.has(l.name) ? 'on' : ''}" data-label="${esc(l.name)}"${c ? ` style="--lc:${c}"` : ''}><span class="iss-fdot"${c ? ` style="background:${c}"` : ''}></span>${esc(l.name)}</button>`);
@@ -218,6 +233,7 @@ function renderFilters(): void {
   el.querySelectorAll<HTMLElement>('.iss-fchip').forEach((c) => {
     c.onclick = () => {
       if ('mine' in c.dataset) { mineOnly = !mineOnly; render(); return; }
+      if ('author' in c.dataset) { const a = c.dataset.author!; activeAuthors.has(a) ? activeAuthors.delete(a) : activeAuthors.add(a); render(); return; } // OR toggle
       if ('label' in c.dataset) { const l = c.dataset.label!; activeLabels.has(l) ? activeLabels.delete(l) : activeLabels.add(l); render(); return; }
       const t = c.dataset.tag!; activeFilters.has(t) ? activeFilters.delete(t) : activeFilters.add(t); render();
     };
@@ -336,7 +352,7 @@ export async function loadIssues(): Promise<void> {
   // Repo/provider switched → drop filters/search that belong to the previous one (they'd otherwise hide
   // every issue with no visible chip to clear). Run-status is provider+repo-keyed, no clearing needed.
   const curKey = `${provider}:${repo}:${issueState}`;
-  if (curKey !== lastKey) { lastKey = curKey; activeFilters.clear(); activeLabels.clear(); mineOnly = false; query = ''; const sEl = $('#issSearch') as HTMLInputElement | null; if (sEl) sEl.value = ''; }
+  if (curKey !== lastKey) { lastKey = curKey; activeFilters.clear(); activeLabels.clear(); activeAuthors.clear(); mineOnly = false; query = ''; const sEl = $('#issSearch') as HTMLInputElement | null; if (sEl) sEl.value = ''; }
   const r = await relay.providerIssues(provider, repo, issueState); if (seq !== loadSeq) return;
   if (!r.ok) { phase = 'error'; errMsg = r.error || 'Could not pull issues'; render(); return; }
   issues = r.issues || []; phase = 'ready'; prByBranch = {}; render(); ensurePolling();
@@ -637,6 +653,7 @@ function openDetails(i: Issue): void {
         ${run ? `<div class="det-pipe"><span class="det-k">${esc(run.pipeline.name)}</span></div>${graph}` : ''}
         ${run?.reason ? `<div class="det-invalid">⛔ Not valid<div class="det-reason">${esc(run.reason)}</div></div>` : ''}
         ${i.labels.length ? `<div class="det-labs">${i.labels.map(labelHtml).join('')}</div>` : ''}
+        ${i.author ? `<div class="det-meta"><span class="det-k">Created by</span>${esc(i.author)}</div>` : ''}
         ${assignees.length ? `<div class="det-meta"><span class="det-k">Assignees</span>${assignees.map((a) => esc(a)).join(', ')}</div>` : ''}
         ${i.milestone ? `<div class="det-meta"><span class="det-k">Milestone</span>${esc(i.milestone)}</div>` : ''}
         <div class="det-body">${body ? esc(body) : '<span class="mut">No description provided.</span>'}</div>

@@ -820,8 +820,9 @@ body.tabdrag .dz{display:block;pointer-events:auto}
 .iss-fchip{font:9.5px/1.55 var(--mono);padding:1px 7px;border-radius:999px;background:transparent;border:1px solid var(--border-strong);color:var(--text-dim);cursor:pointer}
 .iss-fchip:hover{border-color:var(--accent-line);color:var(--text)}
 .iss-fchip.on{background:var(--accent-ghost);border-color:var(--accent-line);color:var(--accent-2)}
-.iss-fchip.mine,.iss-fchip.lab{display:inline-flex;align-items:center;gap:4px}
-.iss-fchip.mine b{font-weight:600;color:var(--accent-2);opacity:.85}
+.iss-fchip.mine,.iss-fchip.lab,.iss-fchip.auth{display:inline-flex;align-items:center;gap:4px}
+.iss-fchip.mine b,.iss-fchip.auth b{font-weight:600;color:var(--accent-2);opacity:.85}
+.iss-fchip.auth{color:var(--muted)}
 .iss-fdot{width:7px;height:7px;border-radius:50%;background:var(--border-strong);flex:none}
 .iss-fchip.lab.on{background:var(--accent-ghost);border-color:var(--lc,var(--accent-line));color:var(--text)}
 .isr-tag{display:inline-flex;align-items:center;gap:2px;font:9.5px/1.55 var(--mono);padding:0 5px 0 6px;border-radius:999px;background:var(--accent-ghost);border:1px solid var(--accent-line);color:var(--accent-2);cursor:pointer}

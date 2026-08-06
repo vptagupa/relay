@@ -79,6 +79,7 @@ const github = {
       number: Number(i.number) || 0, title: str(i.title), body: str(i.body), state: str(i.state) || 'open', url: str(i.html_url),
       labels: asArr(i.labels).map((l) => ({ name: str(l.name), color: l.color ? str(l.color) : undefined })),
       assignees: asArr(i.assignees).map((a) => str(a.login)).filter(Boolean),
+      author: str(asObj(i.user).login) || undefined,
       milestone: i.milestone ? str(asObj(i.milestone).title) || undefined : undefined,
     }));
     return { ok: true, issues };
@@ -147,6 +148,7 @@ const gitlab = {
       number: Number(i.iid) || 0, title: str(i.title), body: str(i.description), state: str(i.state) || 'opened', url: str(i.web_url),
       labels: (Array.isArray(i.labels) ? i.labels as unknown[] : []).map((l) => ({ name: str(l), color: undefined })),
       assignees: asArr(i.assignees).map((a) => str(a.username)).filter(Boolean),
+      author: str(asObj(i.author).username) || undefined,
       milestone: i.milestone ? str(asObj(i.milestone).title) || undefined : undefined,
     }));
     return { ok: true, issues };
@@ -216,11 +218,13 @@ const bitbucket = {
     const issues: Issue[] = raw.filter((i) => (state === 'closed') !== OPEN_BB.has(str(i.state))).map((i) => {
       const links = asObj(asObj(i.links).html);
       const assignee = asObj(i.assignee);
+      const reporter = asObj(i.reporter);
       const kind = str(i.kind); // bug/enhancement/proposal/task — surfaced as a pseudo-label (Bitbucket has no labels)
       return {
         number: Number(i.id) || 0, title: str(i.title), body: str(asObj(i.content).raw), state: str(i.state) || 'open', url: str(links.href),
         labels: kind ? [{ name: kind, color: undefined }] : [],
         assignees: assignee.nickname || assignee.display_name ? [str(assignee.nickname || assignee.display_name)] : [],
+        author: str(reporter.nickname || reporter.display_name) || undefined,
         milestone: i.milestone ? str(asObj(i.milestone).name) || undefined : undefined,
       };
     });

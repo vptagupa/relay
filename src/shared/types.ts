@@ -186,6 +186,7 @@ export interface Issue {
   state: string;
   url: string;
   assignees?: string[];             // GitHub logins assigned to the issue (for the "assigned to me" filter)
+  author?: string;                  // the creator's login/username (for the "created by" filter)
   milestone?: string;               // milestone title, if any
 }
 
