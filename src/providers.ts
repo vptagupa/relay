@@ -12,6 +12,7 @@ import * as keys from './keys';
 import type { Issue } from './shared/types';
 
 export type ProviderId = 'github' | 'gitlab' | 'bitbucket';
+export type IssueState = 'open' | 'closed'; // which issues to pull; default 'open'
 export const PROVIDER_IDS: ProviderId[] = ['github', 'gitlab', 'bitbucket'];
 const isProvider = (s: unknown): s is ProviderId => typeof s === 'string' && (PROVIDER_IDS as string[]).includes(s);
 
@@ -60,10 +61,10 @@ const github = {
     if (who.status === 401) return { connected: false };   // ONLY a real 401 means the token is revoked
     return { connected: true, login: str(asObj(who.json).login) };
   },
-  async issues(repo: string): Promise<{ ok: boolean; issues?: Issue[]; error?: string }> {
+  async issues(repo: string, state: IssueState = 'open'): Promise<{ ok: boolean; issues?: Issue[]; error?: string }> {
     const raw: Array<Record<string, unknown>> = [];
     for (let page = 1; page <= 4; page++) {
-      const r = await ghApi(`/repos/${repo}/issues?state=open&per_page=100&page=${page}`);
+      const r = await ghApi(`/repos/${repo}/issues?state=${state === 'closed' ? 'closed' : 'open'}&per_page=100&page=${page}`);
       if (!r.ok || !Array.isArray(r.json)) {
         if (page > 1) break;
         const msg = str(asObj(r.json).message);
@@ -128,10 +129,10 @@ const gitlab = {
     if (who.status === 401) return { connected: false };
     return { connected: true, login: str(asObj(who.json).username) };
   },
-  async issues(repo: string): Promise<{ ok: boolean; issues?: Issue[]; error?: string }> {
+  async issues(repo: string, state: IssueState = 'open'): Promise<{ ok: boolean; issues?: Issue[]; error?: string }> {
     const raw: Array<Record<string, unknown>> = [];
     for (let page = 1; page <= 4; page++) {
-      const r = await glApi(`/projects/${enc(repo)}/issues?state=opened&per_page=100&page=${page}`);
+      const r = await glApi(`/projects/${enc(repo)}/issues?state=${state === 'closed' ? 'closed' : 'opened'}&per_page=100&page=${page}`);
       if (!r.ok || !Array.isArray(r.json)) {
         if (page > 1) break;
         const msg = str(asObj(r.json).message || asObj(r.json).error);
@@ -197,7 +198,7 @@ const bitbucket = {
     const u = asObj(who.json);
     return { connected: true, login: str(u.nickname || u.username || u.display_name) };
   },
-  async issues(repo: string): Promise<{ ok: boolean; issues?: Issue[]; error?: string }> {
+  async issues(repo: string, state: IssueState = 'open'): Promise<{ ok: boolean; issues?: Issue[]; error?: string }> {
     const raw: Array<Record<string, unknown>> = [];
     for (let page = 1; page <= 4; page++) {
       const r = await bbApi(`/2.0/repositories/${repo}/issues?pagelen=50&page=${page}&sort=-updated_on`);
@@ -211,7 +212,8 @@ const bitbucket = {
       const arr = asArr(asObj(r.json).values); raw.push(...arr);
       if (arr.length < 50) break;
     }
-    const issues: Issue[] = raw.filter((i) => OPEN_BB.has(str(i.state))).map((i) => {
+    // Bitbucket has no state= query param, so filter the fetched page client-side: open = new/open, closed = the rest.
+    const issues: Issue[] = raw.filter((i) => (state === 'closed') !== OPEN_BB.has(str(i.state))).map((i) => {
       const links = asObj(asObj(i.links).html);
       const assignee = asObj(i.assignee);
       const kind = str(i.kind); // bug/enhancement/proposal/task — surfaced as a pseudo-label (Bitbucket has no labels)
@@ -265,7 +267,7 @@ const bitbucket = {
 /* ============================== registry ============================== */
 export interface Adapter {
   authState(): Promise<{ connected: boolean; login?: string }>;
-  issues(repo: string): Promise<{ ok: boolean; issues?: Issue[]; error?: string }>;
+  issues(repo: string, state?: IssueState): Promise<{ ok: boolean; issues?: Issue[]; error?: string }>;
   repos(): Promise<{ ok: boolean; repos?: RepoRow[]; error?: string }>;
   prs(repo: string): Promise<{ ok: boolean; prs?: PrRow[]; error?: string }>;
   repoFromRemote(url: string): string | null;

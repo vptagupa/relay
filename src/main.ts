@@ -353,10 +353,10 @@ ipcMain.handle('provider:repo-from-remote', (_e, dir: string) => new Promise<{ p
     });
   });
 }));
-ipcMain.handle('provider:issues', async (_e, p: { provider: ProviderId; repo: string }) => {
+ipcMain.handle('provider:issues', async (_e, p: { provider: ProviderId; repo: string; state?: 'open' | 'closed' }) => {
   const a = providerOf(p?.provider); if (!a) return badProvider;
   if (!validRepo(p?.repo)) return { ok: false, error: 'Invalid repository' };
-  return a.issues(p.repo);
+  return a.issues(p.repo, p?.state === 'closed' ? 'closed' : 'open');
 });
 ipcMain.handle('provider:repos', async (_e, id: ProviderId) => (await providerOf(id)?.repos()) || badProvider);
 ipcMain.handle('provider:prs', async (_e, p: { provider: ProviderId; repo: string }) => {
@@ -554,6 +554,20 @@ ipcMain.handle('fs:open', async (_e, p: string) => {
   if (isCodeFile(abs) && (await tryCode(abs))) return { method: 'vscode' };
   const err = await shell.openPath(abs); // OS default app for the file type
   return { method: err ? 'error' : 'default', error: err || undefined };
+});
+// Open a path the terminal printed — relative paths resolve against the tab's cwd. Strips a trailing
+// :line[:col] suffix, and SILENTLY no-ops if it doesn't resolve to a real file, so clicking path-like
+// text that isn't actually a file (a false-positive link) does nothing rather than erroring.
+ipcMain.handle('fs:open-rel', async (_e, p: { cwd?: string; target: string }) => {
+  const raw = typeof p?.target === 'string' ? p.target : '';
+  if (!raw) return { ok: false };
+  const bare = raw.replace(/:\d+(?::\d+)?$/, ''); // drop a trailing :line or :line:col
+  const cwd = typeof p?.cwd === 'string' && p.cwd ? p.cwd : app.getPath('home');
+  const abs = path.isAbsolute(bare) ? bare : path.resolve(cwd, bare);
+  if (!existsSync(abs)) return { ok: false };
+  if (isCodeFile(abs) && (await tryCode(abs))) return { ok: true, method: 'vscode' };
+  const err = await shell.openPath(abs);
+  return { ok: !err, method: err ? 'error' : 'default' };
 });
 
 /* -------------------- workspace (open tabs) -------------------- */

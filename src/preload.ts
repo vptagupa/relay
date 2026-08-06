@@ -73,8 +73,8 @@ const api = {
   providerDisconnect: (provider: ProviderId): Promise<{ ok: boolean }> => ipcRenderer.invoke('provider:disconnect', provider),
   // Infer { provider, repo } from a folder's git `origin` remote (null if not a recognized provider remote).
   providerRepoFromRemote: (dir: string): Promise<{ provider: ProviderId; repo: string } | null> => ipcRenderer.invoke('provider:repo-from-remote', dir),
-  // Pull a repo's open issues (normalized) for the given provider.
-  providerIssues: (provider: ProviderId, repo: string): Promise<{ ok: boolean; issues?: Issue[]; error?: string }> => ipcRenderer.invoke('provider:issues', { provider, repo }),
+  // Pull a repo's issues (normalized) for the given provider, filtered by state (default 'open').
+  providerIssues: (provider: ProviderId, repo: string, state: 'open' | 'closed' = 'open'): Promise<{ ok: boolean; issues?: Issue[]; error?: string }> => ipcRenderer.invoke('provider:issues', { provider, repo, state }),
   // List the connected user's repos/projects for the Sources picker.
   providerRepos: (provider: ProviderId): Promise<{ ok: boolean; repos?: { repo: string; desc: string; priv: boolean }[]; error?: string }> => ipcRenderer.invoke('provider:repos', provider),
   // Open PRs/MRs for a repo — to link an assigned issue's branch to its PR (review → ship).
@@ -100,6 +100,8 @@ const api = {
   // --- file browser ---
   fsList: (dir: string): Promise<{ path: string; parent: string; entries: { name: string; isDir: boolean }[]; truncated?: boolean; error?: string }> => ipcRenderer.invoke('fs:list', dir),
   fsOpen: (p: string): Promise<{ method: 'vscode' | 'default' | 'error'; error?: string }> => ipcRenderer.invoke('fs:open', p),
+  // Open a path a terminal printed, resolved against the tab's cwd (for clickable file-path links). No-op if it's not a real file.
+  revealPath: (cwd: string, target: string): Promise<{ ok: boolean; method?: string }> => ipcRenderer.invoke('fs:open-rel', { cwd, target }),
 
   // --- agent ---
   agentSend: (payload: { model: string; history: ChatTurn[]; userMessage: string }): Promise<void> =>
@@ -129,8 +131,9 @@ const api = {
     return () => ipcRenderer.off('win:state', h);
   },
 
-  // Write text to the OS clipboard via Electron (no focus / user-gesture requirement, unlike navigator.clipboard).
+  // Read/write the OS clipboard via Electron (no focus / user-gesture requirement, unlike navigator.clipboard).
   copyText: (text: string): void => clipboard.writeText(text),
+  readText: (): string => clipboard.readText(),
 
   // --- slayert:// deeplinks (main → renderer) ---
   onDeeplink: (cb: (intent: { kind: string; name: string }) => void) => {

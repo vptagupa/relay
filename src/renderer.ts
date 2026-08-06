@@ -1,5 +1,5 @@
 import '@xterm/xterm/css/xterm.css';
-import { Terminal } from '@xterm/xterm';
+import { Terminal, type ILink } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { SerializeAddon } from '@xterm/addon-serialize';
 import { MODELS, modelById } from './shared/models';
@@ -86,6 +86,40 @@ initBlockView(relay.sys as { user: string; host: string; home: string } | undefi
 function baseName(p: string): string { const s = p.replace(/[\\/]+$/, ''); const i = Math.max(s.lastIndexOf('\\'), s.lastIndexOf('/')); return (i >= 0 ? s.slice(i + 1) : s) || s; }
 
 /* ----------------------------- terminals ----------------------------- */
+// Make URLs and file paths the terminal prints clickable: a URL opens in the browser; a path opens the
+// file (resolved against the tab's cwd) in the editor/OS. Uses xterm's built-in registerLinkProvider +
+// OSC-8 linkHandler — no extra addon. Detection is per buffer line, so a link wrapped across rows isn't
+// matched (rare in a wide terminal). Non-file "paths" are guarded in main (existence check) — a stray
+// match just no-ops on click.
+const URL_RE = /\bhttps?:\/\/[^\s"'`<>()[\]{}|]+/g;
+const PATH_RE = /(?:(?:[A-Za-z]:[\\/]|~[\\/]|\.{1,2}[\\/]|[\\/])[\w.@+~-]+(?:[\\/][\w.@+~-]+)*|[\w.@+~-]+(?:[\\/][\w.@+~-]+)+)(?::\d+(?::\d+)?)?/g;
+const trimTrail = (s: string) => s.replace(/[).,;!?'"\]}]+$/, ''); // drop trailing punctuation but keep a :line suffix
+function wireTermLinks(term: Terminal, tab: Tab): void {
+  const openTarget = (uri: string) => { if (/^https?:\/\//i.test(uri)) relay.openExternal(uri); else void relay.revealPath(tab.cwd || '', uri.replace(/^file:\/\//i, '')); };
+  term.options.linkHandler = { activate: (_e, uri) => openTarget(uri), allowNonHttpProtocols: true }; // OSC-8 hyperlinks
+  term.registerLinkProvider({
+    provideLinks(y, callback) {
+      const bl = term.buffer.active.getLine(y - 1);
+      if (!bl) { callback(undefined); return; }
+      const text = bl.translateToString(false);
+      const links: ILink[] = [];
+      const spans: [number, number][] = [];
+      const push = (re: RegExp, activate: (t: string) => void) => {
+        re.lastIndex = 0;
+        for (let m = re.exec(text); m; m = re.exec(text)) {
+          const clean = trimTrail(m[0]); if (!clean) continue;
+          const s = m.index, e = s + clean.length;
+          if (spans.some(([a, b]) => s < b && e > a)) continue; // don't double-link (a URL's path etc.)
+          spans.push([s, e]);
+          links.push({ range: { start: { x: s + 1, y }, end: { x: e, y } }, text: clean, activate: (_ev, t) => activate(t) });
+        }
+      };
+      push(URL_RE, (t) => relay.openExternal(t));
+      push(PATH_RE, (t) => { void relay.revealPath(tab.cwd || '', t); });
+      callback(links.length ? links : undefined);
+    },
+  });
+}
 async function newTab(seed?: Partial<OpenTab> & { libId?: string; runCmd?: string }, activate = true): Promise<Tab> {
   // Don't open the same terminal twice — switch to it instead.
   if (seed?.id) { const ex = state.tabs.find((t) => t.id === seed.id); if (ex) { if (activate) switchTab(ex.id); return ex; } }
@@ -104,7 +138,18 @@ async function newTab(seed?: Partial<OpenTab> & { libId?: string; runCmd?: strin
   const tab: Tab = { id, name: seed?.name || (n > 1 ? `terminal ${n}` : 'terminal'), model: seed?.model || state.settings.defaultModel, cwd, libId: seed?.libId, term, fit, ser, el, tabBg: seed?.tabBg, tabFg: seed?.tabFg, bodyBg: seed?.bodyBg, bodyFg: seed?.bodyFg, chat: seed?.chat ? [...seed.chat] : [], blocks: seed?.blocks ? [...seed.blocks] : [], bkNonce: seed?.bkNonce || uid(), cmdHistory: [], histIdx: 0, liveInteractive: false, group };
   state.tabs.push(tab);
   applyTermColors(tab); // honor any restored per-terminal body/text colors
+  wireTermLinks(term, tab); // clickable URLs + file paths in the terminal
   term.onData((d) => relay.ptyWrite(id, d));
+  // Right-click in the terminal PASTES the clipboard (classic terminal paste). It's unconditional — NOT
+  // "copy if there's a selection", which would overwrite the clipboard when you meant to paste. Copy is
+  // handled by the selection pill and Ctrl+Shift+C. term.paste() routes through xterm so bracketed-paste
+  // works for TUIs (Claude Code, vim). Reads the Electron clipboard (relay.readText) — navigator.clipboard
+  // needs focus/permission and fails silently in the terminal, which is why right-click paste "didn't work".
+  el.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    const text = relay.readText();
+    if (text) { term.focus(); term.paste(text); }
+  });
   // Shift+Enter → send a literal newline so multiline TUIs (e.g. Claude Code) insert a line instead
   // of submitting; xterm otherwise emits the same \r as plain Enter. Plain Enter is unchanged.
   term.attachCustomKeyEventHandler((e) => {

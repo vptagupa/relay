@@ -86,8 +86,9 @@ const activeFilters = new Set<string>();        // active local-tag filter chips
 const activeLabels = new Set<string>();         // active provider-label filter chips (AND)
 let mineOnly = false;                            // "assigned to me" toggle
 let myLogin = '';                                // the connected provider login (for "assigned to me")
+let issueState: 'open' | 'closed' = 'open';      // which issues to pull (server-side); default open
 // The repo we're showing: this workspace's explicit pick wins, else it's inferred from its folder's remote.
-const activeKey = () => `${wsKey()}:${curRepo() || state.settings.workspace || ''}`;
+const activeKey = () => `${wsKey()}:${curRepo() || state.settings.workspace || ''}:${issueState}`;
 const runStatus = new Map<string, RunStatus>(); // "provider:repo#number" → run state (never bleeds across repos/providers)
 let prByBranch: Record<string, { url: string; draft: boolean }> = {}; // "issue-N" branch → its open PR/MR (review → ship)
 let lastKey: string | null = null; // the provider:repo the current filters/search belong to — reset them when it changes
@@ -179,8 +180,14 @@ function renderFilters(): void {
 
 function render(): void {
   const qN = queue.filter((q) => q.provider === provider && q.repo === repo).length; // queued-for-this-repo count
-  const count = phase === 'ready' ? `${repo} · ${issues.length} open${qN ? ` · ${qN} queued` : ''}` : repo;
+  const count = phase === 'ready' ? `${repo} · ${issues.length} ${issueState}${qN ? ` · ${qN} queued` : ''}` : repo;
   const repoEl = $('#issSideRepo'); if (repoEl) repoEl.textContent = (repo ? count : 'Select repo') + ' ▾';
+  // Open/Closed state toggle — visible whenever a repo is being shown; reflects the active state.
+  const stateEl = $('#issState'); if (stateEl) {
+    const showState = !!repo && (phase === 'ready' || phase === 'loading' || phase === 'error');
+    (stateEl as HTMLElement).style.display = showState ? '' : 'none';
+    stateEl.querySelectorAll<HTMLElement>('.iss-seg').forEach((b) => b.classList.toggle('on', b.dataset.st === issueState));
+  }
   const searchEl = $('#issSearch'); if (searchEl) (searchEl as HTMLElement).style.display = (phase === 'ready' && issues.length > 0) ? '' : 'none';
   renderFilters();
   const el = $('#issSideList'); if (!el) return;
@@ -189,7 +196,7 @@ function render(): void {
     `<div class="isr-empty"><div class="isr-ei">${icon}</div><div>${msg}</div>${sub ? `<div class="isr-es">${sub}</div>` : ''}</div>`;
 
   if (phase === 'loading') { el.innerHTML = `<div class="isr-empty"><div class="isr-spin"></div><div>Pulling issues…</div></div>`; return; }
-  if (phase === 'idle')    { el.innerHTML = hint('🎫', 'No issues pulled', 'Hit ⟳ to pull this repo’s open issues.'); return; }
+  if (phase === 'idle')    { el.innerHTML = hint('🎫', 'No issues pulled', 'Hit ⟳ to pull this repo’s issues.'); return; }
   if (phase === 'noauth')  {
     el.innerHTML = `<div class="isr-empty"><div class="isr-ei">🔗</div><div>Not connected to ${esc(pc.name)}</div><div class="isr-es">Authorize Slayer T to pull your issues.</div><button class="isr-connect" id="issConnect">Connect ${esc(pc.name)}</button></div>`;
     const b = document.getElementById('issConnect'); if (b) b.onclick = () => void connectProvider(provider);
@@ -197,17 +204,19 @@ function render(): void {
   }
   if (phase === 'norepo')  { el.innerHTML = hint('🗂️', 'No repo selected', esc(errMsg) || 'Pick a repo in Sources (⚙), or open a folder with a GitHub / GitLab / Bitbucket remote.'); return; }
   if (phase === 'error')   { el.innerHTML = hint('⚠️', 'Couldn’t pull issues', esc(errMsg)); return; }
-  if (!issues.length)      { el.innerHTML = hint('✓', 'No open issues', repo ? esc(repo) : ''); return; }
+  if (!issues.length)      { el.innerHTML = hint('✓', `No ${issueState} issues`, repo ? esc(repo) : ''); return; }
 
   const vis = visibleIssues();
   if (!vis.length) { el.innerHTML = hint('🔍', 'No matching issues', 'Clear the search or a filter.'); return; }
 
   el.innerHTML = vis.map((i) => {
     const st = statusOf(i.number); const tags = getTags(i.number);
-    return `<div class="isr" data-num="${i.number}" title="Assign #${i.number} to a coding agent">
+    // Only an idle issue in the OPEN view is assignable; closed / in-progress rows open the details view.
+    return `<div class="isr" data-num="${i.number}" title="${st === 'idle' && issueState === 'open' ? `Assign #${i.number} to a coding agent` : `View #${i.number} details`}">
       <div class="isr-hash">#${i.number}</div>
       <div class="isr-body">
         <div class="isr-title">${esc(i.title)}</div>
+        ${repo ? `<div class="isr-repo" title="${esc(repo)}">${esc(repo)}</div>` : ''}
         <div class="isr-labs">
           ${i.labels.map(labelHtml).join('')}
           ${tags.map((t) => `<span class="isr-tag" data-num="${i.number}" data-tag="${esc(t)}" title="Remove #${esc(t)}">#${esc(t)}<span class="x">×</span></span>`).join('')}
@@ -217,14 +226,19 @@ function render(): void {
       <div class="isr-side">
         <span class="isr-st ${st}" data-num="${i.number}"${st === 'queued' ? ' title="Click to remove from the queue"' : st === 'working' ? ' title="Click to free this slot (mark the run done)"' : ''}>${st}</span>
         ${prByBranch[`issue-${i.number}`] ? `<button class="isr-pr" data-url="${esc(prByBranch[`issue-${i.number}`].url)}" title="Open pull request">PR ↗</button>` : ''}
+        <button class="isr-info" data-num="${i.number}" title="View issue details">ⓘ</button>
         <button class="isr-ext" data-url="${esc(i.url)}" title="Open #${i.number} on ${esc(pc.name)}">↗</button>
       </div>
     </div>`;
   }).join('');
 
-  // Row click → assign. The ↗ opens on the provider; tag chips remove; + adds — all stop propagation.
+  // Row click: an IDLE issue → Assign; an ongoing one (queued/working/review) → view details (re-assigning
+  // an in-progress issue isn't the intent). The ↗ opens on the provider; ⓘ always opens details.
   el.querySelectorAll<HTMLElement>('.isr').forEach((r) => {
-    r.onclick = () => { const n = Number(r.dataset.num); const iss = issues.find((x) => x.number === n); if (iss) void openAssign(iss); };
+    r.onclick = () => { const n = Number(r.dataset.num); const iss = issues.find((x) => x.number === n); if (!iss) return; if (statusOf(n) === 'idle' && issueState === 'open') void openAssign(iss); else openDetails(iss); };
+  });
+  el.querySelectorAll<HTMLElement>('.isr-info').forEach((b) => {
+    b.onclick = (e) => { e.stopPropagation(); const n = Number(b.dataset.num); const iss = issues.find((x) => x.number === n); if (iss) openDetails(iss); };
   });
   el.querySelectorAll<HTMLElement>('.isr-ext, .isr-pr').forEach((b) => {
     b.onclick = (e) => { e.stopPropagation(); const u = b.dataset.url; if (u) relay.openExternal(u); };
@@ -271,9 +285,9 @@ export async function loadIssues(): Promise<void> {
   if (!repo) { phase = 'norepo'; errMsg = dir ? 'This folder’s git remote isn’t on a supported provider.' : 'No project folder is open.'; render(); return; }
   // Repo/provider switched → drop filters/search that belong to the previous one (they'd otherwise hide
   // every issue with no visible chip to clear). Run-status is provider+repo-keyed, no clearing needed.
-  const curKey = `${provider}:${repo}`;
+  const curKey = `${provider}:${repo}:${issueState}`;
   if (curKey !== lastKey) { lastKey = curKey; activeFilters.clear(); activeLabels.clear(); mineOnly = false; query = ''; const sEl = $('#issSearch') as HTMLInputElement | null; if (sEl) sEl.value = ''; }
-  const r = await relay.providerIssues(provider, repo); if (seq !== loadSeq) return;
+  const r = await relay.providerIssues(provider, repo, issueState); if (seq !== loadSeq) return;
   if (!r.ok) { phase = 'error'; errMsg = r.error || 'Could not pull issues'; render(); return; }
   issues = r.issues || []; phase = 'ready'; prByBranch = {}; render(); ensurePolling();
   // review → ship: light up issues whose issue-N branch already has an open PR/MR (best-effort, non-blocking).
@@ -385,6 +399,35 @@ const AGENTS: { id: string; name: string; bin: string; launch: (rel: string) => 
   { id: 'aider', name: 'Aider', bin: 'aider', launch: (rel) => `aider --message "Read ${rel} and implement the fix for the issue it describes in this repository, then summarize the changes."` },
   { id: 'antigravity', name: 'Antigravity', bin: 'antigravity', launch: (rel) => `antigravity "Read ${rel} and implement the fix it describes in this repository, then summarize the changes."` },
 ];
+
+// Read-only issue details — usable at any time, including while the issue is being worked on (its row
+// opens this instead of re-assigning). Shows the description + metadata + run status + PR/MR, and links
+// out; an idle issue also gets an Assign… shortcut.
+function openDetails(i: Issue): void {
+  const st = statusOf(i.number);
+  const canAssign = st === 'idle' && issueState === 'open'; // don't offer to assign a closed issue (or one already in progress)
+  const pc = PROVS[provider];
+  const prWord = provider === 'gitlab' ? 'MR' : 'PR';
+  const pr = prByBranch[`issue-${i.number}`];
+  const body = (i.body || '').trim();
+  const assignees = i.assignees || [];
+  const foot = st === 'working' ? 'Being worked on — its agent runs in a terminal tab.' : st === 'review' ? `A ${prWord} is open for this issue.` : st === 'queued' ? 'Queued — starts when a slot frees.' : '';
+  const { root, close } = modal(`<div class="tpl-card iss-card iss-det">
+      <div class="hd"><span class="dot" style="background:var(--accent)"></span><span class="t">Issue #${i.number}<small>${esc(i.title)}</small></span></div>
+      <div class="bd">
+        <div class="det-row"><span class="isr-st ${st}">${st}</span><span class="det-repo"><span class="src-dot ${pc.dot}"></span> ${esc(repo || '')}</span>${pr ? `<span class="det-pr">${prWord} open${pr.draft ? ' · draft' : ''}</span>` : ''}</div>
+        ${i.labels.length ? `<div class="det-labs">${i.labels.map(labelHtml).join('')}</div>` : ''}
+        ${assignees.length ? `<div class="det-meta"><span class="det-k">Assignees</span>${assignees.map((a) => esc(a)).join(', ')}</div>` : ''}
+        ${i.milestone ? `<div class="det-meta"><span class="det-k">Milestone</span>${esc(i.milestone)}</div>` : ''}
+        <div class="det-body">${body ? esc(body) : '<span class="mut">No description provided.</span>'}</div>
+      </div>
+      <div class="ft"><span class="hint">${foot}</span><span class="r">${pr ? `<button class="tpl-btn ghost" data-pr>Open ${prWord} ↗</button>` : ''}<button class="tpl-btn ghost" data-ext>Open on ${esc(pc.name)} ↗</button>${canAssign ? '<button class="tpl-btn pri" data-assign>⚡ Assign…</button>' : ''}<button class="tpl-btn ${canAssign ? 'ghost' : 'pri'}" data-x>${canAssign ? 'Close' : 'Done'}</button></span></div>
+    </div>`);
+  root.querySelector('[data-x]')?.addEventListener('click', close);
+  root.querySelector('[data-ext]')?.addEventListener('click', () => relay.openExternal(i.url));
+  root.querySelector('[data-pr]')?.addEventListener('click', () => { if (pr) relay.openExternal(pr.url); });
+  root.querySelector('[data-assign]')?.addEventListener('click', () => { close(); void openAssign(i); });
+}
 
 let assigning = false; // guard the whole create-worktree round-trip against a double submit
 async function openAssign(i: Issue): Promise<void> {
@@ -624,6 +667,10 @@ export function initIssues(d: IssuesDeps): void {
   const s = $('#issSearch') as HTMLInputElement | null; if (s) s.oninput = () => { query = s.value; render(); };
   const rsel = $('#issSideRepo'); if (rsel) rsel.onclick = (e) => { e.stopPropagation(); openRepoMenu(); };
   const srcBtn = $('#issSources'); if (srcBtn) srcBtn.onclick = () => void openSources();
+  // Open/Closed state filter — re-pull the repo with the chosen state (default open).
+  $('#issState')?.querySelectorAll<HTMLElement>('.iss-seg').forEach((b) => {
+    b.onclick = () => { const s = b.dataset.st === 'closed' ? 'closed' : 'open'; if (s === issueState) return; issueState = s; void loadIssues(); }; // loadIssues re-renders immediately
+  });
   render();
   void loadIssues();
 }
