@@ -863,6 +863,14 @@ body.tabdrag .dz{display:block;pointer-events:auto}
 .src-item .src-r{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .src-priv{font:9px/1.4 var(--mono);color:var(--muted);border:1px solid var(--border-strong);padding:0 5px;border-radius:999px;flex:none}
 .src-empty{font:11.5px var(--mono);color:var(--muted);padding:8px 4px}
+/* Bitbucket workspaces (CHANGE-2770 — cross-workspace discovery removed) */
+.src-ws{margin-top:9px}
+.src-ws-add{display:flex;gap:6px;align-items:center}
+.src-ws-add .iss-in{flex:1;margin:0}
+.src-ws-chips{display:flex;flex-wrap:wrap;gap:5px;margin-top:7px}
+.src-ws-chip{display:inline-flex;align-items:center;gap:5px;font:11px var(--mono);color:var(--text-dim);background:var(--surface-3);border:1px solid var(--border-strong);border-radius:999px;padding:2px 6px 2px 9px}
+.src-ws-x{border:0;background:none;color:var(--muted);cursor:pointer;font-size:13px;line-height:1;padding:0 1px}
+.src-ws-x:hover{color:var(--c-red,#ff6b6b)}
 /* GitHub connect (OAuth device flow) */
 .isr-connect{margin-top:8px;background:var(--accent);border:1px solid var(--accent);color:#fff;border-radius:8px;padding:6px 14px;font:600 11.5px var(--sans);cursor:pointer}
 .isr-connect:hover{filter:brightness(1.08)}

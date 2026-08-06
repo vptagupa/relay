@@ -3,8 +3,9 @@ import path from 'node:path';
 import os from 'node:os';
 import { promises as fsp, appendFileSync, existsSync, mkdirSync, copyFileSync, renameSync } from 'node:fs';
 import { exec, execFile } from 'node:child_process';
-import { createHash } from 'node:crypto';
-import { httpsReq, PROVIDERS, providerOf, providerFromRemote, type ProviderId } from './providers';
+import http from 'node:http';
+import { createHash, randomBytes } from 'node:crypto';
+import { httpsReq, PROVIDERS, providerOf, providerFromRemote, bitbucketExchangeCode, bitbucketAuthorizeUrl, bbOAuthConfigured, BB_OAUTH_PORT, BB_REDIRECT_URI, getOAuthApp, setOAuthApp, githubClientId, type ProviderId } from './providers';
 import { createTerm, writeTerm, resizeTerm, detachTerm, killTerm, killAll, isAltScreen } from './pty';
 import * as store from './store';
 import * as keys from './keys';
@@ -295,14 +296,18 @@ function runBin(bin: string, args: string[], opts: { cwd?: string; timeout?: num
 }
 
 // --- Git providers, app-owned auth --------------------------------------------------------------
-// GitHub connects via OAuth device flow (below); GitLab/Bitbucket via a pasted read-token. All REST +
-// token storage lives in providers.ts — the renderer only ever sees { connected, login } + normalized
-// issues/repos/PRs, never a token.
-const GH_CLIENT_ID = 'Ov23li0p7Bql1ilOiKXT'; // public OAuth App client id (device flow uses NO secret)
+// GitHub connects via OAuth device flow and Bitbucket via OAuth authorization-code + loopback (both below);
+// GitLab via a pasted PAT. All REST + token storage lives in providers.ts — the renderer only ever sees
+// { connected, login } + normalized issues/repos/PRs, never a token.
+// GitHub's OAuth App client id is supplied once in-app (Sources → Connect) and stored encrypted — not
+// hardcoded. It's a PUBLIC value (the device flow uses no secret), but keeping it out of source lets each
+// install point at its own OAuth App. The app must have "Device Flow" enabled in its GitHub settings.
 
 // Start the GitHub OAuth device flow: returns the one-time user code + verification URL for the renderer.
 ipcMain.handle('github:device-start', async () => {
-  const r = await httpsReq('github.com', '/login/device/code', 'POST', { Accept: 'application/json', 'Content-Type': 'application/x-www-form-urlencoded' }, `client_id=${GH_CLIENT_ID}&scope=repo`);
+  const clientId = await githubClientId();
+  if (!clientId) return { ok: false, error: 'GitHub OAuth app is not configured', needsConfig: true };
+  const r = await httpsReq('github.com', '/login/device/code', 'POST', { Accept: 'application/json', 'Content-Type': 'application/x-www-form-urlencoded' }, `client_id=${encodeURIComponent(clientId)}&scope=repo`);
   try {
     const j = JSON.parse(r.text) as Record<string, unknown>;
     if (j.device_code) return { ok: true, userCode: String(j.user_code || ''), verificationUri: String(j.verification_uri || 'https://github.com/login/device'), deviceCode: String(j.device_code), interval: Number(j.interval) || 5, expiresIn: Number(j.expires_in) || 900 };
@@ -312,7 +317,9 @@ ipcMain.handle('github:device-start', async () => {
 // One poll of the token endpoint. The renderer loops this on the interval until it's no longer pending.
 ipcMain.handle('github:device-poll', async (_e, { deviceCode }: { deviceCode: string }) => {
   if (typeof deviceCode !== 'string' || !deviceCode) return { status: 'error', error: 'bad request' };
-  const r = await httpsReq('github.com', '/login/oauth/access_token', 'POST', { Accept: 'application/json', 'Content-Type': 'application/x-www-form-urlencoded' }, `client_id=${GH_CLIENT_ID}&device_code=${deviceCode}&grant_type=urn:ietf:params:oauth:grant-type:device_code`);
+  const clientId = await githubClientId();
+  if (!clientId) return { status: 'error', error: 'GitHub OAuth app is not configured' };
+  const r = await httpsReq('github.com', '/login/oauth/access_token', 'POST', { Accept: 'application/json', 'Content-Type': 'application/x-www-form-urlencoded' }, `client_id=${encodeURIComponent(clientId)}&device_code=${deviceCode}&grant_type=urn:ietf:params:oauth:grant-type:device_code`);
   let j: Record<string, unknown> = {}; try { j = JSON.parse(r.text) as Record<string, unknown>; } catch { /* */ }
   if (j.access_token) {
     await keys.setSecret('github_oauth', String(j.access_token));   // encrypted in the OS keychain
@@ -326,6 +333,54 @@ ipcMain.handle('github:device-poll', async (_e, { deviceCode }: { deviceCode: st
   if (err === 'expired_token') return { status: 'expired' };
   if (err === 'access_denied') return { status: 'denied' };
   return { status: 'error', error: String(j.error_description || err || 'authorization failed') };
+});
+
+// Bitbucket connect — OAuth 2.0 authorization-code with a LOOPBACK redirect (Bitbucket Cloud has no device
+// flow). One IPC does the whole round trip: spin a one-shot localhost server on the consumer's callback port,
+// open the system browser to the authorize page (with a CSRF `state`), catch the `?code` callback, hand it to
+// providers.bitbucketExchangeCode (which owns the secret + token storage), and resolve. The renderer only ever
+// sees { ok, login } — never a token. Resolves once: on success, denial, timeout, or a port/exchange error.
+ipcMain.handle('bitbucket:oauth', async () => {
+  if (!(await bbOAuthConfigured())) return { ok: false, error: 'Bitbucket OAuth app is not configured' };
+  return new Promise<{ ok: boolean; login?: string; error?: string }>((resolve) => {
+  let settled = false;
+  const state = randomBytes(16).toString('hex');
+  const page = (title: string, sub: string) => `<!doctype html><meta charset="utf-8"><title>Slayer T</title>` +
+    `<body style="font:15px/1.5 system-ui,Segoe UI,sans-serif;background:#0f1115;color:#e6e6e6;display:grid;place-items:center;height:100vh;margin:0">` +
+    `<div style="text-align:center;max-width:380px"><div style="font-size:34px">🔗</div><h2 style="margin:.4em 0 .2em">${title}</h2><p style="opacity:.7;margin:0">${sub}</p></div>`;
+  const finish = (v: { ok: boolean; login?: string; error?: string }) => {
+    if (settled) return; settled = true;
+    clearTimeout(timer); try { server.close(); } catch { /* already closed */ }
+    resolve(v);
+  };
+  const server = http.createServer(async (req, res) => {
+    try {
+      const url = new URL(req.url || '/', BB_REDIRECT_URI);
+      const code = url.searchParams.get('code');
+      const gotState = url.searchParams.get('state');
+      const err = url.searchParams.get('error_description') || url.searchParams.get('error');
+      // Handle the OAuth result on ANY path (the consumer callback is a portless http://localhost, so Bitbucket
+      // may land on '/' rather than '/callback'); ignore incidental hits like /favicon.ico that carry no code.
+      if (!code && !err) { res.writeHead(404); res.end('Not found'); return; }
+      if (err) { res.writeHead(200, { 'Content-Type': 'text/html' }); res.end(page('Authorization failed', 'You can close this tab and return to Slayer T.')); finish({ ok: false, error: String(err) }); return; }
+      if (!code || gotState !== state) { res.writeHead(400, { 'Content-Type': 'text/html' }); res.end(page('Invalid response', 'The sign-in could not be verified. Close this tab and try again.')); finish({ ok: false, error: 'Invalid authorization response (state mismatch)' }); return; }
+      // Answer the browser before the (slower) token exchange so the tab shows success promptly.
+      res.writeHead(200, { 'Content-Type': 'text/html' }); res.end(page('Connected to Bitbucket ✓', 'You can close this tab and return to Slayer T.'));
+      finish(await bitbucketExchangeCode(code, BB_REDIRECT_URI));
+    } catch { try { res.writeHead(500); res.end('error'); } catch { /* */ } finish({ ok: false, error: 'Callback handling error' }); }
+  });
+  server.on('error', (e: NodeJS.ErrnoException) => finish({ ok: false, error: e?.code === 'EADDRINUSE' ? `Port ${BB_OAUTH_PORT} is in use — close whatever is using it and try again.` : 'Could not start the local sign-in server' }));
+  const timer = setTimeout(() => finish({ ok: false, error: 'Timed out waiting for authorization' }), 300000); // 5 min
+  server.listen(BB_OAUTH_PORT, '127.0.0.1', async () => { void shell.openExternal(await bitbucketAuthorizeUrl(state)); });
+  });
+});
+
+// OAuth-app config (the provider's client id / secret used to START its login flow). Read returns the public
+// client id + a hasSecret flag, never the secret. Write validates + stores encrypted in the OS keychain.
+ipcMain.handle('provider:oauth-config-get', async (_e, id: ProviderId) => (await getOAuthApp(id)) || { clientId: '', hasSecret: false, needsSecret: false, configured: false });
+ipcMain.handle('provider:oauth-config-set', async (_e, p: { provider: ProviderId; clientId: string; secret?: string }) => {
+  const a = providerOf(p?.provider); if (!a) return { ok: false, error: 'Unknown provider' };
+  return setOAuthApp(p.provider, typeof p?.clientId === 'string' ? p.clientId : '', typeof p?.secret === 'string' ? p.secret : undefined);
 });
 
 // --- generic provider handlers (dispatch to the registry in providers.ts) ---
@@ -358,7 +413,7 @@ ipcMain.handle('provider:issues', async (_e, p: { provider: ProviderId; repo: st
   if (!validRepo(p?.repo)) return { ok: false, error: 'Invalid repository' };
   return a.issues(p.repo, p?.state === 'closed' ? 'closed' : 'open');
 });
-ipcMain.handle('provider:repos', async (_e, id: ProviderId) => (await providerOf(id)?.repos()) || badProvider);
+ipcMain.handle('provider:repos', async (_e, p: { provider: ProviderId; workspaces?: string[] }) => (await providerOf(p?.provider)?.repos({ workspaces: Array.isArray(p?.workspaces) ? p.workspaces : undefined })) || badProvider);
 ipcMain.handle('provider:prs', async (_e, p: { provider: ProviderId; repo: string }) => {
   const a = providerOf(p?.provider); if (!a) return badProvider;
   if (!validRepo(p?.repo)) return { ok: false, error: 'Invalid repository' };

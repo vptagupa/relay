@@ -6,7 +6,11 @@
 // Auth model per provider:
 //  • GitHub    — OAuth device-flow token ('github_oauth'), Bearer.        (connect handled in main.ts)
 //  • GitLab    — Personal Access Token ('gitlab_pat'), PRIVATE-TOKEN header; custom host in 'gitlab_host'.
-//  • Bitbucket — App Password as "user:app_password" ('bitbucket_pat'), HTTP Basic.
+//  • Bitbucket — OAuth 2.0 authorization-code + loopback redirect (Bitbucket Cloud has NO device flow and
+//                NO PKCE, so a confidential consumer secret ships in the app — an accepted "public secret").
+//                Access token 'bitbucket_oauth' (Bearer), refresh 'bitbucket_refresh', expiry 'bitbucket_expires'
+//                (epoch ms). Access tokens live ~2h, so we auto-refresh. The loopback dance lives in main.ts;
+//                token exchange + refresh live here. (App passwords were removed by Atlassian on 2026-07-28.)
 import * as https from 'node:https';
 import * as keys from './keys';
 import type { Issue } from './shared/types';
@@ -17,6 +21,7 @@ export const PROVIDER_IDS: ProviderId[] = ['github', 'gitlab', 'bitbucket'];
 const isProvider = (s: unknown): s is ProviderId => typeof s === 'string' && (PROVIDER_IDS as string[]).includes(s);
 
 export interface RepoRow { repo: string; desc: string; priv: boolean; }
+export interface RepoListOpts { workspaces?: string[]; } // Bitbucket lists per workspace (CHANGE-2770); others ignore this
 export interface PrRow { number: number; branch: string; url: string; draft: boolean; }
 interface ApiResult { ok: boolean; status: number; json: unknown; }
 
@@ -183,13 +188,90 @@ const gitlab = {
 };
 
 /* ============================== Bitbucket ============================== */
+// Bitbucket Cloud OAuth 2.0 consumer (CONFIDENTIAL). Bitbucket Cloud offers neither the device flow nor
+// PKCE, so the authorization-code grant needs a client secret. Rather than bake it into the binary, the
+// consumer Key + Secret are supplied ONCE in the app and stored encrypted in the OS keychain (via the
+// generic OAuth-app config below) — nothing sensitive lives in source or git. Create the consumer at
+// Bitbucket → Workspace settings → OAuth consumers|clients with callback http://localhost and permissions
+// Account/Repositories/Issues/Pull requests → Read, then paste its Key/Secret in the Connect dialog.
+//
+// REDIRECT: Atlassian's identity server (id.atlassian.com) matches the redirect_uri BYTE-FOR-BYTE against the
+// registered callback and does NOT allow an arbitrary loopback port — and its form won't register a portful
+// localhost. So we register the bare `http://localhost` and listen on its default port (80), sending exactly
+// that as redirect_uri. The auth code arrives as a query on the root path (handled path-agnostically in main).
+export const BB_OAUTH_PORT = 80;                                     // default port for http://localhost
+export const BB_REDIRECT_URI = 'http://localhost';                  // MUST equal the registered callback exactly
+const bbClientId = () => keys.getSecret('bitbucket_client_id');
+const bbClientSecret = () => keys.getSecret('bitbucket_client_secret');
+export const bbOAuthConfigured = async (): Promise<boolean> => !!(await bbClientId()) && !!(await bbClientSecret());
+export async function bitbucketAuthorizeUrl(state: string): Promise<string> {
+  const id = (await bbClientId()) || '';
+  return `https://bitbucket.org/site/oauth2/authorize?client_id=${encodeURIComponent(id)}&response_type=code&state=${encodeURIComponent(state)}&redirect_uri=${encodeURIComponent(BB_REDIRECT_URI)}`;
+}
+
+// POST the Bitbucket token endpoint (Basic client_id:secret). On success, persist access + refresh + a
+// pre-expiry deadline (renew 60s early). Returns the HTTP status so callers can tell a revoked grant
+// (4xx → clear) from a network blip (status 0 → keep the tokens and retry later).
+async function bbTokenRequest(body: string): Promise<{ ok: boolean; status: number; error?: string }> {
+  const id = await bbClientId(); const secret = await bbClientSecret();
+  if (!id || !secret) return { ok: false, status: 0, error: 'Bitbucket OAuth app is not configured' };
+  const auth = 'Basic ' + Buffer.from(`${id}:${secret}`, 'utf8').toString('base64');
+  const r = await httpsReq('bitbucket.org', '/site/oauth2/access_token', 'POST',
+    { Authorization: auth, 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' }, body);
+  let j: Record<string, unknown> = {}; try { j = JSON.parse(r.text) as Record<string, unknown>; } catch { /* non-json */ }
+  if (j.access_token) {
+    await keys.setSecret('bitbucket_oauth', String(j.access_token));
+    if (j.refresh_token) await keys.setSecret('bitbucket_refresh', String(j.refresh_token)); // a refresh keeps the old one if none returned
+    const ttl = Number(j.expires_in) || 7200;                        // Bitbucket access tokens live ~2h
+    await keys.setSecret('bitbucket_expires', String(Date.now() + Math.max(60, ttl - 60) * 1000));
+    return { ok: true, status: r.status };
+  }
+  return { ok: false, status: r.status, error: String(j.error_description || j.error || `token request failed (HTTP ${r.status})`) };
+}
+
+// Exchange an authorization code for tokens (called by the main-process loopback handler after the browser
+// callback). redirectUri MUST equal the one sent to /authorize.
+export async function bitbucketExchangeCode(code: string, redirectUri: string): Promise<{ ok: boolean; login?: string; error?: string }> {
+  const t = await bbTokenRequest(`grant_type=authorization_code&code=${encodeURIComponent(code)}&redirect_uri=${encodeURIComponent(redirectUri)}`);
+  if (!t.ok) return { ok: false, error: t.error };
+  const s = await bitbucket.authState();
+  return s.connected ? { ok: true, login: s.login } : { ok: false, error: 'Authorized, but the token was rejected' };
+}
+
+// Refresh the access token, coalescing concurrent callers onto one in-flight request. A 4xx means the
+// refresh token is dead (revoked/expired) → disconnect so authState reports a clean "not connected"
+// instead of looping; a network failure (status 0) leaves the tokens for the next attempt.
+let bbRefreshInFlight: Promise<boolean> | null = null;
+async function bbRefresh(): Promise<boolean> {
+  if (bbRefreshInFlight) return bbRefreshInFlight;
+  bbRefreshInFlight = (async () => {
+    const refresh = await keys.getSecret('bitbucket_refresh');
+    if (!refresh) return false;
+    const r = await bbTokenRequest(`grant_type=refresh_token&refresh_token=${encodeURIComponent(refresh)}`);
+    if (!r.ok && r.status >= 400 && r.status < 500) await bitbucket.disconnect();
+    return r.ok;
+  })().finally(() => { bbRefreshInFlight = null; });
+  return bbRefreshInFlight;
+}
+// The current access token, proactively refreshed once it's within the pre-expiry window.
+async function bbAccessToken(): Promise<string | null> {
+  const token = await keys.getSecret('bitbucket_oauth');
+  if (!token) return null;
+  const exp = Number(await keys.getSecret('bitbucket_expires')) || 0;
+  if (exp && Date.now() >= exp) { await bbRefresh(); return keys.getSecret('bitbucket_oauth'); }
+  return token;
+}
 async function bbHeaders(): Promise<Record<string, string> | null> {
-  const token = await keys.getSecret('bitbucket_pat'); // stored as "username:app_password"
-  return token ? { Authorization: 'Basic ' + Buffer.from(token, 'utf8').toString('base64') } : null;
+  const token = await bbAccessToken();
+  return token ? { Authorization: `Bearer ${token}` } : null;
 }
 async function bbApi(pathname: string): Promise<ApiResult> {
-  const h = await bbHeaders(); if (!h) return { ok: false, status: 401, json: null };
-  return apiGet('api.bitbucket.org', pathname, h);
+  let h = await bbHeaders(); if (!h) return { ok: false, status: 401, json: null };
+  let r = await apiGet('api.bitbucket.org', pathname, h);
+  if (r.status === 401) {                                            // token went stale early — force one refresh + retry
+    if (await bbRefresh()) { h = await bbHeaders(); if (h) r = await apiGet('api.bitbucket.org', pathname, h); }
+  }
+  return r;
 }
 const OPEN_BB = new Set(['new', 'open']); // Bitbucket issue states that count as "open"
 const bitbucket = {
@@ -230,23 +312,44 @@ const bitbucket = {
     });
     return { ok: true, issues };
   },
-  async repos(): Promise<{ ok: boolean; repos?: RepoRow[]; error?: string }> {
+  // CHANGE-2770 (2026-04-14): Atlassian PERMANENTLY REMOVED every cross-workspace listing —
+  // GET /2.0/repositories, GET /2.0/workspaces, and GET /2.0/user/permissions/workspaces all return HTTP 410
+  // now, so the API can no longer discover which workspaces a user belongs to. The only surviving path is the
+  // per-workspace list GET /2.0/repositories/{workspace}, so the user supplies their workspace ids (opts.workspaces)
+  // and we list each. A workspace that errors is skipped; its error surfaces only if nothing loaded at all.
+  async repos(opts?: RepoListOpts): Promise<{ ok: boolean; repos?: RepoRow[]; error?: string }> {
+    const workspaces = (opts?.workspaces || []).map((w) => w.trim()).filter(Boolean);
+    if (!workspaces.length) return { ok: false, error: 'Add your Bitbucket workspace first (the “workspace” in bitbucket.org/<workspace>/<repo>). Atlassian removed cross-workspace repo discovery (CHANGE-2770), so repos are listed per workspace.' };
     const out: RepoRow[] = [];
-    for (let page = 1; page <= 4; page++) {
-      const r = await bbApi(`/2.0/repositories?role=member&pagelen=100&page=${page}&sort=-updated_on`);
-      if (!r.ok || !Array.isArray(asObj(r.json).values)) {
-        if (page > 1) break;
-        return { ok: false, error: r.status === 401 ? 'Not connected to Bitbucket' : 'Could not list repositories' };
+    let lastErr = '';
+    for (const ws of workspaces) {
+      for (let page = 1; page <= 4; page++) {
+        const r = await bbApi(`/2.0/repositories/${encodeURIComponent(ws)}?role=member&pagelen=100&page=${page}&sort=-updated_on`);
+        if (!r.ok || !Array.isArray(asObj(r.json).values)) {
+          if (page > 1) break;
+          const msg = str(asObj(asObj(r.json).error).message);
+          if (r.status === 401) return { ok: false, error: 'Not connected — reconnect Bitbucket in Sources.' };
+          lastErr = r.status === 404
+            ? `Workspace “${ws}” not found (HTTP 404) — check the exact workspace id (bitbucket.org/<workspace>).`
+            : r.status === 403
+              ? `No access to “${ws}” (HTTP 403)${msg ? ' — ' + msg : ''}. Ensure the OAuth client has Repositories → Read.`
+              : `${msg || 'Could not list repositories'} for “${ws}” (HTTP ${r.status})`;
+          break;
+        }
+        const arr = asArr(asObj(r.json).values);
+        for (const x of arr) out.push({ repo: str(x.full_name), desc: str(x.description), priv: !!x.is_private });
+        if (arr.length < 100) break;
       }
-      const arr = asArr(asObj(r.json).values);
-      for (const x of arr) out.push({ repo: str(x.full_name), desc: str(x.description), priv: !!x.is_private });
-      if (arr.length < 100) break;
     }
+    if (!out.length && lastErr) return { ok: false, error: lastErr };
     return { ok: true, repos: out.filter((x) => x.repo.includes('/')) };
   },
   async prs(repo: string): Promise<{ ok: boolean; prs?: PrRow[]; error?: string }> {
     const r = await bbApi(`/2.0/repositories/${repo}/pullrequests?state=OPEN&pagelen=50`);
-    if (!r.ok || !Array.isArray(asObj(r.json).values)) return { ok: false, error: 'Could not list pull requests' };
+    if (!r.ok || !Array.isArray(asObj(r.json).values)) {
+      const msg = str(asObj(asObj(r.json).error).message);
+      return { ok: false, error: `${msg || 'Could not list pull requests'} (HTTP ${r.status})` };
+    }
     const prs = asArr(asObj(r.json).values).map((p) => ({
       number: Number(p.id) || 0, branch: str(asObj(asObj(p.source).branch).name), url: str(asObj(asObj(p.links).html).href), draft: false,
     })).filter((p) => p.branch);
@@ -259,20 +362,24 @@ const bitbucket = {
   async cloneUrl(repo: string): Promise<string> { return `https://bitbucket.org/${repo}.git`; },
   cli: undefined as string | undefined, // no ubiquitous first-party CLI — clone via git + the OS credential helper
   cliCloneArgs: undefined as ((repo: string, dest: string) => string[]) | undefined,
-  async connect(token: string): Promise<{ ok: boolean; login?: string; error?: string }> {
-    if (!/.:./.test(token)) return { ok: false, error: 'Use "username:app_password"' };
-    await keys.setSecret('bitbucket_pat', token);
-    const s = await bitbucket.authState();
-    return s.connected ? { ok: true, login: s.login } : { ok: false, error: 'Rejected — check the username and app-password scopes (Account read, Issues read, PRs read)' };
+  // Bitbucket connects through the browser (OAuth loopback in main.ts), not a pasted token. This exists to
+  // honor the Adapter contract; the generic provider:connect IPC routes here only if something calls it.
+  async connect(): Promise<{ ok: boolean; login?: string; error?: string }> {
+    return { ok: false, error: 'Bitbucket connects in your browser — use "Connect Bitbucket".' };
   },
-  async disconnect(): Promise<void> { await keys.setSecret('bitbucket_pat', ''); },
+  async disconnect(): Promise<void> {
+    await keys.setSecret('bitbucket_oauth', '');
+    await keys.setSecret('bitbucket_refresh', '');
+    await keys.setSecret('bitbucket_expires', '');
+    await keys.setSecret('bitbucket_pat', '');   // clear any legacy app-password too
+  },
 };
 
 /* ============================== registry ============================== */
 export interface Adapter {
   authState(): Promise<{ connected: boolean; login?: string }>;
   issues(repo: string, state?: IssueState): Promise<{ ok: boolean; issues?: Issue[]; error?: string }>;
-  repos(): Promise<{ ok: boolean; repos?: RepoRow[]; error?: string }>;
+  repos(opts?: RepoListOpts): Promise<{ ok: boolean; repos?: RepoRow[]; error?: string }>;
   prs(repo: string): Promise<{ ok: boolean; prs?: PrRow[]; error?: string }>;
   repoFromRemote(url: string): string | null;
   cloneUrl(repo: string): Promise<string>;
@@ -290,3 +397,41 @@ export function providerFromRemote(url: string): { provider: ProviderId; repo: s
   for (const id of PROVIDER_IDS) { const repo = PROVIDERS[id].repoFromRemote(url); if (repo) return { provider: id, repo }; }
   return null;
 }
+
+/* ============================== OAuth-app config (runtime, encrypted) ==============================
+// The OAuth *app* credentials a provider needs to start its login flow live in the OS keychain, entered
+// once in-app — never hardcoded in source. GitHub's device flow needs only a public client id; Bitbucket's
+// authorization-code flow needs a client id + secret. Stored under `<provider>_client_id` / `_client_secret`.
+// The secret is write-only across the IPC boundary: getOAuthApp returns the (public) client id + a hasSecret
+// flag, never the secret itself. */
+interface OAuthAppNeed { needsSecret: boolean; }
+const OAUTH_APP: Partial<Record<ProviderId, OAuthAppNeed>> = { github: { needsSecret: false }, bitbucket: { needsSecret: true } };
+export const providerNeedsOAuthApp = (id: ProviderId): boolean => id in OAUTH_APP;
+export interface OAuthAppState { clientId: string; hasSecret: boolean; needsSecret: boolean; configured: boolean; }
+// Read the stored OAuth-app config for a provider (null if the provider doesn't use one). Never returns the secret.
+export async function getOAuthApp(id: ProviderId): Promise<OAuthAppState | null> {
+  const spec = OAUTH_APP[id]; if (!spec) return null;
+  const clientId = (await keys.getSecret(`${id}_client_id`)) || '';
+  const hasSecret = !!(await keys.getSecret(`${id}_client_secret`));
+  return { clientId, hasSecret, needsSecret: spec.needsSecret, configured: !!clientId && (!spec.needsSecret || hasSecret) };
+}
+// Store the OAuth-app config. A blank secret keeps the previously-stored one (so editing the id alone is fine),
+// but the first save of a secret-requiring provider must include one.
+export async function setOAuthApp(id: ProviderId, clientId: string, secret?: string): Promise<{ ok: boolean; error?: string }> {
+  const spec = OAUTH_APP[id]; if (!spec) return { ok: false, error: 'This provider has no OAuth app to configure' };
+  const cid = (clientId || '').trim(); if (!cid) return { ok: false, error: 'Client ID is required' };
+  if (spec.needsSecret) {
+    const sec = (secret || '').trim();
+    if (!sec && !(await keys.getSecret(`${id}_client_secret`))) return { ok: false, error: 'Client secret is required' };
+    if (sec) await keys.setSecret(`${id}_client_secret`, sec);
+  }
+  await keys.setSecret(`${id}_client_id`, cid);
+  return { ok: true };
+}
+// Clear the OAuth-app config (does not touch the connection tokens — call provider.disconnect() for those).
+export async function clearOAuthApp(id: ProviderId): Promise<void> {
+  await keys.setSecret(`${id}_client_id`, '');
+  await keys.setSecret(`${id}_client_secret`, '');
+}
+// GitHub's device flow reads its client id here (main.ts owns the flow but not the key store).
+export const githubClientId = (): Promise<string | null> => keys.getSecret('github_client_id');

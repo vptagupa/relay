@@ -39,16 +39,34 @@ async function setTracked(list: string[], activeQid: string): Promise<void> {
 
 /* ----------------------------- providers (renderer-side display + brief config) ----------------------------- */
 type ProviderId = 'github' | 'gitlab' | 'bitbucket';
+// The one-time OAuth *app* a provider's login flow needs (client id, + secret for Bitbucket). Entered once
+// in-app, stored encrypted in main — never in source. Absent for providers that don't use one (GitLab).
+interface OAuthAppCfg {
+  needsSecret: boolean;
+  title: string;                                          // dialog title
+  idLabel: string; idPh: string;                          // client-id field
+  secretLabel?: string; secretPh?: string;                // secret field (when needsSecret)
+  help: string;                                           // trusted static HTML: where to create the app
+  createUrl?: string;                                     // optional "Create one ↗" deep-link
+}
 interface ProvCfg {
   id: ProviderId; name: string; dot: string;              // dot = css class suffix (gh/gl/bb) for the colored dot
-  connect: 'device' | 'token';                            // GitHub = OAuth device flow; others = pasted token
+  connect: 'device' | 'token' | 'browser';               // GitHub = OAuth device flow; Bitbucket = OAuth in-browser; GitLab = pasted token
   tokenLabel?: string; tokenHint?: string; tokenPh?: string; needsHost?: boolean;
+  oauthApp?: OAuthAppCfg;                                 // present when connect needs a configured OAuth app first
   // step-4 instruction for the agent brief: how to open the PR/MR and close the issue on merge.
   closeStep: (n: number) => string;
 }
 const PROVS: Record<ProviderId, ProvCfg> = {
   github: {
     id: 'github', name: 'GitHub', dot: 'gh', connect: 'device',
+    oauthApp: {
+      needsSecret: false,
+      title: 'GitHub OAuth app',
+      idLabel: 'Client ID', idPh: 'Iv1.… / Ov23li…',
+      help: 'Create a GitHub OAuth App (Settings → Developer settings → OAuth Apps → New OAuth App), turn ON <b>Enable Device Flow</b>, and paste its <b>Client ID</b>. No client secret is needed.',
+      createUrl: 'https://github.com/settings/developers',
+    },
     closeStep: (n) => `open a pull request with \`gh pr create\`, and put the exact line \`Closes #${n}\` in the PR body. That keyword-immediately-before-#number form is what makes GitHub close this issue automatically when the PR merges — do NOT wrap it in other words or markdown (e.g. \`Closes the ... of **#${n}**\` will NOT close it).`,
   },
   gitlab: {
@@ -58,9 +76,14 @@ const PROVS: Record<ProviderId, ProvCfg> = {
     closeStep: (n) => `open a merge request with \`glab mr create\`, and put the exact line \`Closes #${n}\` in the MR description. That keyword-immediately-before-#number form is what makes GitLab close this issue when the MR merges — do NOT wrap it in other words or markdown.`,
   },
   bitbucket: {
-    id: 'bitbucket', name: 'Bitbucket', dot: 'bb', connect: 'token',
-    tokenLabel: 'Username : App Password', tokenPh: 'username:app_password',
-    tokenHint: 'Format "username:app_password". Create an App Password (Account read, Issues read/write, Pull requests read/write) at Bitbucket → Personal settings → App passwords.',
+    id: 'bitbucket', name: 'Bitbucket', dot: 'bb', connect: 'browser',
+    oauthApp: {
+      needsSecret: true,
+      title: 'Bitbucket OAuth client',
+      idLabel: 'Key (Client ID)', idPh: 'consumer key',
+      secretLabel: 'Secret', secretPh: 'consumer secret',
+      help: 'Create an OAuth consumer/client (Bitbucket → Workspace settings → OAuth consumers). Callback URL: <code>http://localhost</code>. Permissions: Account, Repositories, Issues, Pull requests → <b>Read</b>. Paste its Key + Secret.',
+    },
     closeStep: (n) => `push the branch and open a pull request in Bitbucket. To close the issue automatically, put the exact line \`Closes #${n}\` in a COMMIT message on the branch — Bitbucket closes issues from smart-commit messages, not from the PR description.`,
   },
 };
@@ -912,8 +935,84 @@ function openRepoMenu(): void {
   setTimeout(() => document.addEventListener('click', closeRepoMenu, { once: true }), 0);
 }
 
-// Route the right connect flow for a provider: GitHub → OAuth device flow; others → pasted-token dialog.
-function connectProvider(pid: ProviderId): void { if (PROVS[pid].connect === 'device') void connectGithub(); else void connectToken(pid); }
+// Route the right connect flow for a provider: GitHub → OAuth device flow; Bitbucket → OAuth in-browser;
+// GitLab → pasted-token dialog. The two OAuth flows first ensure their app (client id / secret) is set up.
+function connectProvider(pid: ProviderId): void {
+  const mode = PROVS[pid].connect;
+  if (mode === 'token') { void connectToken(pid); return; }
+  void ensureOAuthApp(pid).then((ok) => { if (ok) (mode === 'device' ? connectGithub() : connectBitbucket()); });
+}
+
+// Make sure the provider's OAuth app is configured before a device/browser connect. Returns false if the
+// user cancels the one-time setup. Providers without an oauthApp (GitLab) pass straight through.
+async function ensureOAuthApp(pid: ProviderId): Promise<boolean> {
+  if (!PROVS[pid].oauthApp) return true;
+  const cur = await relay.providerOAuthConfigGet(pid).catch(() => null);
+  if (cur && cur.configured) return true;
+  return configOAuthApp(pid);
+}
+
+// One-time OAuth-app setup dialog: collect the client id (+ secret for Bitbucket), store encrypted in main.
+// Resolves true once saved, false if cancelled. Also used from Sources to re-enter/rotate credentials.
+function configOAuthApp(pid: ProviderId): Promise<boolean> {
+  const cfg = PROVS[pid].oauthApp; if (!cfg) return Promise.resolve(true);
+  return new Promise<boolean>((resolve) => {
+    let done = false; const settle = (v: boolean) => { if (!done) { done = true; resolve(v); } };
+    void relay.providerOAuthConfigGet(pid).catch(() => ({ clientId: '', hasSecret: false })).then((cur: { clientId: string; hasSecret: boolean }) => {
+      const { root, close } = modal(`<div class="tpl-card iss-card">
+          <div class="hd"><span class="dot" style="background:var(--accent)"></span><span class="t">${esc(cfg.title)}<small>one-time setup · stored encrypted</small></span></div>
+          <div class="bd">
+            <label class="iss-lbl">${esc(cfg.idLabel)}</label>
+            <input class="iss-in" id="oaId" value="${esc(cur.clientId || '')}" placeholder="${esc(cfg.idPh)}" spellcheck="false" autocomplete="off">
+            ${cfg.needsSecret ? `<label class="iss-lbl">${esc(cfg.secretLabel || 'Secret')}</label>
+            <input class="iss-in" id="oaSec" type="password" placeholder="${cur.hasSecret ? '•••••••• — leave blank to keep' : esc(cfg.secretPh || '')}" spellcheck="false" autocomplete="off">` : ''}
+            <div class="gh-status" id="oaStatus"></div>
+            <div class="iss-wt">${cfg.help}${cfg.createUrl ? ` <button class="tpl-btn ghost" id="oaCreate">Create one ↗</button>` : ''}</div>
+          </div>
+          <div class="ft"><span class="hint">Stored encrypted in your OS keychain — never in <code>slayert.json</code></span><span class="r"><button class="tpl-btn ghost" data-x>Cancel</button><button class="tpl-btn pri" data-ok>Save</button></span></div>
+        </div>`, () => settle(false)); // closing via scrim/Escape counts as cancelled (guarded, so a prior save wins)
+      const idEl = root.querySelector('#oaId') as HTMLInputElement;
+      const secEl = root.querySelector('#oaSec') as HTMLInputElement | null;
+      const statusEl = root.querySelector('#oaStatus') as HTMLElement;
+      const okBtn = root.querySelector('[data-ok]') as HTMLButtonElement;
+      root.querySelector('[data-x]')?.addEventListener('click', close);
+      root.querySelector('#oaCreate')?.addEventListener('click', () => cfg.createUrl && relay.openExternal(cfg.createUrl));
+      const submit = async () => {
+        const id = idEl.value.trim(); if (!id) { idEl.focus(); return; }
+        okBtn.disabled = true; okBtn.textContent = 'Saving…'; statusEl.textContent = '';
+        const r = await relay.providerOAuthConfigSet(pid, id, secEl?.value.trim() || undefined).catch(() => ({ ok: false, error: 'Save failed' }));
+        if (!root.isConnected) return;
+        if (r.ok) { settle(true); close(); return; }        // settle before close so the onClose(false) is ignored
+        okBtn.disabled = false; okBtn.textContent = 'Save'; statusEl.textContent = r.error || 'Could not save';
+      };
+      okBtn.addEventListener('click', () => void submit());
+      idEl.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); void submit(); } });
+      secEl?.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); void submit(); } });
+      setTimeout(() => idEl.focus(), 30);
+    });
+  });
+}
+
+// Bitbucket OAuth (authorization-code + loopback): main opens the browser, catches the callback, and
+// exchanges the code — all in one IPC. The renderer shows a "waiting" modal and awaits the result. Tokens
+// (access + refresh) are stored encrypted in main; the renderer only ever learns connected/login.
+async function connectBitbucket(): Promise<void> {
+  let cancelled = false;
+  const { root, close } = modal(`<div class="tpl-card iss-card">
+      <div class="hd"><span class="dot" style="background:var(--accent)"></span><span class="t">Connect Bitbucket<small>authorize Slayer T in your browser</small></span></div>
+      <div class="bd">
+        <div class="gh-step">Your browser will open Bitbucket's authorization page — approve the request, then come back here.</div>
+        <div class="gh-status" id="bbStatus"><span class="gh-spin"></span> Waiting for you to authorize…</div>
+      </div>
+      <div class="ft"><span class="hint">Tokens stored encrypted in your OS keychain — never in <code>slayert.json</code></span><span class="r"><button class="tpl-btn ghost" data-x>Cancel</button></span></div>
+    </div>`);
+  root.querySelector('[data-x]')?.addEventListener('click', () => { cancelled = true; close(); });
+  const r = await relay.bitbucketOAuth().catch(() => ({ ok: false, error: 'Connect failed' }));
+  if (cancelled || !root.isConnected) return;                        // user closed the modal mid-flow
+  if (r.ok) { close(); toast(`Connected to Bitbucket as ${r.login || 'you'}`, true); void loadIssues(); return; }
+  const statusEl = root.querySelector('#bbStatus') as HTMLElement | null;
+  if (statusEl) statusEl.textContent = r.error || 'Authorization failed.';
+}
 
 // GitHub OAuth device flow: show the one-time code, open github.com/login/device, poll until authorized.
 // The token is exchanged + stored (encrypted) entirely in main — the renderer only sees connected/login.
@@ -953,7 +1052,7 @@ async function connectGithub(): Promise<void> {
   if (!cancelled && root.isConnected && statusEl) statusEl.textContent = 'Code expired — cancel and try again.'; // hit the deadline without authorizing
 }
 
-// Token connect (GitLab PAT / Bitbucket app-password): paste it, validate in main, store encrypted.
+// Token connect (GitLab PAT): paste it, validate in main, store encrypted.
 async function connectToken(pid: ProviderId): Promise<void> {
   const pc = PROVS[pid];
   const { root, close } = modal(`<div class="tpl-card iss-card">
@@ -985,18 +1084,38 @@ async function connectToken(pid: ProviderId): Promise<void> {
   setTimeout(() => tok.focus(), 30);
 }
 
+// Bitbucket workspaces to list repos from — Atlassian removed cross-workspace discovery (CHANGE-2770), so
+// the user names their workspace(s) and we list each via the surviving per-workspace endpoint.
+const bbWorkspaces = (): string[] => (Array.isArray(state.settings.bitbucketWorkspaces) ? state.settings.bitbucketWorkspaces : []);
+async function setBbWorkspaces(ws: string[]): Promise<void> {
+  const uniq = [...new Set(ws.map((w) => w.trim()).filter(Boolean))];
+  state.settings.bitbucketWorkspaces = uniq;
+  try { state.settings = await relay.patchSettings({ bitbucketWorkspaces: uniq }); } catch { /* keep the local copy */ }
+}
+// The workspace editor shown under Bitbucket in Sources (add/remove workspace ids).
+function bbWsEditorHtml(): string {
+  const chips = bbWorkspaces().map((w) => `<span class="src-ws-chip">${esc(w)}<button class="src-ws-x" data-ws-del="${esc(w)}" title="Remove">×</button></span>`).join('');
+  return `<div class="src-ws">
+      <div class="src-ws-add"><input class="iss-in" id="bbWsIn" placeholder="workspace id — the bitbucket.org/<workspace>/… part" spellcheck="false" autocomplete="off"><button class="tpl-btn ghost" data-ws-add>Add</button></div>
+      ${chips ? `<div class="src-ws-chips">${chips}</div>` : ''}
+      <div class="iss-wt">Atlassian removed cross-workspace repo discovery — add each workspace you want to load repos from, then “Load my repos”.</div>
+    </div>`;
+}
+
 // Sources: the app's connections (GitHub / GitLab / Bitbucket) + which repos to track.
 async function openSources(): Promise<void> {
   const tracked = new Set(trackedRepos());
   const states = await Promise.all(PROVIDER_LIST.map(async (pc) => ({ pc, auth: await relay.providerAuthState(pc.id).catch(() => ({ connected: false, login: '' })) })));
   const sections = states.map(({ pc, auth }) => {
     const st = auth.connected ? `✓ connected as <b>${esc(auth.login || '')}</b>` : '⚠ not connected';
+    const appBtn = pc.oauthApp ? `<button class="tpl-btn ghost" data-oapp="${pc.id}" title="Edit the OAuth app credentials">OAuth app…</button>` : '';
     const ctl = auth.connected
-      ? `<button class="tpl-btn ghost" data-load="${pc.id}">Load my repos</button><button class="tpl-btn ghost" data-disc="${pc.id}">Disconnect</button>`
-      : `<button class="tpl-btn pri" data-connect="${pc.id}">Connect ${esc(pc.name)}</button>`;
+      ? `<button class="tpl-btn ghost" data-load="${pc.id}">Load my repos</button>${appBtn}<button class="tpl-btn ghost" data-disc="${pc.id}">Disconnect</button>`
+      : `<button class="tpl-btn pri" data-connect="${pc.id}">Connect ${esc(pc.name)}</button>${appBtn}`;
+    const wsEditor = pc.id === 'bitbucket' && auth.connected ? bbWsEditorHtml() : ''; // Bitbucket needs workspaces (CHANGE-2770)
     return `<div class="src-prov">
         <div class="src-row"><span class="src-nm"><span class="src-dot ${pc.dot}"></span> ${esc(pc.name)}</span><span class="src-st">${st}</span></div>
-        <div class="src-repos" id="srcRepos-${pc.id}">${ctl}<div id="srcList-${pc.id}"></div></div>
+        <div class="src-repos" id="srcRepos-${pc.id}">${ctl}${wsEditor}<div id="srcList-${pc.id}"></div></div>
       </div>`;
   }).join('');
   const { root, close } = modal(`<div class="tpl-card iss-card">
@@ -1020,6 +1139,21 @@ async function openSources(): Promise<void> {
   });
   // Connect / disconnect per provider (close first; the connect flow re-pulls on success, and any close reloads).
   root.querySelectorAll<HTMLElement>('[data-connect]').forEach((b) => { b.onclick = () => { const id = b.dataset.connect as ProviderId; close(); connectProvider(id); }; });
+  // Edit/rotate the OAuth-app credentials (client id / secret) without disconnecting.
+  root.querySelectorAll<HTMLElement>('[data-oapp]').forEach((b) => { b.onclick = () => { const id = b.dataset.oapp as ProviderId; close(); void configOAuthApp(id); }; });
+  // Bitbucket workspaces: add (tolerate a pasted repo/URL — keep the first path segment) / remove, then re-render.
+  const wsIn = root.querySelector('#bbWsIn') as HTMLInputElement | null;
+  const addWs = async () => {
+    if (!wsIn) return;
+    const v = wsIn.value.trim().replace(/^https?:\/\/bitbucket\.org\//i, '').split('/')[0].trim();
+    if (!v) { wsIn.focus(); return; }
+    await setBbWorkspaces([...bbWorkspaces(), v]); close(); void openSources(); // reopen to show the new chip
+  };
+  root.querySelector('[data-ws-add]')?.addEventListener('click', () => void addWs());
+  wsIn?.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); void addWs(); } });
+  root.querySelectorAll<HTMLElement>('[data-ws-del]').forEach((b) => {
+    b.onclick = async () => { await setBbWorkspaces(bbWorkspaces().filter((w) => w !== b.dataset.wsDel)); close(); void openSources(); };
+  });
   root.querySelectorAll<HTMLElement>('[data-disc]').forEach((b) => {
     b.onclick = async () => {
       const id = b.dataset.disc as ProviderId;
@@ -1031,7 +1165,7 @@ async function openSources(): Promise<void> {
     b.onclick = async () => {
       const id = b.dataset.load as ProviderId;
       const btn = b as HTMLButtonElement; btn.textContent = 'Loading…'; btn.disabled = true;
-      const r = await relay.providerRepos(id).catch(() => ({ ok: false, error: 'failed' }));
+      const r = await relay.providerRepos(id, id === 'bitbucket' ? bbWorkspaces() : undefined).catch(() => ({ ok: false, error: 'failed' }));
       btn.textContent = 'Load my repos'; btn.disabled = false;
       const box = root.querySelector(`#srcList-${id}`) as HTMLElement;
       if (!r.ok || !r.repos || !r.repos.length) { box.innerHTML = `<div class="src-empty">${esc(r.error || 'No repos found')}</div>`; return; }

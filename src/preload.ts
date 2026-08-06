@@ -62,10 +62,17 @@ const api = {
   saveWorkspaceSnapshot: (id: string, ws: Workspace) => ipcRenderer.send('workspace:save-snapshot', { id, ws }),
 
   // --- Issue Agent — multi-provider (GitHub / GitLab / Bitbucket) ---
-  // GitHub connects via OAuth device flow; GitLab/Bitbucket via a pasted read-token. All tokens are
-  // encrypted in the OS keychain in the main process — the renderer only ever sees { connected, login }.
+  // GitHub + Bitbucket connect via OAuth (device flow / in-browser loopback); GitLab via a pasted PAT. All
+  // tokens are encrypted in the OS keychain in the main process — the renderer only ever sees { connected, login }.
   githubDeviceStart: (): Promise<{ ok: boolean; userCode?: string; verificationUri?: string; deviceCode?: string; interval?: number; expiresIn?: number; error?: string }> => ipcRenderer.invoke('github:device-start'),
   githubDevicePoll: (deviceCode: string): Promise<{ status: string; login?: string; interval?: number; error?: string }> => ipcRenderer.invoke('github:device-poll', { deviceCode }),
+  // Bitbucket connects via OAuth 2.0 authorization-code + loopback redirect (no device flow). One call runs
+  // the whole browser round trip in main and resolves when it finishes — the renderer just awaits it.
+  bitbucketOAuth: (): Promise<{ ok: boolean; login?: string; error?: string }> => ipcRenderer.invoke('bitbucket:oauth'),
+  // OAuth-app config (client id / secret used to START the login flow). Get returns the public client id + a
+  // hasSecret flag (never the secret). Set stores them encrypted in the OS keychain.
+  providerOAuthConfigGet: (provider: ProviderId): Promise<{ clientId: string; hasSecret: boolean; needsSecret: boolean; configured: boolean }> => ipcRenderer.invoke('provider:oauth-config-get', provider),
+  providerOAuthConfigSet: (provider: ProviderId, clientId: string, secret?: string): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke('provider:oauth-config-set', { provider, clientId, secret }),
   // Connection state for a provider (never the token).
   providerAuthState: (provider: ProviderId): Promise<{ connected: boolean; login?: string }> => ipcRenderer.invoke('provider:auth-state', provider),
   // Connect GitLab/Bitbucket with a pasted token (+ optional host for self-managed GitLab).
@@ -76,7 +83,7 @@ const api = {
   // Pull a repo's issues (normalized) for the given provider, filtered by state (default 'open').
   providerIssues: (provider: ProviderId, repo: string, state: 'open' | 'closed' = 'open'): Promise<{ ok: boolean; issues?: Issue[]; error?: string }> => ipcRenderer.invoke('provider:issues', { provider, repo, state }),
   // List the connected user's repos/projects for the Sources picker.
-  providerRepos: (provider: ProviderId): Promise<{ ok: boolean; repos?: { repo: string; desc: string; priv: boolean }[]; error?: string }> => ipcRenderer.invoke('provider:repos', provider),
+  providerRepos: (provider: ProviderId, workspaces?: string[]): Promise<{ ok: boolean; repos?: { repo: string; desc: string; priv: boolean }[]; error?: string }> => ipcRenderer.invoke('provider:repos', { provider, workspaces }),
   // Open PRs/MRs for a repo — to link an assigned issue's branch to its PR (review → ship).
   providerPrs: (provider: ProviderId, repo: string): Promise<{ ok: boolean; prs?: { number: number; branch: string; url: string; draft: boolean }[]; error?: string }> => ipcRenderer.invoke('provider:prs', { provider, repo }),
   // Which coding agents are installed on PATH (for the Assign-to picker).
