@@ -143,7 +143,7 @@ export interface Settings {
   issueRepoByWs?: Record<string, string>;    // active repo per workspace id; empty → infer from the folder's remote
   issueAgent?: string;   // preferred coding agent id for Assign (claude/gemini/codex/aider/antigravity)
   issueConcurrency?: number; // max agents the assign queue runs at once (per repo); default 2
-  issuePipeline?: string; // preferred pipeline id for Assign (validate-fix | fix-only); default validate-fix
+  issuePipelineByKey?: Record<string, string>; // per-issue pipeline id, keyed "provider:repo#number"; unset → default validate-fix
   pipelines?: PipelineDef[]; // user-authored custom pipelines (built-ins live in code); merged into the registry
 }
 

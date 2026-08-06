@@ -114,6 +114,27 @@ const OCCUPYING: RunStatus[] = ['working', 'validating', 'fixing']; // statuses 
 // User-authored pipelines (built-ins live in code); the registry merges them. Read fresh each time so a
 // pipeline created/edited in the builder is picked up on the next Assign without a reload.
 const customPipelines = (): PipelineDef[] => state.settings.pipelines || [];
+// Per-issue pipeline: each issue remembers its own pipeline (persisted), NOT a shared global preference.
+// Keyed "provider:repo#number". Unset (or a pipeline that no longer exists) → the default (first built-in = Validate → Fix).
+const pipeKeyFor = (prov: ProviderId, rpo: string, n: number) => `${prov}:${rpo || ''}#${n}`;
+function issuePipelineFor(prov: ProviderId, rpo: string, n: number): string {
+  const stored = (state.settings.issuePipelineByKey || {})[pipeKeyFor(prov, rpo, n)];
+  const all = allPipelines(customPipelines());
+  return stored && all.some((p) => p.id === stored) ? stored : all[0].id;
+}
+// Serialize the per-issue-pipeline writes: patchSettings replaces issuePipelineByKey wholesale, so two fast
+// board drags fired concurrently could clobber each other (each reads the map before the other's write lands).
+// Chaining makes each write read the freshest map (updated by the previous write's `state.settings = …`).
+let pipeWriteChain: Promise<void> = Promise.resolve();
+function setIssuePipeline(prov: ProviderId, rpo: string, n: number, id: string): Promise<void> {
+  pipeWriteChain = pipeWriteChain.then(async () => {
+    const map = { ...(state.settings.issuePipelineByKey || {}) };
+    const all = allPipelines(customPipelines());
+    if (id === all[0].id) delete map[pipeKeyFor(prov, rpo, n)]; else map[pipeKeyFor(prov, rpo, n)] = id; // storing the default = no entry
+    try { state.settings = await relay.patchSettings({ issuePipelineByKey: map }); } catch { /* keep the in-memory pick */ }
+  });
+  return pipeWriteChain;
+}
 // A defensive copy of a pipeline captured at assign time — so an in-flight run keeps the wiring it started
 // with even if the (custom) pipeline is later edited or deleted in the builder.
 const clonePipeline = (p: PipelineDef): PipelineDef => JSON.parse(JSON.stringify(p));
@@ -613,6 +634,19 @@ function seqGraph(p: PipelineDef, issueNumber: number, opts: { stageIdx?: number
   out.push(edge(''), `<span class="sg-node sg-term ${review ? 'on' : ''}">${review ? '✅ PR → review' : 'PR'}</span>`);
   return `<div class="sg-wrap"><div class="sg">${out.join('')}</div></div>`;
 }
+// A compact pipeline graph (wired path → kind-colored stages + gate conditions → PR), same visual language as
+// seqGraph. Used on the map board so a pipeline is shown the same way there as in Assign/Details/the builder.
+function pipeMini(p: PipelineDef): string {
+  const path = wiredPath(p);
+  const out: string[] = [];
+  for (let pos = 0; pos < path.length; pos++) {
+    const s = p.stages[path[pos]]; if (!s) continue;
+    out.push(`<span class="sg-node sg-stage k-${s.kind}"><span class="sg-dot"></span>${esc(s.name)}</span>`);
+    if (pos < path.length - 1) out.push(`<span class="sg-edge ${isGate(s) ? 'ok' : ''}">${isGate(s) ? '<span class="sg-lab">if valid</span>' : ''}<span class="sg-arr"></span></span>`);
+  }
+  out.push(`<span class="sg-edge"><span class="sg-arr"></span></span><span class="sg-node sg-term">PR</span>`);
+  return `<div class="sg-wrap"><div class="sg">${out.join('')}</div></div>`;
+}
 
 // Coding agents you can assign an issue to. Each is a thin adapter: a bin to detect + how to launch it in
 // the worktree terminal, seeded with the brief FILE (never issue text on the command line). The brief FILE
@@ -676,11 +710,11 @@ async function openAssign(i: Issue): Promise<void> {
   // Default agent = the saved preference if still installed, else the first installed one.
   let agentId = (state.settings.issueAgent && detected[state.settings.issueAgent]) ? state.settings.issueAgent : (installed[0]?.id || '');
   const opts = AGENTS.map((a) => `<option value="${a.id}"${a.id === agentId ? ' selected' : ''}${detected[a.id] ? '' : ' disabled'}>${esc(a.name)}${detected[a.id] ? '' : ' — not installed'}</option>`).join('');
-  // Default pipeline = the saved preference if it still exists (built-in or custom), else the first.
-  const pipes = () => allPipelines(customPipelines());
-  let pipelineId = (state.settings.issuePipeline && pipes().some((p) => p.id === state.settings.issuePipeline)) ? state.settings.issuePipeline! : pipes()[0].id;
-  const pipeOpts = () => pipes().map((p) => `<option value="${p.id}"${p.id === pipelineId ? ' selected' : ''}>${esc(p.name)}${p.builtin ? '' : ' ✎'}</option>`).join('');
   const asgProvider = provider, asgRepo = repo; // pin the target so a mid-dialog repo switch can't retarget
+  const pipes = () => allPipelines(customPipelines());
+  // Default pipeline = THIS issue's own saved pipeline (per-issue), else the first built-in (Validate → Fix).
+  let pipelineId = issuePipelineFor(asgProvider, asgRepo || '', i.number);
+  const pipeOpts = () => pipes().map((p) => `<option value="${p.id}"${p.id === pipelineId ? ' selected' : ''}>${esc(p.name)}${p.builtin ? '' : ' ✎'}</option>`).join('');
   let pipeline = pipelineById(pipelineId, customPipelines());
   let briefDirty = false;                    // once the user edits the brief, stop re-seeding it on pipeline change
   const primary = agentOk ? '⚡ Run pipeline' : 'Create worktree & open';
@@ -714,14 +748,14 @@ async function openAssign(i: Issue): Promise<void> {
   };
   if (psel) psel.onchange = () => {
     pipelineId = psel.value;
-    void relay.patchSettings({ issuePipeline: pipelineId }).then((s: typeof state.settings) => { state.settings = s; }).catch(() => {});
+    void setIssuePipeline(asgProvider, asgRepo || '', i.number, pipelineId); // remember THIS issue's pipeline
     syncPipe();
   };
   // Build / edit pipelines — opens the visual builder; on save we refresh the dropdown + preview and select
   // the (possibly new) pipeline. Built-ins open read-only with a "Duplicate to edit".
   root.querySelector('#issPipeBuild')?.addEventListener('click', () => {
-    openPipelineBuilder(pipeline, async (savedId) => {
-      if (savedId) { pipelineId = savedId; try { state.settings = await relay.patchSettings({ issuePipeline: pipelineId }); } catch { /* keep in-memory */ } }
+    openPipelineBuilder(pipeline, (savedId) => {
+      if (savedId) { pipelineId = savedId; void setIssuePipeline(asgProvider, asgRepo || '', i.number, pipelineId); } // this issue now uses the (new) pipeline
       if (psel) psel.innerHTML = pipeOpts();      // rebuild options (a new/renamed pipeline may have appeared)
       syncPipe();
     });
@@ -766,10 +800,12 @@ async function openIssueMap(): Promise<void> {
   const asgProvider = provider, asgRepo = repo || '';    // pin the target
   const mappable = issues.filter((i) => statusOf(i.number) === 'idle'); // only idle+open issues can be assigned
   const pipes = allPipelines(customPipelines());
-  const mapping = new Map<number, string>();             // issueNumber → pipelineId
+  // issueNumber → pipelineId, seeded from each issue's own saved (non-default) pipeline so the board reflects it.
+  const mapping = new Map<number, string>();
+  { const stored = state.settings.issuePipelineByKey || {}; for (const it of mappable) { const pid = stored[pipeKeyFor(asgProvider, asgRepo, it.number)]; if (pid && pipes.some((p) => p.id === pid)) mapping.set(it.number, pid); } }
   let connecting: { from: number; x: number; y: number } | null = null;
 
-  const IW = 244, IH = 58, PW = 250, PH = 72, IX = 16, PX = 548, W = 840;
+  const IW = 236, IH = 58, PW = 300, PH = 72, IX = 16, PX = 520, W = 840;
   const IY = (k: number) => 22 + k * (IH + 12);
   const PY = (k: number) => 26 + k * (PH + 14);
   const H = Math.max(mappable.length ? IY(mappable.length) : 70, pipes.length ? PY(pipes.length) : 70) + 20;
@@ -804,10 +840,10 @@ async function openIssueMap(): Promise<void> {
     const issueNodes = mappable.length ? mappable.map((i, k) => `<div class="im-issue${mapping.has(i.number) ? ' mapped' : ''}" data-num="${i.number}" style="left:${IX}px;top:${IY(k)}px;width:${IW}px">
         <div class="im-hash">#${i.number}</div><div class="im-t">${esc(i.title)}</div><span class="pb-port out" data-inum="${i.number}"></span></div>`).join('')
       : `<div class="im-none" style="left:${IX}px;top:22px">No idle open issues to map.</div>`;
-    const pipeNodes = pipes.map((p, k) => `<div class="im-pipe" data-pid="${esc(p.id)}" style="left:${PX}px;top:${PY(k)}px;width:${PW}px">
-        <span class="pb-port in"></span><div class="im-pn">${esc(p.name)}${p.builtin ? '' : ' <i class="im-cust">custom</i>'}</div><div class="im-ps">${wiredPath(p).map((k) => esc(p.stages[k].name)).join(' → ') || '—'}</div></div>`).join('');
+    const pipeNodes = pipes.map((p, pk) => `<div class="im-pipe" data-pid="${esc(p.id)}" style="left:${PX}px;top:${PY(pk)}px;width:${PW}px">
+        <span class="pb-port in"></span><div class="im-pn">${esc(p.name)}${p.builtin ? '' : ' <i class="im-cust">custom</i>'}</div><div class="im-ps">${pipeMini(p)}</div></div>`).join('');
     canvas.innerHTML = svg + issueNodes + pipeNodes;
-    canvas.querySelectorAll<HTMLElement>('.im-issue').forEach((node) => node.onclick = (e) => { if ((e.target as HTMLElement).closest('.pb-port')) return; const n = Number(node.dataset.num); if (mapping.has(n)) { mapping.delete(n); renderMap(); } });
+    canvas.querySelectorAll<HTMLElement>('.im-issue').forEach((node) => node.onclick = (e) => { if ((e.target as HTMLElement).closest('.pb-port')) return; const n = Number(node.dataset.num); if (mapping.has(n)) { mapping.delete(n); void setIssuePipeline(asgProvider, asgRepo, n, pipes[0].id); renderMap(); } }); // clear → back to the default
     canvas.querySelectorAll<HTMLElement>('.pb-port.out').forEach((port) => port.onpointerdown = (e) => {
       e.stopPropagation(); e.preventDefault();
       const from = Number(port.dataset.inum); connecting = { from, ...canvasPoint(e) };
@@ -815,7 +851,7 @@ async function openIssueMap(): Promise<void> {
       const up = (ev: PointerEvent) => {
         window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up);
         const tgt = (document.elementFromPoint(ev.clientX, ev.clientY) as HTMLElement)?.closest('.im-pipe') as HTMLElement | null;
-        connecting = null; if (tgt?.dataset.pid) mapping.set(from, tgt.dataset.pid); renderMap();
+        connecting = null; if (tgt?.dataset.pid) { mapping.set(from, tgt.dataset.pid); void setIssuePipeline(asgProvider, asgRepo, from, tgt.dataset.pid); } renderMap(); // map → persist per-issue
       };
       window.addEventListener('pointermove', move); window.addEventListener('pointerup', up);
     });
