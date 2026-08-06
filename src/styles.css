@@ -619,6 +619,44 @@ body.tabdrag .dz{display:block;pointer-events:auto}
 .iss-brief{width:100%;box-sizing:border-box;resize:vertical;min-height:200px;background:var(--surface-2);border:1px solid var(--border-strong);border-radius:9px;padding:10px 12px;color:var(--text);font:12px/1.55 var(--mono)}
 .iss-brief:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-ghost)}
 .iss-wt{margin-top:11px;font:11.5px/1.5 var(--mono);color:var(--muted)}
+/* pipeline picker (Assign) — the sequence-graph preview box + one-line description under the dropdown */
+.pipe-preview{padding:11px 10px;border:1px solid var(--border);border-radius:9px;margin:0 0 9px}
+.iss-pipedesc{font:11px/1.5 var(--sans);color:var(--muted);margin:0 0 13px}
+/* ----- sequence graph (issue → stages → PR): Assign preview (neutral) + LIVE in Details ----- */
+.sg-wrap{overflow-x:auto;padding:1px 0}
+.sg{display:inline-flex;align-items:center;min-width:max-content}
+.sg-node{flex:none;display:inline-flex;align-items:center;gap:6px;white-space:nowrap;font:600 11px/1.2 var(--sans);color:var(--text);background:var(--surface-2);border:1px solid var(--border-strong);border-radius:8px;padding:6px 10px}
+.sg-issue{background:var(--surface);color:var(--text-dim);gap:5px}
+.sg-issue .sg-k{font:700 7.5px/1 var(--mono);text-transform:uppercase;letter-spacing:.1em;color:var(--muted)}
+.sg-dot{width:7px;height:7px;border-radius:50%;background:var(--muted);flex:none}
+.k-validate .sg-dot{background:#5b9dd9}
+.k-fix .sg-dot{background:var(--accent)}
+.k-reproduce .sg-dot{background:#22c3cf}
+.k-test .sg-dot{background:var(--accent-2)}
+.k-review .sg-dot{background:#a78bfa}
+/* live per-stage state */
+.sg-stage.sg-pending,.sg-stage.sg-skipped{opacity:.45}
+.sg-stage.sg-running{border-color:var(--accent-line);box-shadow:0 0 0 3px var(--accent-ghost)}
+.sg-stage.sg-done{border-color:var(--accent-line)}
+.sg-stage.sg-failed{border-color:rgba(224,96,94,.5);color:#e0605e}
+.sg-b{width:14px;height:14px;border-radius:50%;display:inline-grid;place-items:center;font:9px/1 var(--sans)}
+.sg-b.done{background:rgba(92,168,106,.18);color:#5ca86a}
+.sg-b.run{background:var(--accent);color:#0b0c0e;animation:sgspin 1s linear infinite}
+.sg-b.fail{background:rgba(224,96,94,.16);color:#e0605e}
+@keyframes sgspin{to{transform:rotate(360deg)}}
+@media(prefers-reduced-motion:reduce){.sg-b.run{animation:none}}
+.sg-stop{background:rgba(224,96,94,.1);border-color:rgba(224,96,94,.4);color:#e0605e}
+.sg-term{background:transparent;border-style:dashed;color:var(--text-dim)}
+.sg-term.on{border-style:solid;border-color:rgba(240,170,70,.5);color:#e0a44a;background:rgba(240,170,70,.1)}
+/* edges: a condition label stacked over a small arrowed line */
+.sg-edge{flex:none;display:inline-flex;flex-direction:column;align-items:center;gap:2px;padding:0 3px;min-width:38px}
+.sg-lab{font:8px/1 var(--mono);color:var(--muted);white-space:nowrap}
+.sg-edge.ok .sg-lab{color:#5ca86a}
+.sg-edge.no .sg-lab{color:#e0605e}
+.sg-arr{width:100%;height:2px;background:var(--border-strong);position:relative}
+.sg-arr::after{content:"";position:absolute;right:-1px;top:-3px;border:4px solid transparent;border-left-color:var(--border-strong)}
+.sg-edge.no .sg-arr{background:rgba(224,96,94,.6)}
+.sg-edge.no .sg-arr::after{border-left-color:rgba(224,96,94,.6)}
 .iss-in{width:100%;box-sizing:border-box;background:var(--surface-2);border:1px solid var(--border-strong);border-radius:8px;padding:8px 11px;margin-bottom:11px;color:var(--text);font:12.5px var(--mono)}
 .iss-in:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-ghost)}
 .iss-in::placeholder{color:var(--muted)}
@@ -649,10 +687,14 @@ body.tabdrag .dz{display:block;pointer-events:auto}
 .isr-st.working{color:var(--accent-2);background:var(--accent-ghost);border:1px solid var(--accent-line)}
 .isr-st.review{color:#e0a44a;background:rgba(240,170,70,.12);border:1px solid rgba(240,170,70,.4)}
 .isr-st.queued{color:var(--text-dim);background:var(--surface-2);border:1px dashed var(--border-strong)}
-/* clickable only in a list row (queued → cancel, working → free slot); NOT the read-only details-modal chip */
-.isr-side .isr-st.queued,.isr-side .isr-st.working{cursor:pointer}
+/* pipeline-stage statuses: validating = a calm "checking" blue; fixing = the active accent look; invalid = danger red */
+.isr-st.validating{color:#5b9dd9;background:rgba(91,157,217,.13);border:1px solid rgba(91,157,217,.4)}
+.isr-st.fixing{color:var(--accent-2);background:var(--accent-ghost);border:1px solid var(--accent-line)}
+.isr-st.invalid{color:#e0605e;background:rgba(224,96,94,.13);border:1px solid rgba(224,96,94,.42)}
+/* clickable only in a list row (queued → cancel; a live stage → free slot; invalid → details); NOT the read-only details-modal chip */
+.isr-side .isr-st.queued,.isr-side .isr-st.working,.isr-side .isr-st.validating,.isr-side .isr-st.fixing,.isr-side .isr-st.invalid{cursor:pointer}
 .isr-side .isr-st.queued:hover{border-color:var(--accent-line);color:var(--text)}
-.isr-side .isr-st.working:hover{filter:brightness(1.12)}
+.isr-side .isr-st.working:hover,.isr-side .isr-st.validating:hover,.isr-side .isr-st.fixing:hover,.isr-side .isr-st.invalid:hover{filter:brightness(1.12)}
 .isr-ext,.isr-info{opacity:0;background:none;border:none;color:var(--muted);cursor:pointer;font-size:12px;padding:0 2px;transition:opacity .12s}
 .isr:hover .isr-ext,.isr:hover .isr-info{opacity:.8}
 .isr-ext:hover,.isr-info:hover{color:var(--accent-2)}
@@ -665,6 +707,12 @@ body.tabdrag .dz{display:block;pointer-events:auto}
 .iss-det .det-meta .det-k{font-weight:600;color:var(--muted);margin-right:6px}
 .iss-det .det-body{margin-top:8px;max-height:44vh;overflow:auto;white-space:pre-wrap;word-break:break-word;font:12px/1.6 var(--mono);color:var(--text-dim);background:var(--surface-2);border:1px solid var(--border);border-radius:8px;padding:11px 12px}
 .iss-det .mut{color:var(--muted)}
+/* pipeline run summary in Details: the pipeline name, the live sequence graph, then (if a gate closed) the reason */
+.iss-det .det-pipe{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:7px}
+.iss-det .det-pipe .det-k{font:600 11px/1 var(--sans);color:var(--muted)}
+.iss-det .sg-wrap{margin-bottom:11px}
+.iss-det .det-invalid{font:600 11.5px/1.5 var(--sans);color:#e0605e;background:rgba(224,96,94,.1);border:1px solid rgba(224,96,94,.34);border-radius:8px;padding:9px 11px;margin-bottom:10px}
+.iss-det .det-reason{font:11.5px/1.6 var(--mono);font-weight:400;color:var(--text-dim);margin-top:5px;white-space:pre-wrap;word-break:break-word}
 .isr-pr{font:8.5px/1.4 var(--mono);padding:1px 6px;border-radius:5px;background:var(--accent-ghost);border:1px solid var(--accent-line);color:var(--accent-2);cursor:pointer;white-space:nowrap}
 .isr-pr:hover{filter:brightness(1.12)}
 .isr-empty{display:flex;flex-direction:column;align-items:center;gap:5px;text-align:center;color:var(--muted);font:11.5px/1.5 var(--sans);padding:24px 16px}

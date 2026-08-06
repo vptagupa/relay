@@ -492,6 +492,50 @@ ipcMain.handle('git:worktree-add', async (_e, p: { provider?: ProviderId; repo: 
   } catch (err) { logFatal('git:worktree-add', err); return { ok: false, error: 'Worktree creation failed' }; }
 });
 
+/* -------------------- issue pipelines (staged agent runs, gated by verdict files) -------------------- */
+// Every pipeline artifact lives in the worktree's `.slayer/` dir (already git-excluded by worktree-add):
+// per-stage brief files `stage-<i>.md` and per-gate verdict files `stage-<i>.json`. Both handlers refuse
+// any path that escapes `.slayer/` — the renderer only ever passes those two shapes, but validate anyway.
+function slayerPath(wt: string, rel: string): string | null {
+  if (typeof wt !== 'string' || !wt || typeof rel !== 'string' || !rel) return null;
+  const base = path.resolve(wt, '.slayer');
+  const abs = path.resolve(wt, rel);
+  const within = abs === base || abs.startsWith(base + path.sep);
+  return within ? abs : null; // reject anything outside .slayer/ (path traversal guard)
+}
+// Prep a stage before launch: (optionally) write its brief file, and always clear this stage's stale
+// verdict (so a re-run of a reused worktree can't read the previous run's pass/fail).
+ipcMain.handle('pipeline:prep', async (_e, p: { wt: string; briefRel?: string; brief?: string; stage: number }) => {
+  try {
+    const wt = p?.wt || '';
+    const dir = path.join(wt, '.slayer');
+    await fsp.mkdir(dir, { recursive: true });
+    if (typeof p?.briefRel === 'string' && p.briefRel && typeof p?.brief === 'string') {
+      const bp = slayerPath(wt, p.briefRel); if (!bp) return { ok: false };
+      await fsp.writeFile(bp, p.brief, 'utf8');
+    }
+    if (Number.isInteger(p?.stage)) {
+      const vp = slayerPath(wt, `.slayer/stage-${p.stage}.json`);
+      if (vp) await fsp.rm(vp, { force: true }); // clear stale verdict; force → no throw if absent
+    }
+    return { ok: true };
+  } catch (err) { logFatal('pipeline:prep', err); return { ok: false }; }
+});
+// Read a gate stage's verdict. `found:false` until the agent has written it — the renderer polls this.
+ipcMain.handle('pipeline:verdict', async (_e, p: { wt: string; stage: number }) => {
+  try {
+    if (!Number.isInteger(p?.stage)) return { found: false }; // guard the stage index like pipeline:prep does
+    const vp = slayerPath(p?.wt || '', `.slayer/stage-${p?.stage}.json`);
+    if (!vp || !existsSync(vp)) return { found: false };
+    const raw = await fsp.readFile(vp, 'utf8');
+    let obj: unknown;
+    try { obj = JSON.parse(raw); } catch { return { found: false }; } // half-written file → treat as not-yet-ready; poll again
+    const o = (obj || {}) as { passed?: unknown; summary?: unknown };
+    if (typeof o.passed !== 'boolean') return { found: false }; // no verdict yet (agent wrote a partial object)
+    return { found: true, passed: o.passed, summary: typeof o.summary === 'string' ? o.summary : '' };
+  } catch (err) { logFatal('pipeline:verdict', err); return { found: false }; }
+});
+
 /* -------------------- session export -------------------- */
 ipcMain.handle('session:export', async (_e, { name, content, ext }: { name: string; content: string; ext: string }) => {
   const safe = (name || 'session').replace(/[^\w.-]+/g, '_');

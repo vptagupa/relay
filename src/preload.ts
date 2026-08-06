@@ -86,6 +86,13 @@ const api = {
   // Assign: create (or reuse) an isolated worktree for an issue and drop the edited brief inside it.
   worktreeAdd: (provider: ProviderId, repo: string, dir: string, number: number, brief: string): Promise<{ ok: boolean; path?: string; branch?: string; base?: string; reused?: boolean; briefRel?: string; error?: string }> => ipcRenderer.invoke('git:worktree-add', { provider, repo, dir, number, brief }),
 
+  // --- issue pipelines (staged agent runs) ---
+  // Prep a stage before launch: write its brief file into the worktree's .slayer/ (skip for stage 0 —
+  // worktree-add already wrote it) and clear this stage's stale verdict so a re-run starts clean.
+  pipelinePrep: (wt: string, briefRel: string | null, brief: string | null, stage: number): Promise<{ ok: boolean }> => ipcRenderer.invoke('pipeline:prep', { wt, briefRel: briefRel || undefined, brief: brief || undefined, stage }),
+  // Poll a gate stage's verdict — { found:false } until the agent has written { passed, summary }.
+  pipelineVerdict: (wt: string, stage: number): Promise<{ found: boolean; passed?: boolean; summary?: string }> => ipcRenderer.invoke('pipeline:verdict', { wt, stage }),
+
   // --- workspace blueprints (reusable "Templates") ---
   getBlueprints: (): Promise<WorkspaceBlueprint[]> => ipcRenderer.invoke('blueprints:get'),
   saveBlueprints: (blueprints: WorkspaceBlueprint[]) => ipcRenderer.send('blueprints:save', blueprints),

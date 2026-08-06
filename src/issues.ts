@@ -10,6 +10,7 @@ import { state } from './state';
 import { $, esc } from './dom';
 import { toast } from './ui';
 import type { Issue } from './shared/types';
+import { PIPELINES, pipelineById, isGate, nextEdge, stageIndexByName, STOP, type Pipeline, type StageCtx } from './pipelines';
 
 const relay = (window as any).relay;
 
@@ -71,9 +72,12 @@ function parseRepoId(id: string): { provider: ProviderId; repo: string } {
 const repoId = (p: ProviderId, r: string) => `${p}:${r}`;
 
 type Phase = 'idle' | 'loading' | 'ready' | 'error' | 'noauth' | 'norepo';
-type RunStatus = 'idle' | 'queued' | 'working' | 'review';
-// A prepared-but-not-yet-launched assignment: its worktree + brief already exist, so auto-launch is instant.
-interface QueueItem { provider: ProviderId; repo: string; number: number; title: string; cwd: string; runCmd?: string; agentName: string; }
+// A run moves through pipeline-stage statuses (validating/fixing) before a PR flips it to review; a closed
+// gate lands it on `invalid`. `working` is kept for the no-agent / legacy path.
+type RunStatus = 'idle' | 'queued' | 'working' | 'validating' | 'fixing' | 'invalid' | 'review';
+// A prepared-but-not-yet-launched assignment: its worktree + stage-0 brief already exist, so the whole
+// pipeline auto-launches (from stage 0) the instant a slot frees.
+interface QueueItem { provider: ProviderId; repo: string; number: number; title: string; cwd: string; agentId: string; agentName: string; issue: Issue; pipelineId: string; brief0Rel: string; }
 let phase: Phase = 'idle';
 let provider: ProviderId = 'github';   // which provider the active repo belongs to
 let repo: string | null = null;        // native repo id (owner/name | group/project | workspace/repo)
@@ -90,6 +94,21 @@ let issueState: 'open' | 'closed' = 'open';      // which issues to pull (server
 // The repo we're showing: this workspace's explicit pick wins, else it's inferred from its folder's remote.
 const activeKey = () => `${wsKey()}:${curRepo() || state.settings.workspace || ''}:${issueState}`;
 const runStatus = new Map<string, RunStatus>(); // "provider:repo#number" → run state (never bleeds across repos/providers)
+// A running (or just-ended `invalid`) pipeline for an issue — enough to advance stages, gate on verdicts,
+// draw the graph in Details, and offer a one-click override after an `invalid` verdict. Keyed like runStatus.
+interface RunInfo {
+  provider: ProviderId; repo: string; number: number; title: string;
+  issue: Issue;         // the full issue — its title/body seed each stage's brief FILE
+  pipeline: Pipeline;
+  stageIdx: number;     // the currently-active stage (or the gate that failed, for `invalid`)
+  wt: string;           // the issue's worktree path (where .slayer/ briefs + verdicts live)
+  agentId: string;
+  brief0Rel: string;    // stage 0's brief file (written by worktree-add); later stages get their own
+  awaiting: boolean;    // true while a GATE stage's verdict is being polled
+  reason?: string;      // an `invalid` gate's explanation (shown in Details; drives the override)
+}
+const runs = new Map<string, RunInfo>();                            // "provider:repo#number" → its pipeline run
+const OCCUPYING: RunStatus[] = ['working', 'validating', 'fixing']; // statuses that hold a concurrency slot
 let prByBranch: Record<string, { url: string; draft: boolean }> = {}; // "issue-N" branch → its open PR/MR (review → ship)
 let lastKey: string | null = null; // the provider:repo the current filters/search belong to — reset them when it changes
 // Assign queue: at most CAP agents run at once (per repo); the rest wait here and auto-launch when a
@@ -97,7 +116,7 @@ let lastKey: string | null = null; // the provider:repo the current filters/sear
 const queue: QueueItem[] = [];
 const CAP = (): number => Math.max(1, Math.min(8, Number(state.settings.issueConcurrency) || 2));
 let pollTimer: number | null = null; // background PR/MR poll that drives unattended draining while agents run
-const rk = (n: number) => `${provider}:${repo}#${n}`; // runStatus key for the CURRENT provider+repo
+const rk = (n: number) => `${provider}:${repo || ''}#${n}`; // runStatus key for the CURRENT provider+repo (matches runKey's `repo || ''`)
 
 /* ----------------------------- local tags (private, relay.json) ----------------------------- */
 // GitHub tags keep their legacy bare "owner/name#n" key so existing tags survive; other providers namespace.
@@ -134,6 +153,12 @@ function labelHtml(l: { name: string; color?: string }): string {
 }
 // A PR/MR on the issue-N branch means the run reached review; else the in-session run state; else idle.
 const statusOf = (n: number): RunStatus => (prByBranch[`issue-${n}`] ? 'review' : runStatus.get(rk(n)) || 'idle');
+// Tooltip for a clickable status chip (idle/review chips aren't clickable → no tip).
+const chipTitle = (st: RunStatus): string =>
+  st === 'queued' ? 'Click to remove from the queue'
+  : st === 'validating' ? 'Validating the issue — click to stop & free the slot'
+  : st === 'fixing' || st === 'working' ? 'Click to free this slot (mark the run done)'
+  : st === 'invalid' ? 'Not valid — click for the reason (and to run Fix anyway)' : '';
 
 // Apply the search query + active tag/label filters (AND) + "assigned to me" to the pulled issues.
 function visibleIssues(): Issue[] {
@@ -224,7 +249,7 @@ function render(): void {
         </div>
       </div>
       <div class="isr-side">
-        <span class="isr-st ${st}" data-num="${i.number}"${st === 'queued' ? ' title="Click to remove from the queue"' : st === 'working' ? ' title="Click to free this slot (mark the run done)"' : ''}>${st}</span>
+        <span class="isr-st ${st}" data-num="${i.number}" title="${chipTitle(st)}">${st}</span>
         ${prByBranch[`issue-${i.number}`] ? `<button class="isr-pr" data-url="${esc(prByBranch[`issue-${i.number}`].url)}" title="Open pull request">PR ↗</button>` : ''}
         <button class="isr-info" data-num="${i.number}" title="View issue details">ⓘ</button>
         <button class="isr-ext" data-url="${esc(i.url)}" title="Open #${i.number} on ${esc(pc.name)}">↗</button>
@@ -243,9 +268,13 @@ function render(): void {
   el.querySelectorAll<HTMLElement>('.isr-ext, .isr-pr').forEach((b) => {
     b.onclick = (e) => { e.stopPropagation(); const u = b.dataset.url; if (u) relay.openExternal(u); };
   });
-  // Status chip: queued → cancel; working → free the slot (so a queue can't wedge on a no-PR run).
-  el.querySelectorAll<HTMLElement>('.isr-st.queued, .isr-st.working').forEach((c) => {
+  // Status chip: queued → cancel; a live stage (working/validating/fixing) → free the slot (so a run that
+  // never opens a PR can't wedge the queue); invalid → open Details (to read the reason + override).
+  el.querySelectorAll<HTMLElement>('.isr-st.queued, .isr-st.working, .isr-st.validating, .isr-st.fixing').forEach((c) => {
     c.onclick = (e) => { e.stopPropagation(); const n = Number(c.dataset.num); c.classList.contains('queued') ? cancelQueued(n) : freeSlot(n); };
+  });
+  el.querySelectorAll<HTMLElement>('.isr-st.invalid').forEach((c) => {
+    c.onclick = (e) => { e.stopPropagation(); const n = Number(c.dataset.num); const iss = issues.find((x) => x.number === n); if (iss) openDetails(iss); };
   });
   el.querySelectorAll<HTMLElement>('.isr-tag').forEach((c) => {
     c.onclick = (e) => { e.stopPropagation(); void removeTag(Number(c.dataset.num), c.dataset.tag!); };
@@ -294,20 +323,37 @@ export async function loadIssues(): Promise<void> {
   const forProvider = provider, forRepo = repo;
   relay.providerPrs(forProvider, forRepo).then((pr: { ok: boolean; prs?: { branch: string; url: string; draft: boolean }[] }) => {
     if (seq !== loadSeq || !pr.ok || !pr.prs) return;
-    const map: Record<string, { url: string; draft: boolean }> = {};
-    for (const p of pr.prs) map[p.branch] = { url: p.url, draft: p.draft };
-    prByBranch = map; drainQueue(); render(); // a pre-existing PR/MR may free a slot for a queued issue
+    applyPrs(pr.prs); // a pre-existing PR/MR may free a slot for a queued issue
   }).catch(() => { /* PRs/MRs are a nice-to-have; the list still renders without them */ });
 }
 
 /* ----------------------------- assign queue engine (auto-drain) ----------------------------- */
-// Agents actively working for the current repo. A PR/MR flips an issue to 'review' (statusOf), freeing its
-// slot; a merged+closed issue drops out of `issues` on the next pull, which also frees it.
-const workingCount = (): number => issues.filter((i) => statusOf(i.number) === 'working').length;
+// Slots held for the CURRENT repo — derived from the run map (the single source of truth for a held slot),
+// NOT the displayed `issues` list, so an Open↔Closed toggle or a repo switch can't miscount runs whose
+// issue isn't currently pulled (which would over-launch past CAP or tear down the PR poll). A running stage
+// (validating/fixing) holds a slot; reaching review (applyPrs) or invalid frees it.
+const rkPrefix = (): string => `${provider}:${repo || ''}#`;
+const workingCount = (): number => {
+  let c = 0; const pre = rkPrefix();
+  for (const [k, s] of runStatus) if (k.startsWith(pre) && OCCUPYING.includes(s)) c++;
+  return c;
+};
+// Apply a fresh PR/MR map: light up review chips, and free the slot of any occupying run whose branch now
+// has a PR (it reached review) — keep the run record so Details still shows its finished graph. Then drain.
+function applyPrs(prs: { branch: string; url: string; draft: boolean }[]): void {
+  const map: Record<string, { url: string; draft: boolean }> = {};
+  for (const p of prs) map[p.branch] = { url: p.url, draft: p.draft };
+  prByBranch = map;
+  const pre = rkPrefix();
+  for (const [k, s] of [...runStatus]) { // a reviewed run's stale validating/fixing entry must not keep holding a slot
+    if (k.startsWith(pre) && OCCUPYING.includes(s) && map[`issue-${k.slice(k.lastIndexOf('#') + 1)}`]) runStatus.delete(k);
+  }
+  drainQueue(); render();
+}
 
+// A queued item is a fully-prepared pipeline run — launch it from stage 0 (the worktree already exists).
 function launchQueued(item: QueueItem, auto: boolean): void {
-  runStatus.set(`${item.provider}:${item.repo}#${item.number}`, 'working');
-  deps.openAgentTab({ cwd: item.cwd, name: `issue #${item.number}`, runCmd: item.runCmd });
+  startPipeline({ provider: item.provider, repo: item.repo, issue: item.issue, pipeline: pipelineById(item.pipelineId), wt: item.cwd, agentId: item.agentId, brief0Rel: item.brief0Rel });
   toast(`${auto ? 'Auto-launching' : 'Launching'} ${item.agentName} on #${item.number}`, true);
 }
 
@@ -331,29 +377,110 @@ async function pollPrs(): Promise<void> {
   if (!forRepo) { ensurePolling(); return; }
   const pr = await relay.providerPrs(forProvider, forRepo).catch(() => null);
   if (!pr || !pr.ok || !pr.prs || forProvider !== provider || forRepo !== repo) return; // switched mid-flight → drop
-  const map: Record<string, { url: string; draft: boolean }> = {};
-  for (const p of pr.prs) map[p.branch] = { url: p.url, draft: p.draft };
-  prByBranch = map;
-  drainQueue(); render(); // a newly-opened PR/MR may free a slot; also refreshes review chips / PR buttons
+  applyPrs(pr.prs); // a newly-opened PR/MR may free a slot; also refreshes review chips / PR buttons
 }
 function ensurePolling(): void {
-  const active = queue.some((q) => q.provider === provider && q.repo === repo) || issues.some((i) => statusOf(i.number) === 'working');
+  const active = queue.some((q) => q.provider === provider && q.repo === repo) || workingCount() > 0;
   if (active && pollTimer == null) pollTimer = window.setInterval(() => void pollPrs(), 30000);
   else if (!active && pollTimer != null) { clearInterval(pollTimer); pollTimer = null; }
 }
 
-// Manual escape hatches for the queue's one failure mode: a run that ends WITHOUT a PR/MR (e.g. the agent
-// judged the issue invalid) never frees its slot on its own. Clicking the status chip resolves it.
+// Manual escape hatches for the queue's one failure mode: a run that ends WITHOUT a PR/MR (e.g. an agent
+// that never wrote its verdict) never frees its slot on its own. Clicking the status chip resolves it.
 function cancelQueued(n: number): void {
   const i = queue.findIndex((q) => q.provider === provider && q.repo === repo && q.number === n);
   if (i >= 0) queue.splice(i, 1);
-  runStatus.delete(rk(n));
-  toast(`Removed #${n} from the queue`); render(); ensurePolling();
+  runStatus.delete(rk(n)); runs.delete(rk(n));
+  toast(`Removed #${n} from the queue`); render(); ensurePolling(); ensureStagePoll();
 }
 function freeSlot(n: number): void {
-  runStatus.delete(rk(n));   // treat the run as done → its slot frees and the queue advances
+  runStatus.delete(rk(n)); runs.delete(rk(n)); // treat the run as done → its slot frees and the queue advances
   toast(`Freed the slot held by #${n}`);
-  drainQueue(); render();
+  drainQueue(); render(); ensureStagePoll();
+}
+
+/* ----------------------------- pipeline runner (staged, gated by verdict files) ----------------------------- */
+// A key that's stable across a repo switch — a run outlives the view it was started from.
+const runKey = (prov: ProviderId, rpo: string, n: number) => `${prov}:${rpo}#${n}`;
+
+// Launch stage `idx` of a run: write its brief (stage 0's is already on disk from worktree-add), clear its
+// stale verdict, open the agent in the worktree tab, and — if it's a GATE — start watching for its verdict.
+async function launchStage(key: string, idx: number): Promise<void> {
+  const run = runs.get(key); if (!run) return;
+  const stage = run.pipeline.stages[idx]; if (!stage) return;
+  // Any stage with outgoing edges signals completion by writing its verdict → we poll for it (a conditional
+  // gate AND an `always`-only step both advance this way). No edges → terminal (Fix), completion = its PR.
+  run.stageIdx = idx; run.awaiting = !!stage.edges?.length; run.reason = undefined;
+  runStatus.set(key, stage.status); // set synchronously so workingCount() is correct before the async prep
+  const ctx: StageCtx = { i: run.issue, closeStep: PROVS[run.provider].closeStep(run.number), verdictRel: `.slayer/stage-${idx}.json` };
+  const briefRel = idx === 0 ? run.brief0Rel : `.slayer/stage-${idx}.md`;
+  // Write the brief for later stages (stage 0's is already there) + clear this stage's stale verdict so a
+  // reused worktree can't read a previous run's pass/fail. Then launch the agent on the brief FILE.
+  await relay.pipelinePrep(run.wt, idx === 0 ? null : briefRel, idx === 0 ? null : stage.brief(ctx), idx).catch(() => {});
+  const agent = AGENTS.find((a) => a.id === run.agentId);
+  deps.openAgentTab({ cwd: run.wt, name: `#${run.number} · ${stage.name.toLowerCase()}`, runCmd: agent ? agent.launch(briefRel) : undefined });
+  render(); ensurePolling(); ensureStagePoll();
+}
+
+// Record a run and kick it off from stage 0. Called from a fresh Assign and from the auto-drain queue.
+function startPipeline(o: { provider: ProviderId; repo: string; issue: Issue; pipeline: Pipeline; wt: string; agentId: string; brief0Rel: string }): void {
+  const key = runKey(o.provider, o.repo, o.issue.number);
+  runs.set(key, { provider: o.provider, repo: o.repo, number: o.issue.number, title: o.issue.title, issue: o.issue, pipeline: o.pipeline, stageIdx: 0, wt: o.wt, agentId: o.agentId, brief0Rel: o.brief0Rel, awaiting: false });
+  runStatus.set(key, o.pipeline.stages[0].status); // synchronous, so a drain loop can't over-launch past CAP
+  void launchStage(key, 0);
+}
+
+// Fast verdict poll — the engine that advances GATE stages. Runs only while some run awaits a verdict.
+let stageTimer: number | null = null;
+function ensureStagePoll(): void {
+  const active = [...runs.values()].some((r) => r.awaiting);
+  if (active && stageTimer == null) stageTimer = window.setInterval(() => void pollStages(), 4000);
+  else if (!active && stageTimer != null) { clearInterval(stageTimer); stageTimer = null; }
+}
+let pollingStages = false; // re-entrancy guard: the 4s interval must not start a second pass while one awaits
+async function pollStages(): Promise<void> {
+  if (pollingStages) return;
+  pollingStages = true;
+  try {
+    for (const [key, run] of [...runs.entries()].filter(([, r]) => r.awaiting)) {
+      const v = await relay.pipelineVerdict(run.wt, run.stageIdx).catch(() => null);
+      if (!runs.has(key) || !run.awaiting) continue;  // resolved/cleared while we awaited
+      if (!v || !v.found) continue;                    // verdict not written yet — keep polling
+      run.awaiting = false;
+      // Follow the matching conditional edge out of this gate stage.
+      const edge = nextEdge(run.pipeline.stages[run.stageIdx], !!v.passed);
+      const target = edge && edge.to !== STOP ? stageIndexByName(run.pipeline, edge.to) : -1;
+      if (edge && edge.to !== STOP && target >= 0) {
+        // A stage target → run it.
+        toast(`#${run.number} ${v.passed ? 'validated ✓' : 'gate: ' + edge.when} — starting ${run.pipeline.stages[target].name}`, true);
+        await launchStage(key, target);
+      } else if (edge && edge.to === STOP) {
+        // The invalid off-ramp: stop & report. No fix, no PR. Keep the run for an override.
+        run.reason = v.summary || 'The agent judged this issue not valid.';
+        runStatus.set(key, 'invalid');
+        toast(`#${run.number} — not valid; pipeline stopped`);
+        drainQueue(); render();
+      } else if (v.passed) {
+        // Passed but no outgoing edge (or a dangling target) → the line ends cleanly here.
+        runStatus.delete(key); runs.delete(key); drainQueue(); render();
+      } else {
+        // Failed with no matching edge → report it (same as the STOP off-ramp).
+        run.reason = v.summary || 'The agent judged this issue not valid.';
+        runStatus.set(key, 'invalid'); drainQueue(); render();
+      }
+    }
+  } finally { pollingStages = false; ensureStagePoll(); }
+}
+
+// Override an `invalid` verdict: run the stage the gate WOULD have gone to on a valid verdict, on the same
+// worktree (i.e. take the `when:'valid'` edge anyway).
+function overrideInvalid(key: string): void {
+  const run = runs.get(key); if (!run) return;
+  const edge = nextEdge(run.pipeline.stages[run.stageIdx], true); // pretend the verdict was valid
+  const target = edge && edge.to !== STOP ? stageIndexByName(run.pipeline, edge.to) : -1;
+  if (target < 0) { toast('Nothing to run after this stage'); return; }
+  toast(`#${run.number} — running ${run.pipeline.stages[target].name} anyway`, true);
+  void launchStage(key, target);
 }
 
 /* ----------------------------- assign → agent ----------------------------- */
@@ -369,35 +496,61 @@ function modal(html: string, onClose?: () => void): { root: HTMLElement; close: 
   return { root, close };
 }
 
-// The brief handed to the agent — the issue itself plus a small, explicit task. Editable before launch.
-// Step 4 (open the PR/MR + close keyword) is provider-specific.
-function defaultBrief(i: Issue): string {
-  const body = (i.body || '').trim() || '_(no description provided)_';
-  return `# Issue #${i.number}: ${i.title}
+// The seed brief for a stage — the issue itself plus that stage's task. Editable before launch. The
+// provider-specific "open the PR/MR + close keyword" step is passed in via closeStep; the gate verdict path
+// is the stage's own `.slayer/stage-<idx>.json`. `prov` is pinned by the caller (no mid-dialog drift).
+function stageBriefText(p: Pipeline, idx: number, i: Issue, prov: ProviderId): string {
+  const stage = p.stages[idx]; if (!stage) return '';
+  return stage.brief({ i, closeStep: PROVS[prov].closeStep(i.number), verdictRel: `.slayer/stage-${idx}.json` });
+}
 
-${body}
+// The sequence graph — the issue as the head node, wired left-to-right through the pipeline's stages, with
+// the condition on each gate edge and the invalid → Stop off-ramp. Used as a static preview in Assign
+// (opts.preview) and as a LIVE graph in Details that lights up stage-by-stage as the run advances.
+//   opts.stageIdx = the active stage · opts.invalid = a gate closed at stageIdx · opts.review = a PR is open.
+function seqGraph(p: Pipeline, issueNumber: number, opts: { stageIdx?: number; invalid?: boolean; review?: boolean; preview?: boolean } = {}): string {
+  const preview = !!opts.preview;
+  const cur = opts.stageIdx ?? -1;
+  const failedIdx = opts.invalid ? cur : -1;
+  const review = !!opts.review;
+  const stateFor = (k: number): string => {
+    if (preview) return 'idle';
+    if (k === failedIdx) return 'failed';
+    if (failedIdx >= 0 && k > failedIdx) return 'skipped';
+    if (review || k < cur) return 'done';
+    if (k === cur) return 'running';
+    return 'pending';
+  };
+  const badge = (s: string): string =>
+    s === 'done' ? '<span class="sg-b done">✓</span>' : s === 'running' ? '<span class="sg-b run">↻</span>' : s === 'failed' ? '<span class="sg-b fail">✗</span>' : '';
+  const edge = (label: string, cls = ''): string =>
+    `<span class="sg-edge ${cls}">${label ? `<span class="sg-lab">${esc(label)}</span>` : ''}<span class="sg-arr"></span></span>`;
 
----
-
-## Task
-1. **Validate the issue first.** Before changing anything, check whether the reported problem is real, correct, and reproducible in this codebase. If it is already fixed, not reproducible, or the report is inaccurate/invalid, say so clearly with evidence and stop — do not force a change.
-2. If it is valid, implement a fix:
-   - Make the smallest change that correctly resolves it.
-   - Run the project's checks/tests if there are any.
-3. Summarize what you did — the fix and why, or (if no change was needed) why the issue isn't valid.
-4. If the fix looks good, ${PROVS[provider].closeStep(i.number)}
-`;
+  const out: string[] = [`<span class="sg-node sg-issue"><b class="sg-k">issue</b>#${issueNumber}</span>`, edge('assign')];
+  for (let k = 0; k < p.stages.length; k++) {
+    const s = p.stages[k]; const state = stateFor(k);
+    out.push(`<span class="sg-node sg-stage k-${s.kind} sg-${state}"><span class="sg-dot"></span>${esc(s.name)}${badge(state)}</span>`);
+    if (k === failedIdx) { // gate closed → invalid branch → Stop; the rest of the happy path never ran
+      out.push(edge('if invalid', 'no'), `<span class="sg-node sg-stop">⛔ Stop</span>`);
+      return `<div class="sg-wrap"><div class="sg">${out.join('')}</div></div>`;
+    }
+    if (k < p.stages.length - 1) out.push(edge(isGate(s) ? 'if valid' : '', isGate(s) ? 'ok' : ''));
+  }
+  // happy-path terminal → PR
+  out.push(edge(''), `<span class="sg-node sg-term ${review ? 'on' : ''}">${review ? '✅ PR → review' : 'PR'}</span>`);
+  return `<div class="sg-wrap"><div class="sg">${out.join('')}</div></div>`;
 }
 
 // Coding agents you can assign an issue to. Each is a thin adapter: a bin to detect + how to launch it in
-// the worktree terminal, seeded with the brief FILE (never issue text on the command line). Only Claude
+// the worktree terminal, seeded with the brief FILE (never issue text on the command line). The brief FILE
+// dictates the task (validate vs fix), so the launch wrapper stays neutral — "follow the brief". Only Claude
 // Code is verified on this machine; the others follow their documented CLIs and are best-effort.
 const AGENTS: { id: string; name: string; bin: string; launch: (rel: string) => string }[] = [
-  { id: 'claude', name: 'Claude Code', bin: 'claude', launch: (rel) => `claude "Read ${rel} and implement the fix for the issue it describes in this repository, then summarize the changes."` },
-  { id: 'gemini', name: 'Gemini CLI', bin: 'gemini', launch: (rel) => `gemini "Read ${rel} and implement the fix for the issue it describes in this repository, then summarize the changes."` },
-  { id: 'codex', name: 'Codex CLI', bin: 'codex', launch: (rel) => `codex "Read ${rel} and implement the fix for the issue it describes in this repository, then summarize the changes."` },
-  { id: 'aider', name: 'Aider', bin: 'aider', launch: (rel) => `aider --message "Read ${rel} and implement the fix for the issue it describes in this repository, then summarize the changes."` },
-  { id: 'antigravity', name: 'Antigravity', bin: 'antigravity', launch: (rel) => `antigravity "Read ${rel} and implement the fix it describes in this repository, then summarize the changes."` },
+  { id: 'claude', name: 'Claude Code', bin: 'claude', launch: (rel) => `claude "Read ${rel} and carry out the task it describes in this repository exactly as written, then summarize what you did."` },
+  { id: 'gemini', name: 'Gemini CLI', bin: 'gemini', launch: (rel) => `gemini "Read ${rel} and carry out the task it describes in this repository exactly as written, then summarize what you did."` },
+  { id: 'codex', name: 'Codex CLI', bin: 'codex', launch: (rel) => `codex "Read ${rel} and carry out the task it describes in this repository exactly as written, then summarize what you did."` },
+  { id: 'aider', name: 'Aider', bin: 'aider', launch: (rel) => `aider --message "Read ${rel} and carry out the task it describes in this repository exactly as written, then summarize what you did."` },
+  { id: 'antigravity', name: 'Antigravity', bin: 'antigravity', launch: (rel) => `antigravity "Read ${rel} and carry out the task it describes in this repository exactly as written, then summarize what you did."` },
 ];
 
 // Read-only issue details — usable at any time, including while the issue is being worked on (its row
@@ -411,22 +564,33 @@ function openDetails(i: Issue): void {
   const pr = prByBranch[`issue-${i.number}`];
   const body = (i.body || '').trim();
   const assignees = i.assignees || [];
-  const foot = st === 'working' ? 'Being worked on — its agent runs in a terminal tab.' : st === 'review' ? `A ${prWord} is open for this issue.` : st === 'queued' ? 'Queued — starts when a slot frees.' : '';
+  const run = runs.get(rk(i.number)); // its pipeline run, if any (drives the graph + invalid reason + override)
+  const foot = st === 'validating' ? 'Validating — checking the issue is real & reproducible (no code changes yet).'
+    : st === 'fixing' ? 'Fixing — implementing the change in a terminal tab.'
+    : st === 'invalid' ? 'Stopped — the agent judged this issue not valid. You can still run the fix anyway.'
+    : st === 'working' ? 'Being worked on — its agent runs in a terminal tab.'
+    : st === 'review' ? `A ${prWord} is open for this issue.`
+    : st === 'queued' ? 'Queued — starts when a slot frees.' : '';
+  // The live sequence graph: issue → stages → PR, lit by the current run state (running / done / failed).
+  const graph = run ? seqGraph(run.pipeline, i.number, { stageIdx: run.stageIdx, invalid: st === 'invalid', review: st === 'review' }) : '';
   const { root, close } = modal(`<div class="tpl-card iss-card iss-det">
       <div class="hd"><span class="dot" style="background:var(--accent)"></span><span class="t">Issue #${i.number}<small>${esc(i.title)}</small></span></div>
       <div class="bd">
         <div class="det-row"><span class="isr-st ${st}">${st}</span><span class="det-repo"><span class="src-dot ${pc.dot}"></span> ${esc(repo || '')}</span>${pr ? `<span class="det-pr">${prWord} open${pr.draft ? ' · draft' : ''}</span>` : ''}</div>
+        ${run ? `<div class="det-pipe"><span class="det-k">${esc(run.pipeline.name)}</span></div>${graph}` : ''}
+        ${run?.reason ? `<div class="det-invalid">⛔ Not valid<div class="det-reason">${esc(run.reason)}</div></div>` : ''}
         ${i.labels.length ? `<div class="det-labs">${i.labels.map(labelHtml).join('')}</div>` : ''}
         ${assignees.length ? `<div class="det-meta"><span class="det-k">Assignees</span>${assignees.map((a) => esc(a)).join(', ')}</div>` : ''}
         ${i.milestone ? `<div class="det-meta"><span class="det-k">Milestone</span>${esc(i.milestone)}</div>` : ''}
         <div class="det-body">${body ? esc(body) : '<span class="mut">No description provided.</span>'}</div>
       </div>
-      <div class="ft"><span class="hint">${foot}</span><span class="r">${pr ? `<button class="tpl-btn ghost" data-pr>Open ${prWord} ↗</button>` : ''}<button class="tpl-btn ghost" data-ext>Open on ${esc(pc.name)} ↗</button>${canAssign ? '<button class="tpl-btn pri" data-assign>⚡ Assign…</button>' : ''}<button class="tpl-btn ${canAssign ? 'ghost' : 'pri'}" data-x>${canAssign ? 'Close' : 'Done'}</button></span></div>
+      <div class="ft"><span class="hint">${foot}</span><span class="r">${pr ? `<button class="tpl-btn ghost" data-pr>Open ${prWord} ↗</button>` : ''}<button class="tpl-btn ghost" data-ext>Open on ${esc(pc.name)} ↗</button>${st === 'invalid' && run ? '<button class="tpl-btn pri" data-override>▶ Run Fix anyway</button>' : ''}${canAssign ? '<button class="tpl-btn pri" data-assign>⚡ Assign…</button>' : ''}<button class="tpl-btn ${canAssign || st === 'invalid' ? 'ghost' : 'pri'}" data-x>${canAssign || st === 'invalid' ? 'Close' : 'Done'}</button></span></div>
     </div>`);
   root.querySelector('[data-x]')?.addEventListener('click', close);
   root.querySelector('[data-ext]')?.addEventListener('click', () => relay.openExternal(i.url));
   root.querySelector('[data-pr]')?.addEventListener('click', () => { if (pr) relay.openExternal(pr.url); });
   root.querySelector('[data-assign]')?.addEventListener('click', () => { close(); void openAssign(i); });
+  root.querySelector('[data-override]')?.addEventListener('click', () => { close(); overrideInvalid(rk(i.number)); });
 }
 
 let assigning = false; // guard the whole create-worktree round-trip against a double submit
@@ -438,16 +602,24 @@ async function openAssign(i: Issue): Promise<void> {
   // Default agent = the saved preference if still installed, else the first installed one.
   let agentId = (state.settings.issueAgent && detected[state.settings.issueAgent]) ? state.settings.issueAgent : (installed[0]?.id || '');
   const opts = AGENTS.map((a) => `<option value="${a.id}"${a.id === agentId ? ' selected' : ''}${detected[a.id] ? '' : ' disabled'}>${esc(a.name)}${detected[a.id] ? '' : ' — not installed'}</option>`).join('');
-  const primary = agentOk ? '⚡ Assign & launch' : 'Create worktree & open';
+  // Default pipeline = the saved preference if it still exists, else the first (Validate → Fix).
+  let pipelineId = (state.settings.issuePipeline && PIPELINES.some((p) => p.id === state.settings.issuePipeline)) ? state.settings.issuePipeline! : PIPELINES[0].id;
+  const pipeOpts = PIPELINES.map((p) => `<option value="${p.id}"${p.id === pipelineId ? ' selected' : ''}>${esc(p.name)}</option>`).join('');
   const asgProvider = provider, asgRepo = repo; // pin the target so a mid-dialog repo switch can't retarget
+  let pipeline = pipelineById(pipelineId);
+  let briefDirty = false;                    // once the user edits the brief, stop re-seeding it on pipeline change
+  const primary = agentOk ? '⚡ Run pipeline' : 'Create worktree & open';
   const { root, close } = modal(`<div class="tpl-card iss-card">
       <div class="hd"><span class="dot" style="background:var(--accent)"></span><span class="t">Assign #${i.number}<small>${esc(i.title)}</small></span></div>
       <div class="bd">
         <div class="iss-agentrow"><label class="iss-lbl" style="margin:0">Assign to</label><select class="iss-agentsel" id="issAgentSel"${agentOk ? '' : ' disabled'}>${opts}</select></div>
         <div class="iss-agent ${agentOk ? 'ok' : 'no'}">${agentOk ? '✓ runs in its own login/session (keyless where supported), in an isolated worktree' : '⚠ No coding agent on PATH — the worktree still opens; install Claude Code (or Gemini / Codex / Aider) to auto-launch.'}</div>
-        <label class="iss-lbl">Brief for the agent <span class="mut">— edit before launch</span></label>
-        <textarea class="iss-brief" spellcheck="false" rows="11">${esc(defaultBrief(i))}</textarea>
-        <div class="iss-wt">Creates an isolated worktree on branch <code>issue-${i.number}</code> and runs the agent there.</div>
+        <div class="iss-agentrow"><label class="iss-lbl" style="margin:0">Pipeline</label><select class="iss-agentsel" id="issPipeSel">${pipeOpts}</select></div>
+        <div class="pipe-preview" id="issGraph">${seqGraph(pipeline, i.number, { preview: true })}</div>
+        <div class="iss-pipedesc" id="issPipeDesc">${esc(pipeline.desc)}</div>
+        <label class="iss-lbl">Brief · <span id="issBriefStage">${esc(pipeline.stages[0].name)}</span> stage <span class="mut">— edit before launch</span></label>
+        <textarea class="iss-brief" spellcheck="false" rows="10">${esc(stageBriefText(pipeline, 0, i, asgProvider))}</textarea>
+        <div class="iss-wt">Creates an isolated worktree on branch <code>issue-${i.number}</code> and runs the pipeline there. Later stages use their built-in briefs.</div>
       </div>
       <div class="ft"><span class="hint">Saved as <code>.slayer/issue-${i.number}.md</code> (git-excluded)</span><span class="r"><button class="tpl-btn ghost" data-x>Cancel</button><button class="tpl-btn pri" data-ok>${primary}</button></span></div>
     </div>`);
@@ -455,33 +627,48 @@ async function openAssign(i: Issue): Promise<void> {
   const okBtn = root.querySelector('[data-ok]') as HTMLButtonElement;
   const sel = root.querySelector('#issAgentSel') as HTMLSelectElement | null;
   if (sel) sel.onchange = () => { agentId = sel.value; void relay.patchSettings({ issueAgent: agentId }); }; // remember the pick
+  const psel = root.querySelector('#issPipeSel') as HTMLSelectElement | null;
+  if (psel) psel.onchange = () => {
+    pipelineId = psel.value; pipeline = pipelineById(pipelineId);
+    void relay.patchSettings({ issuePipeline: pipelineId }).then((s: typeof state.settings) => { state.settings = s; }).catch(() => {});
+    const g = root.querySelector('#issGraph'); if (g) g.innerHTML = seqGraph(pipeline, i.number, { preview: true });
+    const d = root.querySelector('#issPipeDesc'); if (d) d.textContent = pipeline.desc;
+    const bs = root.querySelector('#issBriefStage'); if (bs) bs.textContent = pipeline.stages[0].name;
+    if (!briefDirty) ta.value = stageBriefText(pipeline, 0, i, asgProvider); // re-seed the (unedited) brief for the new first stage
+  };
+  ta.oninput = () => { briefDirty = true; };
   root.querySelector('[data-x]')?.addEventListener('click', close);
   setTimeout(() => ta.focus(), 30);
   okBtn.addEventListener('click', async () => {
     if (assigning) return;
     assigning = true; okBtn.disabled = true; okBtn.textContent = 'Creating worktree…';
+    // ta.value is stage 0's brief → worktree-add writes it as .slayer/issue-N.md (stage 0's brief file).
     const res = await relay.worktreeAdd(asgProvider, asgRepo || '', dir, i.number, ta.value).catch(() => ({ ok: false, error: 'Worktree creation failed' }));
     assigning = false;
     if (!root.isConnected) return; // user backed out (Escape/scrim) while the worktree was being created — don't launch
     if (!res.ok) { okBtn.disabled = false; okBtn.textContent = primary; toast(res.error || 'Could not create worktree'); return; }
-    const rel = res.briefRel || '';
+    const brief0Rel = res.briefRel || '';
     const agent = AGENTS.find((a) => a.id === agentId);
-    const runCmd = (agentOk && agent) ? (rel ? agent.launch(rel) : agent.bin) : undefined;
-    // At capacity → queue it. The worktree + brief are already prepared above, so it auto-launches the
-    // instant a running agent reaches review (its PR/MR appears) and frees a slot.
-    if (agentOk && agent && workingCount() >= CAP()) {
+    // No coding agent on PATH → just open the worktree; there's nothing to run the pipeline with.
+    if (!(agentOk && agent)) {
+      deps.openAgentTab({ cwd: res.path!, name: `issue #${i.number}`, runCmd: undefined });
+      render(); close();
+      toast(res.reused ? `Reopened worktree for #${i.number}` : `Worktree ready for #${i.number}`, true);
+      return;
+    }
+    // At capacity → queue the whole pipeline. The worktree + stage-0 brief are already prepared, so it
+    // auto-launches (from stage 0) the instant a running agent reaches review and frees a slot.
+    if (workingCount() >= CAP()) {
       if (!queue.some((q) => q.provider === asgProvider && q.repo === (asgRepo || '') && q.number === i.number)) // don't double-queue
-        queue.push({ provider: asgProvider, repo: asgRepo || '', number: i.number, title: i.title, cwd: res.path!, runCmd, agentName: agent.name });
-      runStatus.set(`${asgProvider}:${asgRepo}#${i.number}`, 'queued');
+        queue.push({ provider: asgProvider, repo: asgRepo || '', number: i.number, title: i.title, cwd: res.path!, agentId, agentName: agent.name, issue: i, pipelineId: pipeline.id, brief0Rel });
+      runStatus.set(runKey(asgProvider, asgRepo || '', i.number), 'queued');
       render(); ensurePolling(); close();
       toast(`Queued #${i.number} — starts when a slot frees (${workingCount()}/${CAP()} running)`, true);
       return;
     }
-    deps.openAgentTab({ cwd: res.path!, name: `issue #${i.number}`, runCmd });
-    if (agentOk) { runStatus.set(`${asgProvider}:${asgRepo}#${i.number}`, 'working'); ensurePolling(); } // the row now shows it's being worked on
-    render();
+    startPipeline({ provider: asgProvider, repo: asgRepo || '', issue: i, pipeline, wt: res.path!, agentId, brief0Rel });
     close();
-    toast(res.reused ? `Reopened worktree for #${i.number}` : (agentOk ? `Launching ${agent?.name || 'agent'} on #${i.number}` : `Worktree ready for #${i.number}`), true);
+    toast(res.reused ? `Reopened worktree for #${i.number} · ${pipeline.name}` : `Launching ${pipeline.name} on #${i.number}`, true);
   });
 }
 
