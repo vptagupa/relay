@@ -69,20 +69,17 @@ const github = {
     if (who.status === 401) return { connected: false };   // ONLY a real 401 means the token is revoked
     return { connected: true, login: str(asObj(who.json).login) };
   },
-  async issues(ws: string, repo: string, state: IssueState = 'open'): Promise<{ ok: boolean; issues?: Issue[]; error?: string }> {
-    const raw: Array<Record<string, unknown>> = [];
-    for (let page = 1; page <= 4; page++) {
-      const r = await ghApi(ws, `/repos/${repo}/issues?state=${state === 'closed' ? 'closed' : 'open'}&per_page=100&page=${page}`);
-      if (!r.ok || !Array.isArray(r.json)) {
-        if (page > 1) break;
-        const msg = str(asObj(r.json).message);
-        if (r.status === 401) return { ok: false, error: 'Not connected — reconnect GitHub in Sources.' };
-        if (r.status === 403 || r.status === 404) return { ok: false, error: `${msg || 'No access'} (HTTP ${r.status}). If this repo is in an organization, an org owner may need to approve the Slayer T OAuth app (Org → Settings → Third-party Access).` };
-        return { ok: false, error: `${msg || 'Could not pull issues'} (HTTP ${r.status})` };
-      }
-      const arr = asArr(r.json); raw.push(...arr);
-      if (arr.length < 100) break;
+  // One page (100) of issues, for infinite scroll. hasMore = the raw page was full (issues + PRs, before the
+  // PR filter), so another page likely exists.
+  async issues(ws: string, repo: string, state: IssueState = 'open', page = 1): Promise<{ ok: boolean; issues?: Issue[]; hasMore?: boolean; error?: string }> {
+    const r = await ghApi(ws, `/repos/${repo}/issues?state=${state === 'closed' ? 'closed' : 'open'}&per_page=100&page=${page}`);
+    if (!r.ok || !Array.isArray(r.json)) {
+      const msg = str(asObj(r.json).message);
+      if (r.status === 401) return { ok: false, error: 'Not connected — reconnect GitHub in Sources.' };
+      if (r.status === 403 || r.status === 404) return { ok: false, error: `${msg || 'No access'} (HTTP ${r.status}). If this repo is in an organization, an org owner may need to approve the Slayer T OAuth app (Org → Settings → Third-party Access).` };
+      return { ok: false, error: `${msg || 'Could not pull issues'} (HTTP ${r.status})` };
     }
+    const raw = asArr(r.json);
     const issues: Issue[] = raw.filter((i) => !i.pull_request).map((i) => ({
       number: Number(i.number) || 0, title: str(i.title), body: str(i.body), state: str(i.state) || 'open', url: str(i.html_url),
       labels: asArr(i.labels).map((l) => ({ name: str(l.name), color: l.color ? str(l.color) : undefined })),
@@ -90,7 +87,7 @@ const github = {
       author: str(asObj(i.user).login) || undefined,
       milestone: i.milestone ? str(asObj(i.milestone).title) || undefined : undefined,
     }));
-    return { ok: true, issues };
+    return { ok: true, issues, hasMore: raw.length === 100 };
   },
   async repos(ws: string): Promise<{ ok: boolean; repos?: RepoRow[]; error?: string }> {
     const r = await ghApi(ws, '/user/repos?per_page=100&sort=updated&affiliation=owner,collaborator,organization_member');
@@ -138,19 +135,15 @@ const gitlab = {
     if (who.status === 401) return { connected: false };
     return { connected: true, login: str(asObj(who.json).username) };
   },
-  async issues(ws: string, repo: string, state: IssueState = 'open'): Promise<{ ok: boolean; issues?: Issue[]; error?: string }> {
-    const raw: Array<Record<string, unknown>> = [];
-    for (let page = 1; page <= 4; page++) {
-      const r = await glApi(ws, `/projects/${enc(repo)}/issues?state=${state === 'closed' ? 'closed' : 'opened'}&per_page=100&page=${page}`);
-      if (!r.ok || !Array.isArray(r.json)) {
-        if (page > 1) break;
-        const msg = str(asObj(r.json).message || asObj(r.json).error);
-        if (r.status === 401) return { ok: false, error: 'Not connected — reconnect GitLab in Sources.' };
-        return { ok: false, error: `${msg || 'Could not pull issues'} (HTTP ${r.status})` };
-      }
-      const arr = asArr(r.json); raw.push(...arr);
-      if (arr.length < 100) break;
+  // One page (100) of issues, for infinite scroll. hasMore = the page came back full.
+  async issues(ws: string, repo: string, state: IssueState = 'open', page = 1): Promise<{ ok: boolean; issues?: Issue[]; hasMore?: boolean; error?: string }> {
+    const r = await glApi(ws, `/projects/${enc(repo)}/issues?state=${state === 'closed' ? 'closed' : 'opened'}&per_page=100&page=${page}`);
+    if (!r.ok || !Array.isArray(r.json)) {
+      const msg = str(asObj(r.json).message || asObj(r.json).error);
+      if (r.status === 401) return { ok: false, error: 'Not connected — reconnect GitLab in Sources.' };
+      return { ok: false, error: `${msg || 'Could not pull issues'} (HTTP ${r.status})` };
     }
+    const raw = asArr(r.json);
     // GitLab numbers issues by project-internal iid (that's what URLs and "Closes #iid" use, not id).
     const issues: Issue[] = raw.map((i) => ({
       number: Number(i.iid) || 0, title: str(i.title), body: str(i.description), state: str(i.state) || 'opened', url: str(i.web_url),
@@ -159,7 +152,7 @@ const gitlab = {
       author: str(asObj(i.author).username) || undefined,
       milestone: i.milestone ? str(asObj(i.milestone).title) || undefined : undefined,
     }));
-    return { ok: true, issues };
+    return { ok: true, issues, hasMore: raw.length === 100 };
   },
   async repos(ws: string): Promise<{ ok: boolean; repos?: RepoRow[]; error?: string }> {
     const r = await glApi(ws, '/projects?membership=true&simple=true&per_page=100&order_by=last_activity_at&archived=false');
@@ -287,20 +280,17 @@ const bitbucket = {
     const u = asObj(who.json);
     return { connected: true, login: str(u.nickname || u.username || u.display_name) };
   },
-  async issues(ws: string, repo: string, state: IssueState = 'open'): Promise<{ ok: boolean; issues?: Issue[]; error?: string }> {
-    const raw: Array<Record<string, unknown>> = [];
-    for (let page = 1; page <= 4; page++) {
-      const r = await bbApi(ws, `/2.0/repositories/${repo}/issues?pagelen=50&page=${page}&sort=-updated_on`);
-      if (!r.ok || !Array.isArray(asObj(r.json).values)) {
-        if (page > 1) break;
-        const msg = str(asObj(r.json).error && asObj(asObj(r.json).error).message);
-        if (r.status === 401 || r.status === 403) return { ok: false, error: 'Not connected — reconnect Bitbucket in Sources.' };
-        if (r.status === 404) return { ok: false, error: 'No issue tracker on this repo (Bitbucket repos ship with it disabled — enable it in repo Settings, or the project uses Jira).' };
-        return { ok: false, error: `${msg || 'Could not pull issues'} (HTTP ${r.status})` };
-      }
-      const arr = asArr(asObj(r.json).values); raw.push(...arr);
-      if (arr.length < 50) break;
+  // One page (50) of issues, for infinite scroll. Bitbucket has no state= filter, so we page raw and filter
+  // client-side; hasMore uses the response's `next` link (more raw pages to scan).
+  async issues(ws: string, repo: string, state: IssueState = 'open', page = 1): Promise<{ ok: boolean; issues?: Issue[]; hasMore?: boolean; error?: string }> {
+    const r = await bbApi(ws, `/2.0/repositories/${repo}/issues?pagelen=50&page=${page}&sort=-updated_on`);
+    if (!r.ok || !Array.isArray(asObj(r.json).values)) {
+      const msg = str(asObj(r.json).error && asObj(asObj(r.json).error).message);
+      if (r.status === 401 || r.status === 403) return { ok: false, error: 'Not connected — reconnect Bitbucket in Sources.' };
+      if (r.status === 404) return { ok: false, error: 'No issue tracker on this repo (Bitbucket repos ship with it disabled — enable it in repo Settings, or the project uses Jira).' };
+      return { ok: false, error: `${msg || 'Could not pull issues'} (HTTP ${r.status})` };
     }
+    const raw = asArr(asObj(r.json).values);
     // Bitbucket has no state= query param, so filter the fetched page client-side: open = new/open, closed = the rest.
     const issues: Issue[] = raw.filter((i) => (state === 'closed') !== OPEN_BB.has(str(i.state))).map((i) => {
       const links = asObj(asObj(i.links).html);
@@ -315,7 +305,7 @@ const bitbucket = {
         milestone: i.milestone ? str(asObj(i.milestone).name) || undefined : undefined,
       };
     });
-    return { ok: true, issues };
+    return { ok: true, issues, hasMore: !!asObj(r.json).next };
   },
   // CHANGE-2770 (2026-04-14): Atlassian PERMANENTLY REMOVED every cross-workspace listing —
   // GET /2.0/repositories, GET /2.0/workspaces, and GET /2.0/user/permissions/workspaces all return HTTP 410
@@ -385,7 +375,7 @@ const bitbucket = {
 // keyed per workspace so nothing is shared between them. Stateless helpers (repoFromRemote, cloneUrl) don't.
 export interface Adapter {
   authState(ws: string): Promise<{ connected: boolean; login?: string }>;
-  issues(ws: string, repo: string, state?: IssueState): Promise<{ ok: boolean; issues?: Issue[]; error?: string }>;
+  issues(ws: string, repo: string, state?: IssueState, page?: number): Promise<{ ok: boolean; issues?: Issue[]; hasMore?: boolean; error?: string }>;
   repos(ws: string, opts?: RepoListOpts): Promise<{ ok: boolean; repos?: RepoRow[]; error?: string }>;
   prs(ws: string, repo: string): Promise<{ ok: boolean; prs?: PrRow[]; error?: string }>;
   repoFromRemote(url: string): string | null;

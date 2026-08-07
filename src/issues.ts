@@ -109,6 +109,9 @@ let issues: Issue[] = [];
 let errMsg = '';
 let loadedFor = '';   // the key the current result was pulled for (re-pull when it changes)
 let loadSeq = 0;      // supersedes an in-flight pull when a newer one starts
+let issuesPage = 1;   // highest provider page loaded into `issues` (infinite scroll)
+let issuesHasMore = false; // the last page came back full → more issues to load on scroll
+let loadingMore = false;   // a load-more fetch is in flight (guards re-entrancy)
 let query = '';       // search box text
 const activeFilters = new Set<string>();        // active local-tag filter chips (AND)
 const activeLabels = new Set<string>();         // active provider-label filter chips (AND)
@@ -203,6 +206,22 @@ function allAuthors(): { login: string; count: number }[] {
   for (const i of issues) if (i.author) m.set(i.author, (m.get(i.author) || 0) + 1);
   return [...m].map(([login, count]) => ({ login, count })).sort((a, b) => b.count - a.count || a.login.localeCompare(b.login));
 }
+// Per-owner totals over the CURRENTLY LOADED issues: how many each creator filed, and how many are fixed —
+// where "fixed" = the agent opened a PR/MR for it (status 'review') or the issue is closed/merged (closed view).
+// Independent of the active filter chips (it summarizes everything pulled, not just what's visible).
+function ownerSummary(): { login: string; created: number; fixed: number }[] {
+  const closedView = issueState === 'closed';                       // in the closed view every loaded issue is resolved
+  const m = new Map<string, { created: number; fixed: number }>();
+  for (const i of issues) {
+    const who = i.author || '(unknown)';
+    const row = m.get(who) || { created: 0, fixed: 0 };
+    row.created++;
+    if (closedView || statusOf(i.number) === 'review') row.fixed++;
+    m.set(who, row);
+  }
+  return [...m].map(([login, v]) => ({ login, created: v.created, fixed: v.fixed }))
+    .sort((a, b) => b.created - a.created || b.fixed - a.fixed || a.login.localeCompare(b.login));
+}
 async function persist(): Promise<void> { try { state.settings = await relay.patchSettings({ issueTags: tagsMap() }); } catch { /* keep the in-memory tags; a failed write must never clobber */ } }
 async function addTag(n: number, raw: string): Promise<void> {
   const t = raw.trim().replace(/^#+/, '').toLowerCase().replace(/\s+/g, '-').slice(0, 24);
@@ -286,7 +305,7 @@ function renderFilters(): void {
 
 function render(): void {
   const qN = queue.filter((q) => q.provider === provider && q.repo === repo).length; // queued-for-this-repo count
-  const count = phase === 'ready' ? `${repo} · ${issues.length} ${issueState}${qN ? ` · ${qN} queued` : ''}` : repo;
+  const count = phase === 'ready' ? `${repo} · ${issues.length}${issuesHasMore ? '+' : ''} ${issueState}${qN ? ` · ${qN} queued` : ''}` : repo;
   const repoEl = $('#issSideRepo'); if (repoEl) repoEl.textContent = (repo ? count : 'Select repo') + ' ▾';
   // Open/Closed state toggle — visible whenever a repo is being shown; reflects the active state.
   const stateEl = $('#issState'); if (stateEl) {
@@ -336,7 +355,9 @@ function render(): void {
         <button class="isr-ext" data-url="${esc(i.url)}" title="Open #${i.number} on ${esc(pc.name)}">↗</button>
       </div>
     </div>`;
-  }).join('');
+  }).join('') + (loadingMore
+    ? `<div class="isr-more"><span class="isr-mspin"></span>Loading more…</div>`
+    : issuesHasMore ? `<div class="isr-more">Scroll to load more…</div>` : '');
 
   // Row click: an IDLE issue → Assign; an ongoing one (queued/working/review) → view details (re-assigning
   // an in-progress issue isn't the intent). The ↗ opens on the provider; ⓘ always opens details.
@@ -417,15 +438,55 @@ export async function loadIssues(): Promise<void> {
   // every issue with no visible chip to clear). Run-status is provider+repo-keyed, no clearing needed.
   const curKey = `${provider}:${repo}:${issueState}`;
   if (curKey !== lastKey) { lastKey = curKey; activeFilters.clear(); activeLabels.clear(); activeAuthors.clear(); mineOnly = false; query = ''; const sEl = $('#issSearch') as HTMLInputElement | null; if (sEl) sEl.value = ''; }
-  const r = await relay.providerIssues(ws, provider, repo, issueState); if (seq !== loadSeq) return;
+  issuesPage = 1; issuesHasMore = false; loadingMore = false;      // reset infinite-scroll paging for the new pull
+  const r = await relay.providerIssues(ws, provider, repo, issueState, 1); if (seq !== loadSeq) return;
   if (!r.ok) { phase = 'error'; errMsg = r.error || 'Could not pull issues'; render(); return; }
-  issues = r.issues || []; phase = 'ready'; prByBranch = {}; render(); ensurePolling();
+  issues = r.issues || []; issuesHasMore = !!r.hasMore; phase = 'ready'; prByBranch = {}; render(); ensurePolling();
+  maybeAutoFill();                                                  // first page short/empty (client-side filter) → keep paging
   // review → ship: light up issues whose issue-N branch already has an open PR/MR (best-effort, non-blocking).
   const forProvider = provider, forRepo = repo;
   relay.providerPrs(ws, forProvider, forRepo).then((pr: { ok: boolean; prs?: { branch: string; url: string; draft: boolean }[] }) => {
     if (seq !== loadSeq || !pr.ok || !pr.prs) return;
     applyPrs(pr.prs); // a pre-existing PR/MR may free a slot for a queued issue
   }).catch(() => { /* PRs/MRs are a nice-to-have; the list still renders without them */ });
+}
+
+// Re-render the list but keep the scroll position (innerHTML replacement otherwise jumps to the top). Used
+// when appending pages so the viewport stays put as rows are added below.
+function renderKeepScroll(): void {
+  const el = $('#issSideList'); const top = el ? el.scrollTop : 0;
+  render();
+  const el2 = $('#issSideList'); if (el2) el2.scrollTop = top;
+}
+// If the list doesn't fill its scroll container yet (a page that filtered down to few/zero rows, or a tall
+// window), keep paging — otherwise no scroll event can fire to reach the rest and it stalls. Bounded by
+// hasMore going false. Reading scrollHeight forces layout, so it reflects the just-rendered content.
+function maybeAutoFill(): void {
+  if (!issuesHasMore || loadingMore || phase !== 'ready') return;
+  // Never let an active filter/search drive paging — a filter that hides everything would otherwise page the
+  // whole repo hunting for matches. Auto-fill is only for a genuinely short *unfiltered* fetch; when filtering,
+  // the user pages by scrolling the (matched) list instead.
+  if (query || activeFilters.size || activeLabels.size || activeAuthors.size || mineOnly) return;
+  const el = $('#issSideList');
+  if (el && el.scrollHeight <= el.clientHeight + 240) void loadMoreIssues();
+}
+
+// Infinite scroll: fetch the next provider page and APPEND it (deduped). Guarded so rapid scroll events and a
+// concurrent fresh pull can't double-load or append onto a stale list.
+async function loadMoreIssues(): Promise<void> {
+  if (loadingMore || !issuesHasMore || phase !== 'ready' || !repo) return;
+  const seq = loadSeq, ws = wsKey(), fp = provider, fr = repo, fs = issueState, nextPage = issuesPage + 1;
+  loadingMore = true; renderKeepScroll();                          // show the "loading more…" footer
+  const r = await relay.providerIssues(ws, fp, fr, fs, nextPage).catch(() => ({ ok: false } as { ok: boolean; issues?: Issue[]; hasMore?: boolean }));
+  loadingMore = false;
+  if (seq !== loadSeq) return;                                     // a fresh pull replaced the list → drop this page
+  if (!r.ok || !r.issues) { issuesHasMore = false; renderKeepScroll(); return; }
+  const seen = new Set(issues.map((i) => i.number));
+  const fresh = (r.issues as Issue[]).filter((i: Issue) => !seen.has(i.number)); // dedupe against what's already loaded
+  issues.push(...fresh);
+  issuesPage = nextPage; issuesHasMore = !!r.hasMore;
+  renderKeepScroll(); ensurePolling();
+  maybeAutoFill();                                                 // page filtered to few/zero → keep going so it can't stall
 }
 
 /* ----------------------------- assign queue engine (auto-drain) ----------------------------- */
@@ -860,7 +921,7 @@ async function openIssueMap(): Promise<void> {
       <div class="pb-head"><span class="dot" style="background:var(--accent)"></span><span class="im-title">Map issues → pipelines</span><span class="pb-sp"></span>
         <span class="im-count" id="imCount"></span><button class="tpl-btn ghost" id="imCancel">Close</button><button class="tpl-btn pri" id="imRun" disabled>Run mapped</button></div>
       <div class="im-body"><div class="im-canvas" id="imCanvas" style="width:${W}px;height:${H}px"></div></div>
-      <div class="pb-foot">Drag from an issue’s right dot onto a pipeline to map it. Click a mapped issue to clear it.${agentOk ? '' : ' <span style="color:#e0a44a">⚠ no coding agent on PATH — worktrees open but won’t auto-run.</span>'}</div>
+      <div class="pb-foot">Drag from an issue’s right dot onto a pipeline to map it. Click an arrow’s × (or the mapped issue) to remove it.${agentOk ? '' : ' <span style="color:#e0a44a">⚠ no coding agent on PATH — worktrees open but won’t auto-run.</span>'}</div>
     </div>`;
   document.body.appendChild(root);
   const canvas = root.querySelector('#imCanvas') as HTMLElement;
@@ -876,7 +937,17 @@ async function openIssueMap(): Promise<void> {
     for (const [n, pid] of mapping) {
       const ii = iIndex(n), pi = pIndex(pid); if (ii < 0 || pi < 0) continue;
       const ax = IX + IW, ay = IY(ii) + IH / 2, tx = PX, ty = PY(pi) + PH / 2;
-      paths.push(`<path d="M${ax},${ay} C${ax + 70},${ay} ${tx - 70},${ty} ${tx},${ty}" fill="none" style="stroke:var(--accent);stroke-width:2" marker-end="url(#imah)"/><circle cx="${ax}" cy="${ay}" r="4" style="fill:var(--accent)"/><circle cx="${tx}" cy="${ty}" r="4" style="fill:var(--accent)"/>`);
+      const mx = (ax + tx) / 2, my = (ay + ty) / 2;                   // bezier midpoint (== segment midpoint here) for the × badge
+      const d = `M${ax},${ay} C${ax + 70},${ay} ${tx - 70},${ty} ${tx},${ty}`;
+      // A removable edge: fat transparent hit-path + the visible line + endpoint dots + a × badge at the mid.
+      // Clicking anywhere on the group deletes the mapping (issue reverts to the default pipeline). pb-svg is
+      // pointer-events:none, so the interactive bits opt back in via CSS.
+      paths.push(`<g class="im-edge" data-num="${n}">`
+        + `<path class="im-hit" d="${d}" fill="none"/>`
+        + `<path class="im-line" d="${d}" fill="none" marker-end="url(#imah)"/>`
+        + `<circle class="im-dot" cx="${ax}" cy="${ay}" r="4"/><circle class="im-dot" cx="${tx}" cy="${ty}" r="4"/>`
+        + `<g class="im-xg" transform="translate(${mx},${my})"><circle class="im-xbg" r="8"/><path class="im-xm" d="M-3.2,-3.2 L3.2,3.2 M3.2,-3.2 L-3.2,3.2" fill="none"/></g>`
+        + `</g>`);
     }
     if (connecting) { const ii = iIndex(connecting.from); if (ii >= 0) { const ax = IX + IW, ay = IY(ii) + IH / 2; paths.push(`<path d="M${ax},${ay} L${connecting.x},${connecting.y}" fill="none" style="stroke:var(--accent-2);stroke-width:2;stroke-dasharray:5 4"/>`); } }
     const svg = `<svg class="pb-svg" width="${W}" height="${H}"><defs><marker id="imah" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 Z" fill="#6e7bff"/></marker></defs>${paths.join('')}</svg>`;
@@ -887,6 +958,8 @@ async function openIssueMap(): Promise<void> {
         <span class="pb-port in"></span><div class="im-pn">${esc(p.name)}${p.builtin ? '' : ' <i class="im-cust">custom</i>'}</div><div class="im-ps">${pipeMini(p)}</div></div>`).join('');
     canvas.innerHTML = svg + issueNodes + pipeNodes;
     canvas.querySelectorAll<HTMLElement>('.im-issue').forEach((node) => node.onclick = (e) => { if ((e.target as HTMLElement).closest('.pb-port')) return; const n = Number(node.dataset.num); if (mapping.has(n)) { mapping.delete(n); void setIssuePipeline(asgProvider, asgRepo, n, pipes[0].id); renderMap(); } }); // clear → back to the default
+    // Remove an arrow to undo the mapping — click anywhere on the edge (or its × badge). Reverts to the default pipeline.
+    canvas.querySelectorAll<SVGGElement>('.im-edge').forEach((g) => g.addEventListener('click', () => { const n = Number(g.dataset.num); if (!mapping.has(n)) return; mapping.delete(n); void setIssuePipeline(asgProvider, asgRepo, n, pipes[0].id); renderMap(); }));
     canvas.querySelectorAll<HTMLElement>('.pb-port.out').forEach((port) => port.onpointerdown = (e) => {
       e.stopPropagation(); e.preventDefault();
       const from = Number(port.dataset.inum); connecting = { from, ...canvasPoint(e) };
@@ -921,6 +994,33 @@ async function openIssueMap(): Promise<void> {
   });
 
   renderMap();
+}
+
+/* ----------------------------- summary: issues by owner ----------------------------- */
+// A read-only breakdown of the loaded issues by creator: created vs fixed, with a progress bar and totals.
+function openOwnerSummary(): void {
+  if (phase !== 'ready') { toast('Pull a repo’s issues first'); return; }
+  const rows = ownerSummary();
+  const totC = rows.reduce((s, r) => s + r.created, 0);
+  const totF = rows.reduce((s, r) => s + r.fixed, 0);
+  const pctOf = (f: number, c: number) => (c ? Math.round((f / c) * 100) : 0);
+  const bar = (f: number, c: number) => `<div class="ow-track"><div class="ow-fill" style="width:${pctOf(f, c)}%"></div></div><span class="ow-pct">${pctOf(f, c)}%</span>`;
+  const stateLbl = issueState === 'closed' ? 'closed' : 'open';
+  const body = rows.length ? `<table class="ow-tbl">
+      <thead><tr><th>Owner</th><th class="ow-nh">Created</th><th class="ow-nh">Fixed</th><th>Fixed rate</th></tr></thead>
+      <tbody>${rows.map((r) => `<tr>
+        <td class="ow-who"><span class="src-dot ${PROVS[provider].dot}"></span>${esc(r.login)}</td>
+        <td class="ow-n">${r.created}</td>
+        <td class="ow-n">${r.fixed}</td>
+        <td class="ow-bar">${bar(r.fixed, r.created)}</td></tr>`).join('')}</tbody>
+      <tfoot><tr><td class="ow-who"><b>Total</b> · ${rows.length} owner${rows.length === 1 ? '' : 's'}</td><td class="ow-n">${totC}</td><td class="ow-n">${totF}</td><td class="ow-bar">${bar(totF, totC)}</td></tr></tfoot>
+    </table>` : `<div class="src-empty">No issues loaded to summarize.</div>`;
+  const { root, close } = modal(`<div class="tpl-card iss-card ow-card">
+      <div class="hd"><span class="dot" style="background:var(--accent)"></span><span class="t">Issues by owner<small>${esc(repo || '')} · ${stateLbl} issues</small></span></div>
+      <div class="bd">${body}</div>
+      <div class="ft"><span class="hint">Fixed = the agent opened a PR/MR${issueState === 'closed' ? ', or the issue is closed' : ''}. Totals cover all loaded issues, not the active filters.</span><span class="r"><button class="tpl-btn pri" data-x>Done</button></span></div>
+    </div>`);
+  root.querySelector('[data-x]')?.addEventListener('click', close);
 }
 
 /* ----------------------------- repo selector + Sources ----------------------------- */
@@ -1222,6 +1322,10 @@ export function initIssues(d: IssuesDeps): void {
   const rsel = $('#issSideRepo'); if (rsel) rsel.onclick = (e) => { e.stopPropagation(); openRepoMenu(); };
   const srcBtn = $('#issSources'); if (srcBtn) srcBtn.onclick = () => void openSources();
   const mapBtn = $('#issMap'); if (mapBtn) mapBtn.onclick = () => void openIssueMap();
+  const ownBtn = $('#issOwners'); if (ownBtn) ownBtn.onclick = () => openOwnerSummary();
+  // Infinite scroll: near the bottom of the list, pull the next page (guards handle re-entrancy / no-more).
+  const listEl = $('#issSideList');
+  if (listEl) listEl.addEventListener('scroll', () => { if (listEl.scrollTop + listEl.clientHeight >= listEl.scrollHeight - 240) void loadMoreIssues(); });
   // Open/Closed state filter — re-pull the repo with the chosen state (default open).
   $('#issState')?.querySelectorAll<HTMLElement>('.iss-seg').forEach((b) => {
     b.onclick = () => { const s = b.dataset.st === 'closed' ? 'closed' : 'open'; if (s === issueState) return; issueState = s; void loadIssues(); }; // loadIssues re-renders immediately

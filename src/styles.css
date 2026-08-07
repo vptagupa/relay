@@ -744,12 +744,38 @@ body.tabdrag .dz{display:block;pointer-events:auto}
 .im-pipe .im-cust{font:8px/1 var(--mono);font-style:normal;color:var(--accent-2);border:1px solid var(--accent-line);border-radius:4px;padding:1px 4px;vertical-align:middle}
 .im-pipe .im-ps{margin-top:5px}
 .im-none{position:absolute;color:var(--muted);font:12px var(--sans)}
+/* mapping-board edges — removable arrows (pb-svg is pointer-events:none, so the interactive bits opt back in) */
+.im-line{stroke:var(--accent);stroke-width:2}
+.im-dot{fill:var(--accent)}
+.im-hit{stroke:transparent;stroke-width:16;pointer-events:stroke;cursor:pointer}
+.im-xg{cursor:pointer;pointer-events:auto}
+.im-xbg{fill:var(--surface-3);stroke:var(--border-strong);stroke-width:1}
+.im-xm{stroke:var(--muted);stroke-width:1.6;stroke-linecap:round}
+.im-edge:hover .im-line{stroke:var(--c-red,#ff6b6b)}
+.im-edge:hover .im-dot{fill:var(--c-red,#ff6b6b)}
+.im-edge:hover .im-xbg,.im-xg:hover .im-xbg{fill:var(--c-red,#ff6b6b);stroke:var(--c-red,#ff6b6b)}
+.im-edge:hover .im-xm,.im-xg:hover .im-xm{stroke:#fff}
 .iss-in{width:100%;box-sizing:border-box;background:var(--surface-2);border:1px solid var(--border-strong);border-radius:8px;padding:8px 11px;margin-bottom:11px;color:var(--text);font:12.5px var(--mono)}
 .iss-in:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-ghost)}
 .iss-in::placeholder{color:var(--muted)}
 .iss-card code{font:11px/1 var(--mono);background:var(--accent-ghost);color:var(--accent-2);padding:1px 5px;border-radius:4px}
 .iss-empty{display:flex;flex-direction:column;align-items:center;gap:6px;text-align:center;color:var(--muted);font:12.5px/1.5 var(--sans);padding:44px 22px}
 .iss-empty .ie-i{font-size:24px;opacity:.7}
+/* issues-by-owner summary */
+.ow-card{width:min(560px,94vw)}
+.ow-card .bd{max-height:62vh;overflow:auto}
+.ow-tbl{width:100%;border-collapse:collapse;font:12px var(--sans)}
+.ow-tbl th{text-align:left;font:600 10px/1 var(--mono);color:var(--muted);text-transform:uppercase;letter-spacing:.04em;padding:0 8px 8px;position:sticky;top:0;background:var(--surface)}
+.ow-tbl th.ow-nh{text-align:right;width:62px}
+.ow-tbl td{padding:7px 8px;border-top:1px solid var(--border)}
+.ow-tbl tbody tr:hover{background:var(--surface-3)}
+.ow-who{color:var(--text);display:flex;align-items:center;gap:7px}
+.ow-n{text-align:right;font:12.5px var(--mono);color:var(--text-dim)}
+.ow-bar{width:154px;white-space:nowrap}
+.ow-track{display:inline-block;width:96px;height:7px;border-radius:999px;background:var(--surface-3);overflow:hidden;vertical-align:middle}
+.ow-fill{height:100%;background:var(--accent);border-radius:999px}
+.ow-pct{margin-left:8px;font:10.5px var(--mono);color:var(--muted)}
+.ow-tbl tfoot td{border-top:2px solid var(--border-strong);color:var(--text);background:var(--surface-2)}
 .iss-empty .ie-sub{font:11.5px/1.5 var(--mono);color:var(--text-dim);max-width:34ch}
 .iss-empty code{font:11px/1 var(--mono);background:var(--accent-ghost);color:var(--accent-2);padding:1px 5px;border-radius:5px}
 .iss-empty .ie-spin{width:20px;height:20px;border-radius:50%;border:2px solid var(--accent-line);border-top-color:var(--accent-2);animation:iespin .8s linear infinite}
@@ -807,6 +833,9 @@ body.tabdrag .dz{display:block;pointer-events:auto}
 .isr-empty .isr-es{font:10.5px/1.5 var(--mono);color:var(--text-dim);max-width:32ch}
 .isr-empty code{font:10px/1 var(--mono);background:var(--accent-ghost);color:var(--accent-2);padding:1px 4px;border-radius:4px}
 .isr-spin{width:18px;height:18px;border-radius:50%;border:2px solid var(--accent-line);border-top-color:var(--accent-2);animation:iespin .8s linear infinite}
+/* infinite-scroll footer */
+.isr-more{display:flex;align-items:center;justify-content:center;gap:7px;padding:12px 8px 16px;color:var(--muted);font:10.5px/1 var(--mono)}
+.isr-mspin{width:12px;height:12px;border-radius:50%;border:2px solid var(--accent-line);border-top-color:var(--accent-2);animation:iespin .8s linear infinite}
 /* open/closed state toggle (segmented) */
 .iss-state{display:flex;gap:2px;margin:4px 8px 6px;padding:2px;background:var(--surface-2);border:1px solid var(--border);border-radius:8px}
 .iss-seg{flex:1;padding:4px 0;border:none;background:transparent;color:var(--text-dim);font:600 11px/1.2 var(--sans);border-radius:6px;cursor:pointer}

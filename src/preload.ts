@@ -83,8 +83,8 @@ const api = {
   providerDisconnect: (ws: string, provider: ProviderId): Promise<{ ok: boolean }> => ipcRenderer.invoke('provider:disconnect', { ws, provider }),
   // Infer { provider, repo } from a folder's git `origin` remote (null if not a recognized provider remote).
   providerRepoFromRemote: (dir: string): Promise<{ provider: ProviderId; repo: string } | null> => ipcRenderer.invoke('provider:repo-from-remote', dir),
-  // Pull a repo's issues (normalized) for the given provider in the workspace, filtered by state (default 'open').
-  providerIssues: (ws: string, provider: ProviderId, repo: string, state: 'open' | 'closed' = 'open'): Promise<{ ok: boolean; issues?: Issue[]; error?: string }> => ipcRenderer.invoke('provider:issues', { ws, provider, repo, state }),
+  // Pull ONE page (100 GH/GL, 50 BB) of a repo's issues for infinite scroll; hasMore signals another page exists.
+  providerIssues: (ws: string, provider: ProviderId, repo: string, state: 'open' | 'closed' = 'open', page = 1): Promise<{ ok: boolean; issues?: Issue[]; hasMore?: boolean; error?: string }> => ipcRenderer.invoke('provider:issues', { ws, provider, repo, state, page }),
   // List the connected user's repos/projects for the Sources picker (Bitbucket also needs workspace ids).
   providerRepos: (ws: string, provider: ProviderId, workspaces?: string[]): Promise<{ ok: boolean; repos?: { repo: string; desc: string; priv: boolean }[]; error?: string }> => ipcRenderer.invoke('provider:repos', { ws, provider, workspaces }),
   // Open PRs/MRs for a repo — to link an assigned issue's branch to its PR (review → ship).

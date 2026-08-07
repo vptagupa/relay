@@ -411,10 +411,10 @@ ipcMain.handle('provider:repo-from-remote', (_e, dir: string) => new Promise<{ p
     });
   });
 }));
-ipcMain.handle('provider:issues', async (_e, p: { provider: ProviderId; ws: string; repo: string; state?: 'open' | 'closed' }) => {
+ipcMain.handle('provider:issues', async (_e, p: { provider: ProviderId; ws: string; repo: string; state?: 'open' | 'closed'; page?: number }) => {
   const a = providerOf(p?.provider); if (!a) return badProvider;
   if (!validRepo(p?.repo)) return { ok: false, error: 'Invalid repository' };
-  return a.issues(p?.ws, p.repo, p?.state === 'closed' ? 'closed' : 'open');
+  return a.issues(p?.ws, p.repo, p?.state === 'closed' ? 'closed' : 'open', Math.max(1, Number(p?.page) || 1));
 });
 ipcMain.handle('provider:repos', async (_e, p: { provider: ProviderId; ws: string; workspaces?: string[] }) => (await providerOf(p?.provider)?.repos(p?.ws, { workspaces: Array.isArray(p?.workspaces) ? p.workspaces : undefined })) || badProvider);
 ipcMain.handle('provider:prs', async (_e, p: { provider: ProviderId; ws: string; repo: string }) => {
