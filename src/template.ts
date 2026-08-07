@@ -20,12 +20,14 @@ export function appHtml(panes: string): string {
           <span class="kbd">⌘K</span>
         </button>
       </div>
+      <button class="notif-bell" id="notifBell" title="Notifications — new/closed issues &amp; PRs (this workspace)"><svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg><span class="notif-badge" id="notifBadge" style="display:none">0</span></button>
       <div class="win-controls">
         <button class="win-btn" id="winMin" aria-label="Minimize"><svg viewBox="0 0 10 10"><line x1="1" y1="5" x2="9" y2="5"/></svg></button>
         <button class="win-btn" id="winMax" aria-label="Maximize"><svg viewBox="0 0 10 10"><rect x="1.5" y="1.5" width="7" height="7"/></svg></button>
         <button class="win-btn close" id="winClose" aria-label="Close"><svg viewBox="0 0 10 10"><line x1="1" y1="1" x2="9" y2="9"/><line x1="9" y1="1" x2="1" y2="9"/></svg></button>
       </div>
     </div>
+    <div class="notif-menu" id="notifMenu"></div>
     <header class="titlebar">
       <div class="brand"><span class="ws" id="wsLabel">No folder open</span></div>
       <div class="tb-spacer"></div>
@@ -159,6 +161,7 @@ export function appHtml(panes: string): string {
       <label class="chk"><input type="checkbox" id="shellIntegration"> Command blocks — capture each command as a block in History (shell integration; applies to new terminals)</label>
       <label class="chk"><input type="checkbox" id="blocksViewSet"> Blocks view — show commands as blocks in the main terminal (full-screen apps drop to the live terminal automatically)</label>
       <label class="chk"><input type="checkbox" id="notifySet"> Notify me when a long command finishes while Slayer T isn't focused</label>
+      <label class="chk"><input type="checkbox" id="notifyIssuesSet"> Notify me about new/closed issues &amp; pull requests across my tracked repos</label>
     </div>
     <div class="modal-foot"><button class="btn primary" id="settingsClose">Done</button></div>
   </div>

@@ -22,6 +22,7 @@ import { openTplMenu, saveAsTemplate, runStartupIfPending } from './blueprints';
 import { initWorkspaces, loadWorkspaceMeta, restoreWorkspaceSnapshot, settleDeeplink, createWorkspace, openWsMenu, closeWsMenu, handleDeeplink, setActiveWsRoot, setActiveWsTheme, getActiveWsId, duplicateWorkspace, exportWorkspace, importWorkspace, toggleTrust, copyWorkspaceLink, activeWorkspaceDef, isWorkspaceTrusted } from './workspaces';
 import { initIssues, pullIssues, loadIssues } from './issues';
 import { initPrs, loadPrs } from './prs';
+import { initNotifications, renderBell } from './notifications';
 import type { Settings, SavedSession, AgentEvent, ApprovalRequest, ChatTurn, OpenTab, Workspace, WorkspaceDef, Block, Bookmark, BookmarkGroup } from './shared/types';
 
 // TEMP DIAG: surface full stacks (minify is off) for the init crash.
@@ -1297,6 +1298,7 @@ function reflectSettings() {
   ($('#shellIntegration') as HTMLInputElement).checked = state.settings.shellIntegration;
   ($('#blocksViewSet') as HTMLInputElement).checked = state.settings.blocksView;
   ($('#notifySet') as HTMLInputElement).checked = state.settings.notifications;
+  ($('#notifyIssuesSet') as HTMLInputElement).checked = state.settings.issuePushNotify !== false;
   for (const p of ['anthropic', 'openai', 'google']) {
     const on = (state.settings.hasKey as any)[p];
     const s = $('#state' + p[0].toUpperCase() + p.slice(1));
@@ -1481,6 +1483,7 @@ for (let g = 0; g < 4; g++) {
 document.querySelectorAll('[data-closeg]').forEach((b) => b.addEventListener('click', (e) => { e.stopPropagation(); closeGroup(+(b as HTMLElement).dataset.closeg!); }));
 $('#blocksViewSet').addEventListener('change', async (e) => { state.settings = await relay.patchSettings({ blocksView: (e.target as HTMLInputElement).checked }); updateMainView(); });
 $('#notifySet').addEventListener('change', async (e) => { state.settings = await relay.patchSettings({ notifications: (e.target as HTMLInputElement).checked }); });
+$('#notifyIssuesSet').addEventListener('change', async (e) => { state.settings = await relay.patchSettings({ issuePushNotify: (e.target as HTMLInputElement).checked }); });
 $('#btnSave').onclick = saveActive;
 $('#btnClear').onclick = clearActive;
 $('#btnSidebar').onclick = toggleSidebar;
@@ -1827,7 +1830,7 @@ new ResizeObserver(() => { clearTimeout(_roT); _roT = setTimeout(() => { fitPane
 (async function boot() {
   state.settings = await relay.getSettings();
   state.library = await relay.listSessions();
-  initWorkspaces({ newTab, snapshotTabs, reconcilePanes, fitPanes, renderTabs, updateStatus, reflectModel, renderChat, updateMainView, reflectSettings, persistWorkspace, applyTheme, blocksMode, confirmDialog, shortCwd, sendCommand, renderLibrary, reloadIssues: () => { void loadIssues(); if (state.settings.sidebarView === 'prs') void loadPrs(); }, pcmd: P_CMD });
+  initWorkspaces({ newTab, snapshotTabs, reconcilePanes, fitPanes, renderTabs, updateStatus, reflectModel, renderChat, updateMainView, reflectSettings, persistWorkspace, applyTheme, blocksMode, confirmDialog, shortCwd, sendCommand, renderLibrary, reloadIssues: () => { void loadIssues(); if (state.settings.sidebarView === 'prs') void loadPrs(); renderBell(); }, pcmd: P_CMD });
   initIssues({
     // Assign → open a fresh terminal tab rooted in the issue's worktree, seeded to launch the agent.
     openAgentTab: (o) => { void newTab({ cwd: o.cwd, name: o.name, runCmd: o.runCmd }); },
@@ -1836,6 +1839,8 @@ new ResizeObserver(() => { clearTimeout(_roT); _roT = setTimeout(() => { fitPane
   // PR rail — shares the Issues rail's active repo; clicking its repo chip jumps to Issues to change it.
   initPrs({ activeWsId: getActiveWsId, focusIssues: () => switchSidebarView('issues') });
   if ((state.settings.sidebarView || 'library') === 'prs') void loadPrs(); // restore-on-boot when PR was the last view
+  // Notifications — background poller (all workspaces) + the per-workspace header bell.
+  initNotifications({ activeWsId: getActiveWsId });
   await loadWorkspaceMeta(); // load workspace defs + blueprints, mirror the active workspace's folder + theme into settings before first paint
   // Per-workspace Library migration: sessions saved before Libraries were per-workspace have no wsId.
   // Assign them to the (now-known) active workspace so they land in one Library instead of vanishing from

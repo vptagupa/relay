@@ -147,6 +147,9 @@ export interface Settings {
   pipelines?: PipelineDef[]; // user-authored custom pipelines (built-ins live in code); merged into the registry
   bitbucketWorkspacesByWs?: Record<string, string[]>; // Bitbucket workspace ids to list repos from, per Slayer T workspace id (CHANGE-2770)
   providersScopedMigrated?: boolean; // one-shot flag: the pre-scoping global provider secrets have been moved into a workspace
+  notificationsByWs?: Record<string, AppNotification[]>; // per-workspace issue/PR notifications (persisted; survives restart)
+  issuePushNotify?: boolean;         // fire native OS notifications for new/closed issues & PRs (default true)
+  notifyReposByWs?: Record<string, string[]>; // qualified repo ids the poller watches, per workspace id. Undefined for a ws → default to that ws's tracked repos; defined (even []) → exactly these.
 }
 
 // Streaming events emitted by the agent loop to the renderer.
@@ -175,6 +178,20 @@ export interface ApprovalRequest {
 export interface ChatTurn {
   role: 'user' | 'assistant';
   content: string;
+}
+
+// A per-workspace notification for a provider event (new/closed issue or PR), shown in the header bell and
+// (optionally) fired as a native OS notification. Detected by the background poller diffing each repo over time.
+export interface AppNotification {
+  id: string;                                    // stable dedupe key: `${kind}:${provider}:${repo}#${number}`
+  kind: 'new-issue' | 'closed-issue' | 'new-pr' | 'closed-pr';
+  provider: string;                              // github | gitlab | bitbucket
+  repo: string;                                  // owner/name (native repo id)
+  number: number;
+  title: string;
+  url: string;
+  ts: number;                                    // when we detected it (epoch ms)
+  read: boolean;
 }
 
 // --- Issue Agent (Phase 1: read-only) ---
