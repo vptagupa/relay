@@ -156,8 +156,8 @@ button{font-family:inherit;color:inherit;cursor:pointer;border:none;background:n
 .trust-btn{border:1px solid var(--border-strong);background:var(--surface-3);color:var(--text);border-radius:6px;padding:2px 9px;font:600 11px var(--sans);cursor:pointer;white-space:nowrap}
 .trust-btn:hover{background:var(--accent);color:#fff;border-color:var(--accent)}
 /* notification bell (per-workspace) + dropdown */
-.notif-bell{-webkit-app-region:no-drag;position:relative;display:inline-flex;align-items:center;justify-content:center;width:30px;align-self:center;height:24px;border:none;background:transparent;color:var(--text-dim);cursor:pointer;border-radius:7px}
-.notif-bell:hover{background:var(--surface-2);color:var(--text)}
+.notif-bell,.win-icon{-webkit-app-region:no-drag;position:relative;display:inline-flex;align-items:center;justify-content:center;width:30px;align-self:center;height:24px;border:none;background:transparent;color:var(--text-dim);cursor:pointer;border-radius:7px}
+.notif-bell:hover,.win-icon:hover{background:var(--surface-2);color:var(--text)}
 .notif-badge{position:absolute;top:0;right:1px;min-width:14px;height:14px;padding:0 3px;box-sizing:border-box;border-radius:999px;background:var(--c-red,#f85149);color:#fff;font:700 8.5px/14px var(--sans);text-align:center}
 .notif-menu{position:fixed;z-index:88;width:340px;max-width:calc(100vw - 16px);max-height:min(70vh,520px);display:flex;flex-direction:column;background:var(--surface);border:1px solid var(--border-strong);border-radius:11px;box-shadow:var(--shadow);opacity:0;pointer-events:none;transform:translateY(-6px);transition:.13s}
 .notif-menu.show{opacity:1;pointer-events:auto;transform:none}
@@ -326,11 +326,11 @@ button{font-family:inherit;color:inherit;cursor:pointer;border:none;background:n
 /* overlays: scrim / modal / approval / toast */
 .scrim{position:fixed;inset:0;background:rgba(6,8,12,.5);z-index:30;opacity:0;pointer-events:none;transition:.16s}
 .scrim.show{opacity:1;pointer-events:auto}
-.modal{position:fixed;top:12vh;left:50%;transform:translateX(-50%) scale(.97);width:min(520px,92vw);z-index:80;background:var(--surface);border:1px solid var(--border-strong);border-radius:14px;box-shadow:var(--shadow);opacity:0;pointer-events:none;transition:.16s}
+.modal{position:fixed;top:8vh;left:50%;transform:translateX(-50%) scale(.97);width:min(520px,92vw);max-height:84vh;display:flex;flex-direction:column;z-index:80;background:var(--surface);border:1px solid var(--border-strong);border-radius:14px;box-shadow:var(--shadow);opacity:0;pointer-events:none;transition:.16s}
 .modal.show{opacity:1;pointer-events:auto;transform:translateX(-50%) scale(1)}
-.modal-head{padding:16px 18px 6px;font-weight:650;font-size:15px}
-.modal-sub{padding:0 18px 12px;font-size:12.5px;color:var(--muted);line-height:1.5}
-.modal-body{padding:0 18px 18px;display:flex;flex-direction:column;gap:14px}
+.modal-head{padding:16px 18px 6px;font-weight:650;font-size:15px;flex-shrink:0}
+.modal-sub{padding:0 18px 12px;font-size:12.5px;color:var(--muted);line-height:1.5;flex-shrink:0}
+.modal-body{padding:0 18px 18px;display:flex;flex-direction:column;gap:14px;overflow-y:auto;min-height:0}
 .field label{display:block;font-size:12px;color:var(--text-dim);margin-bottom:5px}
 .field .row{display:flex;gap:8px}
 .field input{flex:1;background:var(--surface-2);border:1px solid var(--border);border-radius:8px;color:var(--text);font-family:var(--mono);font-size:12.5px;padding:9px 10px}
@@ -348,7 +348,7 @@ button{font-family:inherit;color:inherit;cursor:pointer;border:none;background:n
 .theme-sw.on .nm{color:var(--text);font-weight:600}
 @media(max-width:560px){.theme-grid{grid-template-columns:repeat(3,1fr)}}
 .field .state.on{color:var(--ok)}.field .state.off{color:var(--muted)}
-.modal-foot{display:flex;justify-content:flex-end;gap:8px;padding:0 18px 18px}
+.modal-foot{display:flex;justify-content:flex-end;gap:8px;padding:14px 18px 18px;flex-shrink:0}
 .btn{padding:8px 14px;border-radius:8px;border:1px solid var(--border);background:var(--surface-2);font-size:13px}
 .btn.primary{background:var(--accent);color:var(--on-accent);border-color:transparent;font-weight:600}
 .chk{display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--text-dim)}

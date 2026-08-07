@@ -1763,6 +1763,7 @@ $('#palList').addEventListener('click', (e) => { const it = (e.target as HTMLEle
 
 // settings
 $('#btnSettings').onclick = openSettings;
+$('#winSettings').onclick = openSettings;
 $('#settingsClose').onclick = closeSettings;
 $('#cfOk').onclick = () => closeConfirm(true);
 $('#cfCancel').onclick = () => closeConfirm(false);
