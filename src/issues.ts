@@ -1032,15 +1032,16 @@ function openRepoMenu(): void {
   const btn = $('#issSideRepo'); if (!btn) return;
   if (document.getElementById('issRepoMenu')) { closeRepoMenu(); return; }
   const active = curRepo();
-  const rows = [`<button class="iss-mi ${!active ? 'on' : ''}" data-repo=""><span class="d">⌂</span> This folder’s repo</button>`];
-  for (const id of trackedRepos()) {
+  // "This folder's repo" and the Sources action stay pinned; the (possibly long) tracked-repo list scrolls.
+  const folderRow = `<button class="iss-mi ${!active ? 'on' : ''}" data-repo=""><span class="d">⌂</span> This folder’s repo</button>`;
+  const repoRows = trackedRepos().map((id) => {
     const { provider: p, repo: r } = parseRepoId(id);
-    rows.push(`<button class="iss-mi ${active === id ? 'on' : ''}" data-repo="${esc(id)}"><span class="d src-dot ${PROVS[p].dot}"></span> ${esc(r)}</button>`);
-  }
-  rows.push('<div class="iss-msep"></div>');
-  rows.push('<button class="iss-mi" data-sources="1"><span class="d">⚙</span> Sources — connect &amp; pick repos…</button>');
+    return `<button class="iss-mi ${active === id ? 'on' : ''}" data-repo="${esc(id)}"><span class="d src-dot ${PROVS[p].dot}"></span> ${esc(r)}</button>`;
+  }).join('');
   const menu = document.createElement('div'); menu.className = 'iss-menu'; menu.id = 'issRepoMenu';
-  menu.innerHTML = rows.join('');
+  menu.innerHTML = folderRow
+    + (repoRows ? `<div class="iss-menu-list">${repoRows}</div>` : '')
+    + '<div class="iss-msep"></div><button class="iss-mi" data-sources="1"><span class="d">⚙</span> Sources — connect &amp; pick repos…</button>';
   document.body.appendChild(menu);
   const r = btn.getBoundingClientRect();
   menu.style.left = Math.round(r.left) + 'px'; menu.style.top = Math.round(r.bottom + 4) + 'px';

@@ -22,7 +22,13 @@ const isProvider = (s: unknown): s is ProviderId => typeof s === 'string' && (PR
 
 export interface RepoRow { repo: string; desc: string; priv: boolean; }
 export interface RepoListOpts { workspaces?: string[]; } // Bitbucket lists per workspace (CHANGE-2770); others ignore this
-export interface PrRow { number: number; branch: string; url: string; draft: boolean; }
+export interface PrRow { number: number; branch: string; url: string; draft: boolean; title?: string; author?: string; state?: string; updatedAt?: number; }
+// The full PR/MR — fetched on demand for the details view (kept off the list so list payloads stay lean).
+export interface PrDetail {
+  number: number; title: string; body: string; state: string; draft: boolean; url: string;
+  author?: string; sourceBranch: string; baseBranch: string;
+  labels: string[]; reviewers: string[]; createdAt?: number; updatedAt?: number;
+}
 interface ApiResult { ok: boolean; status: number; json: unknown; }
 
 // A minimal HTTPS request that resolves to { status, text } and never rejects. A 20s timeout guards the
@@ -95,11 +101,30 @@ const github = {
     const repos = asArr(r.json).map((x) => ({ repo: str(x.full_name), desc: str(x.description), priv: !!x.private })).filter((x) => /^[\w.-]+\/[\w.-]+$/.test(x.repo));
     return { ok: true, repos };
   },
-  async prs(ws: string, repo: string): Promise<{ ok: boolean; prs?: PrRow[]; error?: string }> {
-    const r = await ghApi(ws, `/repos/${repo}/pulls?state=open&per_page=100`);
-    if (!r.ok || !Array.isArray(r.json)) return { ok: false, error: 'Could not list PRs' };
-    const prs = asArr(r.json).map((p) => ({ number: Number(p.number) || 0, branch: str(asObj(p.head).ref), url: str(p.html_url), draft: !!p.draft })).filter((p) => p.branch);
-    return { ok: true, prs };
+  // One page of PRs for the given state. Enriched (title/author/state) for the PR rail; issues.ts's review
+  // detection just reads branch/url/draft on the default open+page-1 call, so its behaviour is unchanged.
+  async prs(ws: string, repo: string, state: IssueState = 'open', page = 1): Promise<{ ok: boolean; prs?: PrRow[]; hasMore?: boolean; error?: string }> {
+    const r = await ghApi(ws, `/repos/${repo}/pulls?state=${state === 'closed' ? 'closed' : 'open'}&per_page=100&page=${page}&sort=updated&direction=desc`);
+    if (!r.ok || !Array.isArray(r.json)) {
+      const msg = str(asObj(r.json).message);
+      if (r.status === 401) return { ok: false, error: 'Not connected — reconnect GitHub in Sources.' };
+      return { ok: false, error: `${msg || 'Could not list PRs'} (HTTP ${r.status})` };
+    }
+    const raw = asArr(r.json);
+    const prs = raw.map((p) => ({ number: Number(p.number) || 0, branch: str(asObj(p.head).ref), url: str(p.html_url), draft: !!p.draft, title: str(p.title), author: str(asObj(p.user).login) || undefined, state: p.merged_at ? 'merged' : (str(p.state) || undefined), updatedAt: Date.parse(str(p.updated_at)) || 0 })).filter((p) => p.branch);
+    return { ok: true, prs, hasMore: raw.length === 100 };
+  },
+  // Full PR (with body) fetched on demand for the details hover.
+  async prDetail(ws: string, repo: string, number: number): Promise<{ ok: boolean; detail?: PrDetail; error?: string }> {
+    const r = await ghApi(ws, `/repos/${repo}/pulls/${number}`);
+    if (!r.ok || !r.json || typeof r.json !== 'object') return { ok: false, error: `Could not load PR (HTTP ${r.status})` };
+    const p = asObj(r.json);
+    return { ok: true, detail: {
+      number: Number(p.number) || 0, title: str(p.title), body: str(p.body), state: p.merged_at ? 'merged' : (str(p.state) || ''), draft: !!p.draft, url: str(p.html_url),
+      author: str(asObj(p.user).login) || undefined, sourceBranch: str(asObj(p.head).ref), baseBranch: str(asObj(p.base).ref),
+      labels: asArr(p.labels).map((l) => str(l.name)).filter(Boolean), reviewers: asArr(p.requested_reviewers).map((u) => str(u.login)).filter(Boolean),
+      createdAt: Date.parse(str(p.created_at)) || 0, updatedAt: Date.parse(str(p.updated_at)) || 0,
+    } };
   },
   repoFromRemote: (url: string): string | null => {
     const m = url.trim().match(/github\.com[:/]([^\s]+?)(?:\.git)?\/?$/i);
@@ -160,11 +185,31 @@ const gitlab = {
     const repos = asArr(r.json).map((x) => ({ repo: str(x.path_with_namespace), desc: str(x.description), priv: str(x.visibility) !== 'public' })).filter((x) => x.repo.includes('/'));
     return { ok: true, repos };
   },
-  async prs(ws: string, repo: string): Promise<{ ok: boolean; prs?: PrRow[]; error?: string }> {
-    const r = await glApi(ws, `/projects/${enc(repo)}/merge_requests?state=opened&per_page=100`);
-    if (!r.ok || !Array.isArray(r.json)) return { ok: false, error: 'Could not list merge requests' };
-    const prs = asArr(r.json).map((m) => ({ number: Number(m.iid) || 0, branch: str(m.source_branch), url: str(m.web_url), draft: !!m.draft || !!m.work_in_progress })).filter((p) => p.branch);
-    return { ok: true, prs };
+  // GitLab MRs. The rail's "Closed" means everything not open (GitLab splits that into closed + merged), so we
+  // ask for state=all and drop the open ones client-side; "Open" maps to state=opened.
+  async prs(ws: string, repo: string, state: IssueState = 'open', page = 1): Promise<{ ok: boolean; prs?: PrRow[]; hasMore?: boolean; error?: string }> {
+    const glState = state === 'closed' ? 'all' : 'opened';
+    const r = await glApi(ws, `/projects/${enc(repo)}/merge_requests?state=${glState}&per_page=100&page=${page}&order_by=updated_at&sort=desc`);
+    if (!r.ok || !Array.isArray(r.json)) {
+      const msg = str(asObj(r.json).message || asObj(r.json).error);
+      if (r.status === 401) return { ok: false, error: 'Not connected — reconnect GitLab in Sources.' };
+      return { ok: false, error: `${msg || 'Could not list merge requests'} (HTTP ${r.status})` };
+    }
+    const raw = asArr(r.json);
+    const prs = raw.filter((m) => state === 'closed' ? str(m.state) !== 'opened' : true)
+      .map((m) => ({ number: Number(m.iid) || 0, branch: str(m.source_branch), url: str(m.web_url), draft: !!m.draft || !!m.work_in_progress, title: str(m.title), author: str(asObj(m.author).username) || undefined, state: str(m.state) || undefined, updatedAt: Date.parse(str(m.updated_at)) || 0 })).filter((p) => p.branch);
+    return { ok: true, prs, hasMore: raw.length === 100 };
+  },
+  async prDetail(ws: string, repo: string, number: number): Promise<{ ok: boolean; detail?: PrDetail; error?: string }> {
+    const r = await glApi(ws, `/projects/${enc(repo)}/merge_requests/${number}`);
+    if (!r.ok || !r.json || typeof r.json !== 'object') return { ok: false, error: `Could not load MR (HTTP ${r.status})` };
+    const m = asObj(r.json);
+    return { ok: true, detail: {
+      number: Number(m.iid) || 0, title: str(m.title), body: str(m.description), state: str(m.state) || '', draft: !!m.draft || !!m.work_in_progress, url: str(m.web_url),
+      author: str(asObj(m.author).username) || undefined, sourceBranch: str(m.source_branch), baseBranch: str(m.target_branch),
+      labels: (Array.isArray(m.labels) ? m.labels as unknown[] : []).map((l) => str(l)).filter(Boolean), reviewers: asArr(m.reviewers).map((u) => str(u.username)).filter(Boolean),
+      createdAt: Date.parse(str(m.created_at)) || 0, updatedAt: Date.parse(str(m.updated_at)) || 0,
+    } };
   },
   repoFromRemote(url: string): string | null {
     // gitlab.com or a self-managed host (matched loosely by "gitlab" in the hostname).
@@ -339,16 +384,32 @@ const bitbucket = {
     if (!out.length && lastErr) return { ok: false, error: lastErr };
     return { ok: true, repos: out.filter((x) => x.repo.includes('/')) };
   },
-  async prs(ws: string, repo: string): Promise<{ ok: boolean; prs?: PrRow[]; error?: string }> {
-    const r = await bbApi(ws, `/2.0/repositories/${repo}/pullrequests?state=OPEN&pagelen=50`);
+  // Bitbucket PR states are OPEN / MERGED / DECLINED / SUPERSEDED; the rail's "Closed" folds the last three
+  // (the `state` param can repeat). Bitbucket has no draft PRs, so draft is always false.
+  async prs(ws: string, repo: string, state: IssueState = 'open', page = 1): Promise<{ ok: boolean; prs?: PrRow[]; hasMore?: boolean; error?: string }> {
+    const stateQ = state === 'closed' ? 'state=MERGED&state=DECLINED&state=SUPERSEDED' : 'state=OPEN';
+    const r = await bbApi(ws, `/2.0/repositories/${repo}/pullrequests?${stateQ}&pagelen=50&page=${page}&sort=-updated_on`);
     if (!r.ok || !Array.isArray(asObj(r.json).values)) {
       const msg = str(asObj(asObj(r.json).error).message);
+      if (r.status === 401 || r.status === 403) return { ok: false, error: 'Not connected — reconnect Bitbucket in Sources.' };
       return { ok: false, error: `${msg || 'Could not list pull requests'} (HTTP ${r.status})` };
     }
-    const prs = asArr(asObj(r.json).values).map((p) => ({
-      number: Number(p.id) || 0, branch: str(asObj(asObj(p.source).branch).name), url: str(asObj(asObj(p.links).html).href), draft: false,
-    })).filter((p) => p.branch);
-    return { ok: true, prs };
+    const prs = asArr(asObj(r.json).values).map((p) => {
+      const author = asObj(p.author);
+      return { number: Number(p.id) || 0, branch: str(asObj(asObj(p.source).branch).name), url: str(asObj(asObj(p.links).html).href), draft: false, title: str(p.title), author: str(author.nickname || author.display_name) || undefined, state: str(p.state) || undefined, updatedAt: Date.parse(str(p.updated_on)) || 0 };
+    }).filter((p) => p.branch);
+    return { ok: true, prs, hasMore: !!asObj(r.json).next };
+  },
+  async prDetail(ws: string, repo: string, number: number): Promise<{ ok: boolean; detail?: PrDetail; error?: string }> {
+    const r = await bbApi(ws, `/2.0/repositories/${repo}/pullrequests/${number}`);
+    if (!r.ok || !r.json || typeof r.json !== 'object') return { ok: false, error: `Could not load PR (HTTP ${r.status})` };
+    const p = asObj(r.json); const author = asObj(p.author);
+    return { ok: true, detail: {
+      number: Number(p.id) || 0, title: str(p.title), body: str(asObj(p.summary).raw || p.description), state: str(p.state) || '', draft: false, url: str(asObj(asObj(p.links).html).href),
+      author: str(author.nickname || author.display_name) || undefined, sourceBranch: str(asObj(asObj(p.source).branch).name), baseBranch: str(asObj(asObj(p.destination).branch).name),
+      labels: [], reviewers: asArr(p.reviewers).map((u) => str(asObj(u).nickname || asObj(u).display_name)).filter(Boolean),
+      createdAt: Date.parse(str(p.created_on)) || 0, updatedAt: Date.parse(str(p.updated_on)) || 0,
+    } };
   },
   repoFromRemote(url: string): string | null {
     const m = url.trim().match(/bitbucket\.org[:/](.+?)(?:\.git)?\/?$/i);
@@ -377,7 +438,8 @@ export interface Adapter {
   authState(ws: string): Promise<{ connected: boolean; login?: string }>;
   issues(ws: string, repo: string, state?: IssueState, page?: number): Promise<{ ok: boolean; issues?: Issue[]; hasMore?: boolean; error?: string }>;
   repos(ws: string, opts?: RepoListOpts): Promise<{ ok: boolean; repos?: RepoRow[]; error?: string }>;
-  prs(ws: string, repo: string): Promise<{ ok: boolean; prs?: PrRow[]; error?: string }>;
+  prs(ws: string, repo: string, state?: IssueState, page?: number): Promise<{ ok: boolean; prs?: PrRow[]; hasMore?: boolean; error?: string }>;
+  prDetail(ws: string, repo: string, number: number): Promise<{ ok: boolean; detail?: PrDetail; error?: string }>;
   repoFromRemote(url: string): string | null;
   cloneUrl(repo: string): Promise<string>;
   cli?: string;

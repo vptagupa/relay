@@ -136,7 +136,7 @@ export interface Settings {
   bookmarkGroups: BookmarkGroup[];  // groups for organizing bookmarks (display order = array order)
   hasKey: Record<string, boolean>;  // provider -> whether a key is stored (never the key itself)
   issueTags?: Record<string, string[]>; // private local tags, keyed "repo#number" → ["mine","reviewing"] (never touch GitHub)
-  sidebarView?: 'library' | 'files' | 'issues'; // which rail panel is active in the sidebar
+  sidebarView?: 'library' | 'files' | 'issues' | 'prs'; // which rail panel is active in the sidebar
   issueRepos?: string[]; // LEGACY (pre per-workspace): global tracked repos — migrated into issueReposByWs
   issueRepo?: string;    // LEGACY (pre per-workspace): global active repo — migrated into issueRepoByWs
   issueReposByWs?: Record<string, string[]>; // tracked repos per workspace id (Issues are per-workspace)

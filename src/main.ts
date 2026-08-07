@@ -417,10 +417,15 @@ ipcMain.handle('provider:issues', async (_e, p: { provider: ProviderId; ws: stri
   return a.issues(p?.ws, p.repo, p?.state === 'closed' ? 'closed' : 'open', Math.max(1, Number(p?.page) || 1));
 });
 ipcMain.handle('provider:repos', async (_e, p: { provider: ProviderId; ws: string; workspaces?: string[] }) => (await providerOf(p?.provider)?.repos(p?.ws, { workspaces: Array.isArray(p?.workspaces) ? p.workspaces : undefined })) || badProvider);
-ipcMain.handle('provider:prs', async (_e, p: { provider: ProviderId; ws: string; repo: string }) => {
+ipcMain.handle('provider:prs', async (_e, p: { provider: ProviderId; ws: string; repo: string; state?: 'open' | 'closed'; page?: number }) => {
   const a = providerOf(p?.provider); if (!a) return badProvider;
   if (!validRepo(p?.repo)) return { ok: false, error: 'Invalid repository' };
-  return a.prs(p?.ws, p.repo);
+  return a.prs(p?.ws, p.repo, p?.state === 'closed' ? 'closed' : 'open', Math.max(1, Number(p?.page) || 1));
+});
+ipcMain.handle('provider:pr-detail', async (_e, p: { provider: ProviderId; ws: string; repo: string; number: number }) => {
+  const a = providerOf(p?.provider); if (!a) return badProvider;
+  if (!validRepo(p?.repo) || !Number.isInteger(p?.number) || p.number <= 0) return { ok: false, error: 'Invalid request' };
+  return a.prDetail(p?.ws, p.repo, p.number);
 });
 
 // Which coding agents are installed on PATH (for the Assign-to picker). Names are hardcoded literals.

@@ -87,8 +87,10 @@ const api = {
   providerIssues: (ws: string, provider: ProviderId, repo: string, state: 'open' | 'closed' = 'open', page = 1): Promise<{ ok: boolean; issues?: Issue[]; hasMore?: boolean; error?: string }> => ipcRenderer.invoke('provider:issues', { ws, provider, repo, state, page }),
   // List the connected user's repos/projects for the Sources picker (Bitbucket also needs workspace ids).
   providerRepos: (ws: string, provider: ProviderId, workspaces?: string[]): Promise<{ ok: boolean; repos?: { repo: string; desc: string; priv: boolean }[]; error?: string }> => ipcRenderer.invoke('provider:repos', { ws, provider, workspaces }),
-  // Open PRs/MRs for a repo — to link an assigned issue's branch to its PR (review → ship).
-  providerPrs: (ws: string, provider: ProviderId, repo: string): Promise<{ ok: boolean; prs?: { number: number; branch: string; url: string; draft: boolean }[]; error?: string }> => ipcRenderer.invoke('provider:prs', { ws, provider, repo }),
+  // PRs/MRs for a repo by state (default open, page 1) — links an issue's branch to its PR AND drives the PR rail.
+  providerPrs: (ws: string, provider: ProviderId, repo: string, state: 'open' | 'closed' = 'open', page = 1): Promise<{ ok: boolean; prs?: { number: number; branch: string; url: string; draft: boolean; title?: string; author?: string; state?: string; updatedAt?: number }[]; hasMore?: boolean; error?: string }> => ipcRenderer.invoke('provider:prs', { ws, provider, repo, state, page }),
+  // Full PR/MR (with body/labels/reviewers/base branch) — fetched on demand for the details hover.
+  providerPrDetail: (ws: string, provider: ProviderId, repo: string, number: number): Promise<{ ok: boolean; detail?: { number: number; title: string; body: string; state: string; draft: boolean; url: string; author?: string; sourceBranch: string; baseBranch: string; labels: string[]; reviewers: string[]; createdAt?: number; updatedAt?: number }; error?: string }> => ipcRenderer.invoke('provider:pr-detail', { ws, provider, repo, number }),
   // Which coding agents are installed on PATH (for the Assign-to picker).
   agentsDetect: (): Promise<Record<string, boolean>> => ipcRenderer.invoke('agents:detect'),
   // Open a URL in the user's default browser (e.g. an issue on GitHub).
