@@ -474,6 +474,90 @@ ipcMain.handle('open:external', (_e, url: string) => {
   if (typeof url === 'string' && /^https?:\/\//i.test(url)) shell.openExternal(url);
 });
 
+/* -------------------- worktree helpers (shared by issue + PR worktrees) -------------------- */
+// Resolve a LOCAL clone of the SELECTED repo: prefer the open folder when its remote IS this repo,
+// else use — or create — a managed clone under %APPDATA%\Relay\repos\<provider>__<owner>__<repo>. The
+// provider CLI (gh/glab) carries your login so private/org repos clone without a token in .git/config;
+// Bitbucket (no CLI) falls back to `git clone`, using the OS git credential helper.
+async function resolveRepoRoot(git: string, provider: ProviderId, repo: string, dir?: string): Promise<{ ok: true; repoRoot: string } | { ok: false; error: string }> {
+  const adapter = providerOf(provider);
+  if (!adapter) return { ok: false, error: 'Unknown provider' };
+  let repoRoot = '';
+  if (typeof dir === 'string' && dir) {
+    const top = await runBin(git, ['-C', dir, 'rev-parse', '--show-toplevel']);
+    if (top.ok) {
+      const root = top.stdout.trim();
+      const rem = await runBin(git, ['-C', root, 'remote', 'get-url', 'origin']);
+      const fromRemote = rem.ok ? providerFromRemote(rem.stdout) : null;
+      if (fromRemote && fromRemote.provider === provider && fromRemote.repo === repo) repoRoot = root;
+    }
+  }
+  if (!repoRoot) {
+    const cacheRoot = path.join(app.getPath('userData'), 'repos', `${provider}__${repo.replace(/\//g, '__')}`);
+    if (existsSync(path.join(cacheRoot, '.git'))) {
+      repoRoot = cacheRoot;
+      await runBin(git, ['-C', cacheRoot, 'fetch', 'origin', '--prune'], { timeout: 120000 }); // freshen (best-effort)
+    } else {
+      await fsp.mkdir(path.dirname(cacheRoot), { recursive: true });
+      const cliBin = adapter.cli ? await resolveBin(adapter.cli) : null;
+      const clone = cliBin && adapter.cliCloneArgs
+        ? await runBin(cliBin, adapter.cliCloneArgs(repo, cacheRoot), { timeout: 300000 })
+        : await runBin(git, ['clone', await adapter.cloneUrl(repo), cacheRoot], { timeout: 300000 });
+      if (!clone.ok || !existsSync(path.join(cacheRoot, '.git'))) {
+        const msg = (clone.stderr || clone.stdout || 'clone failed').trim().split('\n').filter(Boolean).pop() || 'clone failed';
+        return { ok: false, error: `Couldn't clone ${repo}: ${msg}` };
+      }
+      repoRoot = cacheRoot;
+    }
+  }
+  return { ok: true, repoRoot };
+}
+
+// A worktree folder name disambiguated by a short hash of the repo's absolute path, so two different
+// repos that share a basename (…/a/app and …/b/app) never collide onto the same worktree folder.
+function worktreeFolder(repoRoot: string): string {
+  return `${path.basename(repoRoot) || 'repo'}-${createHash('sha1').update(repoRoot.replace(/\\/g, '/').toLowerCase()).digest('hex').slice(0, 8)}`;
+}
+
+// Drop stale worktree registrations, then sweep the empty <folder>/<branch> and <folder> dirs a
+// hand-deleted worktree leaves behind, so the tree doesn't accumulate orphans and a stale-empty path
+// can't make `worktree add` fail with "already exists". Only ever removes genuinely-empty dirs.
+async function pruneAndSweepWorktrees(git: string, repoRoot: string): Promise<void> {
+  await runBin(git, ['-C', repoRoot, 'worktree', 'prune']);
+  try {
+    const wtBase = path.join(app.getPath('userData'), 'worktrees');
+    for (const fld of await fsp.readdir(wtBase).catch(() => [] as string[])) {
+      const fldPath = path.join(wtBase, fld);
+      if (!(await fsp.stat(fldPath).catch(() => null))?.isDirectory()) continue;
+      for (const leaf of await fsp.readdir(fldPath).catch(() => [] as string[])) {
+        const leafPath = path.join(fldPath, leaf);
+        const st = await fsp.stat(leafPath).catch(() => null);
+        if (st?.isDirectory() && (await fsp.readdir(leafPath).catch(() => ['x'])).length === 0) await fsp.rmdir(leafPath).catch(() => {});
+      }
+      if ((await fsp.readdir(fldPath).catch(() => ['x'])).length === 0) await fsp.rmdir(fldPath).catch(() => {});
+    }
+  } catch (err) { logFatal('worktree/sweep', err); } // sweep is best-effort; the worktree still opens
+}
+
+// Drop the (edited) brief inside the worktree's .slayer/ and locally git-exclude .slayer/ so it never
+// shows up / gets committed. Returns the repo-relative brief path (or undefined on any failure).
+async function dropSlayerBrief(git: string, wtPath: string, briefRel: string, brief: string): Promise<string | undefined> {
+  if (!brief) return undefined;
+  try {
+    await fsp.mkdir(path.join(wtPath, '.slayer'), { recursive: true });
+    await fsp.writeFile(path.join(wtPath, briefRel), brief, 'utf8');
+    const gp = await runBin(git, ['-C', wtPath, 'rev-parse', '--git-path', 'info/exclude']);
+    if (gp.ok) {
+      const excl = path.isAbsolute(gp.stdout.trim()) ? gp.stdout.trim() : path.join(wtPath, gp.stdout.trim());
+      const curExcl = await fsp.readFile(excl, 'utf8').catch(() => '');
+      // Strip CR before the presence test — on a CRLF exclude the line is ".slayer/\r", which /$/m
+      // (matching just before \n) would miss, re-appending a duplicate on every re-assign.
+      if (!/^\.slayer\/?$/m.test(curExcl.replace(/\r/g, ''))) await fsp.writeFile(excl, (!curExcl || curExcl.endsWith('\n') ? curExcl : curExcl + '\n') + '.slayer/\n', 'utf8');
+    }
+    return briefRel;
+  } catch (err) { logFatal('worktree/brief', err); return undefined; } // brief is best-effort; the worktree still opens
+}
+
 // Create (or reuse) an ISOLATED git worktree for an issue: a per-issue working dir on branch
 // issue-<n>, so several issues can be worked in parallel without disturbing the main checkout.
 // Also drops the (edited) issue brief as .slayer/issue-<n>.md and locally git-excludes it, so the
@@ -481,44 +565,13 @@ ipcMain.handle('open:external', (_e, url: string) => {
 ipcMain.handle('git:worktree-add', async (_e, p: { provider?: ProviderId; repo: string; dir: string; number: number; brief?: string }) => {
   try {
     const repo = p?.repo, dir = p?.dir, num = p?.number;
-    const adapter = providerOf(p?.provider || 'github');   // default github (back-compat for older callers)
-    if (!adapter || typeof repo !== 'string' || !/^[\w.-]+(\/[\w.-]+)+$/.test(repo) || !Number.isInteger(num) || num <= 0) return { ok: false, error: 'Invalid request' };
+    const provider = (p?.provider || 'github') as ProviderId;   // default github (back-compat for older callers)
+    if (!providerOf(provider) || typeof repo !== 'string' || !/^[\w.-]+(\/[\w.-]+)+$/.test(repo) || !Number.isInteger(num) || num <= 0) return { ok: false, error: 'Invalid request' };
     const git = await resolveBin('git');
     if (!git) return { ok: false, error: 'git not found on PATH' };
-
-    // Resolve a LOCAL clone of the SELECTED repo — NOT the open folder, which may now be a different repo
-    // (the repo selector decouples them). Prefer the open folder when its remote IS this repo; otherwise
-    // use — or create — a managed clone under %APPDATA%\Relay\repos\<provider>__<owner>__<repo>. The
-    // provider CLI (gh/glab) carries your login so private/org repos clone without a token in .git/config;
-    // Bitbucket (no CLI) falls back to `git clone`, which uses the OS git credential helper (e.g. GCM).
-    let repoRoot = '';
-    if (typeof dir === 'string' && dir) {
-      const top = await runBin(git, ['-C', dir, 'rev-parse', '--show-toplevel']);
-      if (top.ok) {
-        const root = top.stdout.trim();
-        const rem = await runBin(git, ['-C', root, 'remote', 'get-url', 'origin']);
-        const fromRemote = rem.ok ? providerFromRemote(rem.stdout) : null;
-        if (fromRemote && fromRemote.provider === (p?.provider || 'github') && fromRemote.repo === repo) repoRoot = root;
-      }
-    }
-    if (!repoRoot) {
-      const cacheRoot = path.join(app.getPath('userData'), 'repos', `${p?.provider || 'github'}__${repo.replace(/\//g, '__')}`);
-      if (existsSync(path.join(cacheRoot, '.git'))) {
-        repoRoot = cacheRoot;
-        await runBin(git, ['-C', cacheRoot, 'fetch', 'origin', '--prune'], { timeout: 120000 }); // freshen (best-effort)
-      } else {
-        await fsp.mkdir(path.dirname(cacheRoot), { recursive: true });
-        const cliBin = adapter.cli ? await resolveBin(adapter.cli) : null;
-        const clone = cliBin && adapter.cliCloneArgs
-          ? await runBin(cliBin, adapter.cliCloneArgs(repo, cacheRoot), { timeout: 300000 })
-          : await runBin(git, ['clone', await adapter.cloneUrl(repo), cacheRoot], { timeout: 300000 });
-        if (!clone.ok || !existsSync(path.join(cacheRoot, '.git'))) {
-          const msg = (clone.stderr || clone.stdout || 'clone failed').trim().split('\n').filter(Boolean).pop() || 'clone failed';
-          return { ok: false, error: `Couldn't clone ${repo}: ${msg}` };
-        }
-        repoRoot = cacheRoot;
-      }
-    }
+    const rr = await resolveRepoRoot(git, provider, repo, dir);
+    if (!rr.ok) return { ok: false, error: rr.error };
+    const repoRoot = rr.repoRoot;
     // An unborn repo (git init, no commits) can't seed a worktree branch — say so plainly.
     if (!(await runBin(git, ['-C', repoRoot, 'rev-parse', '--verify', '--quiet', 'HEAD'])).ok)
       return { ok: false, error: 'This repository has no commits yet — make an initial commit first.' };
@@ -528,30 +581,10 @@ ipcMain.handle('git:worktree-add', async (_e, p: { provider?: ProviderId; repo: 
     if (dh.ok) base = dh.stdout.trim().replace(/^origin\//, '');
     if (!base) { const cur = await runBin(git, ['-C', repoRoot, 'rev-parse', '--abbrev-ref', 'HEAD']); base = (cur.ok && cur.stdout.trim()) || 'HEAD'; }
     const branch = `issue-${num}`;
-    // Disambiguate by a short hash of the repo's absolute path, so two different repos that share a
-    // basename (…/a/app and …/b/app) never collide onto the same worktree folder.
-    const folder = `${path.basename(repoRoot) || 'repo'}-${createHash('sha1').update(repoRoot.replace(/\\/g, '/').toLowerCase()).digest('hex').slice(0, 8)}`;
+    const folder = worktreeFolder(repoRoot);
     const wtPath = path.join(app.getPath('userData'), 'worktrees', folder, branch);
     const norm = (s: string) => s.replace(/\\/g, '/').toLowerCase();
-    // Drop registrations for worktrees whose folders were deleted by hand, so a re-assign can recreate them.
-    await runBin(git, ['-C', repoRoot, 'worktree', 'prune']);
-    // House-keeping: after prune, hand-deleted worktrees leave behind empty <folder>/<branch> and (once
-    // its last branch is gone) empty <folder> dirs under …\worktrees. Sweep the empties so the tree
-    // doesn't accumulate orphans and a stale-empty wtPath can't make `worktree add` fail with "already
-    // exists". Only ever removes directories that are genuinely empty — never a live worktree.
-    try {
-      const wtBase = path.join(app.getPath('userData'), 'worktrees');
-      for (const fld of await fsp.readdir(wtBase).catch(() => [] as string[])) {
-        const fldPath = path.join(wtBase, fld);
-        if (!(await fsp.stat(fldPath).catch(() => null))?.isDirectory()) continue;
-        for (const leaf of await fsp.readdir(fldPath).catch(() => [] as string[])) {
-          const leafPath = path.join(fldPath, leaf);
-          const st = await fsp.stat(leafPath).catch(() => null);
-          if (st?.isDirectory() && (await fsp.readdir(leafPath).catch(() => ['x'])).length === 0) await fsp.rmdir(leafPath).catch(() => {});
-        }
-        if ((await fsp.readdir(fldPath).catch(() => ['x'])).length === 0) await fsp.rmdir(fldPath).catch(() => {});
-      }
-    } catch (err) { logFatal('git:worktree-add/sweep', err); } // sweep is best-effort; the worktree still opens
+    await pruneAndSweepWorktrees(git, repoRoot);
     // Already have a worktree for this issue? Reuse it (re-assigning the same issue is idempotent).
     const list = await runBin(git, ['-C', repoRoot, 'worktree', 'list', '--porcelain']);
     const reused = list.ok && norm(list.stdout).split('\n').some((ln) => ln.startsWith('worktree ') && norm(ln.slice(9).trim()) === norm(wtPath));
@@ -567,26 +600,55 @@ ipcMain.handle('git:worktree-add', async (_e, p: { provider?: ProviderId; repo: 
         return { ok: false, error: msg };
       }
     }
-    // Drop the brief inside the worktree and locally exclude .slayer/ so it never shows up / gets committed.
-    let briefRel: string | undefined;
-    const brief = typeof p?.brief === 'string' ? p.brief : '';
-    if (brief) {
-      try {
-        await fsp.mkdir(path.join(wtPath, '.slayer'), { recursive: true });
-        briefRel = `.slayer/issue-${num}.md`;
-        await fsp.writeFile(path.join(wtPath, briefRel), brief, 'utf8');
-        const gp = await runBin(git, ['-C', wtPath, 'rev-parse', '--git-path', 'info/exclude']);
-        if (gp.ok) {
-          const excl = path.isAbsolute(gp.stdout.trim()) ? gp.stdout.trim() : path.join(wtPath, gp.stdout.trim());
-          const curExcl = await fsp.readFile(excl, 'utf8').catch(() => '');
-          // Strip CR before the presence test — on a CRLF exclude the line is ".slayer/\r", which /$/m
-          // (matching just before \n) would miss, re-appending a duplicate on every re-assign.
-          if (!/^\.slayer\/?$/m.test(curExcl.replace(/\r/g, ''))) await fsp.writeFile(excl, (!curExcl || curExcl.endsWith('\n') ? curExcl : curExcl + '\n') + '.slayer/\n', 'utf8');
-        }
-      } catch (err) { logFatal('git:worktree-add/brief', err); briefRel = undefined; } // brief is best-effort; the worktree still opens
-    }
+    const briefRel = await dropSlayerBrief(git, wtPath, `.slayer/issue-${num}.md`, typeof p?.brief === 'string' ? p.brief : '');
     return { ok: true, path: wtPath, branch, base, reused, briefRel };
   } catch (err) { logFatal('git:worktree-add', err); return { ok: false, error: 'Worktree creation failed' }; }
+});
+
+// Create (or reuse) an isolated worktree with a PR/MR's SOURCE branch checked out, so a review pipeline
+// inspects the ACTUAL diff (not a fresh branch). Fetches the PR head — GitHub `refs/pull/<n>/head`, GitLab
+// `refs/merge-requests/<n>/head` (both exposed on origin, so even fork PRs work), Bitbucket the source
+// branch by name (no numbered PR ref → same-repo PRs only). Branch `pr-<n>`; brief at .slayer/pr-<n>.md.
+ipcMain.handle('git:pr-worktree-add', async (_e, p: { provider?: ProviderId; repo: string; dir: string; number: number; branch?: string; brief?: string }) => {
+  try {
+    const repo = p?.repo, dir = p?.dir, num = p?.number;
+    const provider = (p?.provider || 'github') as ProviderId;
+    if (!providerOf(provider) || typeof repo !== 'string' || !/^[\w.-]+(\/[\w.-]+)+$/.test(repo) || !Number.isInteger(num) || num <= 0) return { ok: false, error: 'Invalid request' };
+    const git = await resolveBin('git');
+    if (!git) return { ok: false, error: 'git not found on PATH' };
+    const rr = await resolveRepoRoot(git, provider, repo, dir);
+    if (!rr.ok) return { ok: false, error: rr.error };
+    const repoRoot = rr.repoRoot;
+    if (!(await runBin(git, ['-C', repoRoot, 'rev-parse', '--verify', '--quiet', 'HEAD'])).ok)
+      return { ok: false, error: 'This repository has no commits yet.' };
+    const branch = `pr-${num}`;
+    const folder = worktreeFolder(repoRoot);
+    const wtPath = path.join(app.getPath('userData'), 'worktrees', folder, branch);
+    const norm = (s: string) => s.replace(/\\/g, '/').toLowerCase();
+    await pruneAndSweepWorktrees(git, repoRoot);
+    const list = await runBin(git, ['-C', repoRoot, 'worktree', 'list', '--porcelain']);
+    const reused = list.ok && norm(list.stdout).split('\n').some((ln) => ln.startsWith('worktree ') && norm(ln.slice(9).trim()) === norm(wtPath));
+    if (!reused) {
+      // Fetch the PR head into FETCH_HEAD, then point local branch pr-<n> at it and check it out.
+      const srcBranch = typeof p?.branch === 'string' ? p.branch.trim() : '';
+      const ref = provider === 'github' ? `refs/pull/${num}/head`
+        : provider === 'gitlab' ? `refs/merge-requests/${num}/head`
+        : srcBranch;
+      if (!ref) return { ok: false, error: 'No source branch for this pull request.' };
+      const fetched = await runBin(git, ['-C', repoRoot, 'fetch', 'origin', ref], { timeout: 120000 });
+      if (!fetched.ok) {
+        const msg = (fetched.stderr || fetched.stdout || 'fetch failed').trim().split('\n').filter(Boolean).pop() || 'fetch failed';
+        return { ok: false, error: `Couldn't fetch ${provider === 'gitlab' ? 'MR' : 'PR'} #${num}: ${msg}` };
+      }
+      // -f creates or moves pr-<n> to the fetched head (safe: no live worktree holds it when !reused).
+      const bf = await runBin(git, ['-C', repoRoot, 'branch', '-f', branch, 'FETCH_HEAD']);
+      if (!bf.ok) { const msg = (bf.stderr || bf.stdout || 'branch failed').trim().split('\n').filter(Boolean).pop() || 'branch failed'; return { ok: false, error: msg }; }
+      const add = await runBin(git, ['-C', repoRoot, 'worktree', 'add', wtPath, branch], { timeout: 60000 });
+      if (!add.ok) { const msg = (add.stderr || add.stdout || 'git worktree add failed').trim().split('\n').filter(Boolean).pop() || 'git worktree add failed'; return { ok: false, error: msg }; }
+    }
+    const briefRel = await dropSlayerBrief(git, wtPath, `.slayer/pr-${num}.md`, typeof p?.brief === 'string' ? p.brief : '');
+    return { ok: true, path: wtPath, branch, reused, briefRel };
+  } catch (err) { logFatal('git:pr-worktree-add', err); return { ok: false, error: 'Worktree creation failed' }; }
 });
 
 /* -------------------- issue pipelines (staged agent runs, gated by verdict files) -------------------- */

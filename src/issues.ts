@@ -12,6 +12,7 @@ import { toast } from './ui';
 import type { Issue } from './shared/types';
 import { allPipelines, pipelineById, isGate, nextEdge, stageIndexById, STOP, renderBrief, stageStatus, type PipelineDef, type BriefCtx } from './pipelines';
 import { openPipelineBuilder } from './pipeline-editor';
+import { AGENTS } from './agents-list';
 
 const relay = (window as any).relay;
 
@@ -751,18 +752,6 @@ function pipeMini(p: PipelineDef): string {
   out.push(`<span class="sg-edge"><span class="sg-arr"></span></span><span class="sg-node sg-term">PR</span>`);
   return `<div class="sg-wrap"><div class="sg">${out.join('')}</div></div>`;
 }
-
-// Coding agents you can assign an issue to. Each is a thin adapter: a bin to detect + how to launch it in
-// the worktree terminal, seeded with the brief FILE (never issue text on the command line). The brief FILE
-// dictates the task (validate vs fix), so the launch wrapper stays neutral — "follow the brief". Only Claude
-// Code is verified on this machine; the others follow their documented CLIs and are best-effort.
-const AGENTS: { id: string; name: string; bin: string; launch: (rel: string) => string }[] = [
-  { id: 'claude', name: 'Claude Code', bin: 'claude', launch: (rel) => `claude "Read ${rel} and carry out the task it describes in this repository exactly as written, then summarize what you did."` },
-  { id: 'gemini', name: 'Gemini CLI', bin: 'gemini', launch: (rel) => `gemini "Read ${rel} and carry out the task it describes in this repository exactly as written, then summarize what you did."` },
-  { id: 'codex', name: 'Codex CLI', bin: 'codex', launch: (rel) => `codex "Read ${rel} and carry out the task it describes in this repository exactly as written, then summarize what you did."` },
-  { id: 'aider', name: 'Aider', bin: 'aider', launch: (rel) => `aider --message "Read ${rel} and carry out the task it describes in this repository exactly as written, then summarize what you did."` },
-  { id: 'antigravity', name: 'Antigravity', bin: 'antigravity', launch: (rel) => `antigravity "Read ${rel} and carry out the task it describes in this repository exactly as written, then summarize what you did."` },
-];
 
 // Read-only issue details — usable at any time, including while the issue is being worked on (its row
 // opens this instead of re-assigning). Shows the description + metadata + run status + PR/MR, and links

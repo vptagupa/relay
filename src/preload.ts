@@ -104,6 +104,9 @@ const api = {
   openExternal: (url: string): Promise<void> => ipcRenderer.invoke('open:external', url),
   // Assign: create (or reuse) an isolated worktree for an issue and drop the edited brief inside it.
   worktreeAdd: (provider: ProviderId, repo: string, dir: string, number: number, brief: string): Promise<{ ok: boolean; path?: string; branch?: string; base?: string; reused?: boolean; briefRel?: string; error?: string }> => ipcRenderer.invoke('git:worktree-add', { provider, repo, dir, number, brief }),
+  // Review-assign a PR: create (or reuse) an isolated worktree with the PR's SOURCE branch checked out
+  // (fetches the PR head; `branch` = source branch, needed for Bitbucket which has no numbered PR ref).
+  prWorktreeAdd: (provider: ProviderId, repo: string, dir: string, number: number, branch: string, brief: string): Promise<{ ok: boolean; path?: string; branch?: string; reused?: boolean; briefRel?: string; error?: string }> => ipcRenderer.invoke('git:pr-worktree-add', { provider, repo, dir, number, branch, brief }),
 
   // --- issue pipelines (staged agent runs) ---
   // Prep a stage before launch: write its brief file into the worktree's .slayer/ (skip for stage 0 —

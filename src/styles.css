@@ -889,6 +889,20 @@ body.tabdrag .dz{display:block;pointer-events:auto}
 .pr-badge.st.closed,.pr-badge.st.declined,.pr-badge.st.superseded{border-color:#da363366;color:#f85149}
 .pr-ext{font-size:12px;color:var(--muted);opacity:0;flex:none}
 .pr-row:hover .pr-ext{opacity:.8}
+/* ⚡ review-assign button (per row) — always visible so it's discoverable, brighter on hover */
+.pr-assign{flex:none;border:none;background:transparent;color:var(--text-dim);cursor:pointer;font-size:12px;line-height:1;padding:2px 3px;border-radius:6px;opacity:.65}
+.pr-row:hover .pr-assign{opacity:.9}
+.pr-assign:hover{background:var(--surface-3,var(--surface-2));color:var(--accent);opacity:1}
+/* review-pipeline status chip (kept visible even when not hovering, so a running review is always shown) */
+.pr-run{font:8.5px/1.4 var(--mono);border:1px solid var(--border-strong);border-radius:999px;padding:1px 6px;white-space:nowrap;cursor:pointer;text-transform:lowercase;color:var(--muted)}
+.pr-run.queued{border-color:var(--border-strong);color:var(--text-dim)}
+.pr-run.reviewing,.pr-run.working{border-color:#a78bfa66;color:#a78bfa}
+.pr-run.ready{border-color:#2ea04366;color:#3fb950}
+.pr-run.changes{border-color:#e0a44a66;color:#e0a44a}
+/* compact wired-path pipeline preview (Assign dialog + map-board pipeline nodes) */
+.prp-st{display:inline-flex;align-items:center;gap:5px;font-size:11px;color:var(--text-dim)}
+.prp-dot{width:7px;height:7px;border-radius:50%;display:inline-block;flex:none}
+.prp-arr{margin:0 6px;color:var(--muted);font-size:10px}
 /* PR hover detail card — hoverable + scrollable so a long description can be read */
 .pr-hover{position:fixed;z-index:95;width:460px;max-width:calc(100vw - 16px);max-height:min(66vh,460px);overflow-y:auto;overscroll-behavior:contain;background:var(--surface);border:1px solid var(--border-strong);border-radius:10px;box-shadow:var(--shadow);padding:10px 12px 0;display:none}
 .prh-top{display:flex;align-items:center;gap:6px;margin-bottom:6px}
@@ -904,6 +918,9 @@ body.tabdrag .dz{display:block;pointer-events:auto}
 .prh-body.empty,.prh-body.loading{color:var(--muted);font:10.5px/1.4 var(--mono);display:flex;align-items:center;gap:6px}
 .prh-hint{position:sticky;bottom:0;margin:9px -12px 0;padding:8px 12px 10px;border-top:1px solid var(--border);background:var(--surface);font:10px/1 var(--mono);color:var(--accent-2);cursor:pointer}
 .prh-hint:hover{filter:brightness(1.15);text-decoration:underline}
+/* ⚡ Review action in the hover card (pushed to the right of the top row) */
+.prh-review{margin-left:auto;border:1px solid var(--border-strong);background:transparent;color:var(--accent);cursor:pointer;font:11px/1 var(--mono);padding:4px 9px;border-radius:7px;white-space:nowrap}
+.prh-review:hover{background:var(--surface-2);border-color:var(--accent)}
 /* open/closed state toggle (segmented) */
 .iss-state{display:flex;gap:2px;margin:4px 8px 6px;padding:2px;background:var(--surface-2);border:1px solid var(--border);border-radius:8px}
 .iss-seg{flex:1;padding:4px 0;border:none;background:transparent;color:var(--text-dim);font:600 11px/1.2 var(--sans);border-radius:6px;cursor:pointer}

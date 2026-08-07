@@ -1853,7 +1853,8 @@ new ResizeObserver(() => { clearTimeout(_roT); _roT = setTimeout(() => { fitPane
     activeWsId: getActiveWsId, // Issues (tracked repos + active repo) are scoped per workspace
   });
   // PR rail — shares the Issues rail's active repo; clicking its repo chip jumps to Issues to change it.
-  initPrs({ activeWsId: getActiveWsId, focusIssues: () => switchSidebarView('issues') });
+  // openAgentTab powers PR review pipelines (an agent tab rooted in the PR's checked-out worktree).
+  initPrs({ activeWsId: getActiveWsId, focusIssues: () => switchSidebarView('issues'), openAgentTab: (o) => { void newTab({ cwd: o.cwd, name: o.name, runCmd: o.runCmd }); } });
   if ((state.settings.sidebarView || 'library') === 'prs') void loadPrs(); // restore-on-boot when PR was the last view
   // Notifications — background poller (all workspaces) + the per-workspace header bell.
   initNotifications({ activeWsId: getActiveWsId });

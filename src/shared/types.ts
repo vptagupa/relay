@@ -144,6 +144,7 @@ export interface Settings {
   issueAgent?: string;   // preferred coding agent id for Assign (claude/gemini/codex/aider/antigravity)
   issueConcurrency?: number; // max agents the assign queue runs at once (per repo); default 2
   issuePipelineByKey?: Record<string, string>; // per-issue pipeline id, keyed "provider:repo#number"; unset → default validate-fix
+  prPipelineByKey?: Record<string, string>;    // per-PR review pipeline id, keyed "provider:repo#number"; unset → default review-pr
   pipelines?: PipelineDef[]; // user-authored custom pipelines (built-ins live in code); merged into the registry
   bitbucketWorkspacesByWs?: Record<string, string[]>; // Bitbucket workspace ids to list repos from, per Slayer T workspace id (CHANGE-2770)
   providersScopedMigrated?: boolean; // one-shot flag: the pre-scoping global provider secrets have been moved into a workspace

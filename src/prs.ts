@@ -7,12 +7,15 @@
 
 import { state } from './state';
 import { $, esc } from './dom';
+import { toast } from './ui';
+import { initPrReview, openPrAssign, openPrMap, prStatusOf, onPrChip, PR_STATUS_LABEL, type PrRef, type PrCtx } from './pr-review';
 
 const relay = (window as any).relay;
 
 export interface PrsDeps {
   activeWsId: () => string;   // active workspace id — connections + the shared active repo are per-workspace
   focusIssues: () => void;    // jump to the Issues rail (where the shared repo is picked)
+  openAgentTab: (o: { cwd: string; name: string; runCmd?: string }) => void; // for PR review pipelines (agent tab in the PR worktree)
 }
 let deps: PrsDeps;
 
@@ -139,6 +142,7 @@ const prKey = (p: PrItem) => `${p.provider || provider}:${p.repo || repo}#${p.nu
 let hoverEl: HTMLElement | null = null;
 let hoverKey = '';                              // the PR currently shown (guards the async detail render)
 let hoverUrl = '';                              // the shown PR's url — so the footer opens it even before the detail loads
+let hoverPr: PrItem | null = null;              // the PR currently shown — so the card's ⚡ Review button can assign it
 let hoverRow: HTMLElement | null = null;
 let hoverHideT: number | null = null;
 let hoverFetchT: number | null = null;
@@ -147,8 +151,14 @@ function ensureHoverEl(): HTMLElement {
     hoverEl = document.createElement('div'); hoverEl.className = 'pr-hover'; document.body.appendChild(hoverEl);
     hoverEl.addEventListener('mouseenter', () => { if (hoverHideT) { clearTimeout(hoverHideT); hoverHideT = null; } });
     hoverEl.addEventListener('mouseleave', scheduleHidePrHover);
-    // Only the "open on <provider>" footer opens the PR — clicking the title/body does nothing (so text stays selectable).
-    hoverEl.addEventListener('click', (e) => { if (!(e.target as HTMLElement).closest('.prh-hint')) return; const url = detailCache.get(hoverKey)?.url || hoverUrl; if (url) relay.openExternal(url); });
+    hoverEl.addEventListener('click', (e) => {
+      const t = e.target as HTMLElement;
+      // ⚡ Review → open the pipeline-assign dialog for this PR (not the provider).
+      if (t.closest('.prh-review')) { const pr = hoverPr; if (pr) { hidePrHover(); void openPrAssign(prRefOf(pr), prCtxOf(pr)); } return; }
+      // Only the "open on <provider>" footer opens the PR — clicking the title/body does nothing (so text stays selectable).
+      if (!t.closest('.prh-hint')) return;
+      const url = detailCache.get(hoverKey)?.url || hoverUrl; if (url) relay.openExternal(url);
+    });
   }
   return hoverEl;
 }
@@ -173,7 +183,7 @@ function hoverHtml(p: PrItem, d?: PrDetail, failed = false): string {
     ? (d.body.trim() ? `<div class="prh-body">${esc(d.body)}</div>` : '<div class="prh-body empty">No description.</div>')
     : failed ? '<div class="prh-body empty">Couldn’t load the description.</div>'
     : '<div class="prh-body loading"><span class="isr-mspin"></span> loading details…</div>';
-  return `<div class="prh-top"><span class="prh-num">#${p.number}</span><span class="pr-badge st ${esc(st)}">${esc(st)}</span>${(d?.draft ?? p.draft) ? '<span class="pr-badge draft">draft</span>' : ''}</div>
+  return `<div class="prh-top"><span class="prh-num">#${p.number}</span><span class="pr-badge st ${esc(st)}">${esc(st)}</span>${(d?.draft ?? p.draft) ? '<span class="pr-badge draft">draft</span>' : ''}<button class="prh-review" data-prreview="1" title="Review this ${pp === 'gitlab' ? 'MR' : 'PR'} with a pipeline">⚡ Review</button></div>
     <div class="prh-title">${esc(d?.title || p.title || '(no title)')}</div>
     <div class="prh-meta">${meta.join('')}</div>
     ${labels}${revs}${body}
@@ -183,7 +193,7 @@ function showPrHover(p: PrItem, row: HTMLElement): void {
   if (hoverHideT) { clearTimeout(hoverHideT); hoverHideT = null; }
   if (hoverFetchT) { clearTimeout(hoverFetchT); hoverFetchT = null; }
   const el = ensureHoverEl();
-  const key = prKey(p); hoverKey = key; hoverRow = row; hoverUrl = p.url;
+  const key = prKey(p); hoverKey = key; hoverRow = row; hoverUrl = p.url; hoverPr = p;
   el.innerHTML = hoverHtml(p, detailCache.get(key)); el.scrollTop = 0; el.style.display = 'block';
   positionHover(row);
   if (!detailCache.has(key)) hoverFetchT = window.setTimeout(() => { if (hoverKey === key) void fetchDetail(p, key); }, 180);
@@ -203,6 +213,13 @@ async function fetchDetail(p: PrItem, key: string): Promise<void> {
 }
 function scheduleHidePrHover(): void { if (hoverHideT) clearTimeout(hoverHideT); hoverHideT = window.setTimeout(hidePrHover, 220); }
 function hidePrHover(): void { if (hoverHideT) { clearTimeout(hoverHideT); hoverHideT = null; } if (hoverEl) hoverEl.style.display = 'none'; hoverKey = ''; }
+
+/* ----------------------------- review assignment (per-PR pipeline) ----------------------------- */
+// A PR's provider/repo (its own in All-repos scope, else the rail's active pick) + where to review it from.
+const prProvider = (p: PrItem): ProviderId => p.provider || provider;
+const prRepo = (p: PrItem): string => p.repo || repo || '';
+const prRefOf = (p: PrItem): PrRef => ({ number: p.number, title: p.title, branch: p.branch, url: p.url, provider: prProvider(p), repo: prRepo(p) });
+const prCtxOf = (p: PrItem): PrCtx => ({ provider: prProvider(p), repo: prRepo(p), dir: state.settings.workspace || '' });
 
 /* ----------------------------- render ----------------------------- */
 function render(): void {
@@ -233,6 +250,7 @@ function render(): void {
   el.innerHTML = prs.map((p) => {
     const pp = p.provider || provider;
     const st = (p.state || prState).toLowerCase();
+    const runSt = prStatusOf(pp, p.repo || repo || '', p.number);   // review-pipeline status for this PR
     return `<div class="pr-row" data-url="${esc(p.url)}">
       <div class="pr-hash">#${p.number}</div>
       <div class="pr-body">
@@ -240,8 +258,10 @@ function render(): void {
         <div class="pr-meta">${p.repo ? `<span class="pr-repo-lbl"><span class="src-dot ${PROV_DOT[pp]}"></span>${esc(p.repo)}</span>` : ''}<span class="pr-branch" title="source branch">⎇ ${esc(p.branch)}</span>${p.author ? `<span class="pr-author">${esc(p.author)}</span>` : ''}</div>
       </div>
       <div class="pr-side">
+        ${runSt !== 'idle' ? `<span class="pr-run ${runSt}" data-prrun="1" title="Review: ${esc(PR_STATUS_LABEL[runSt] || runSt)} — click to manage">${esc(PR_STATUS_LABEL[runSt] || runSt)}</span>` : ''}
         ${p.draft ? '<span class="pr-badge draft">draft</span>' : ''}
         <span class="pr-badge st ${esc(st)}">${esc(st)}</span>
+        <button class="pr-assign" data-prasg="1" title="Review this ${pp === 'gitlab' ? 'MR' : 'PR'} with a pipeline">⚡</button>
         <span class="pr-ext">↗</span>
       </div>
     </div>`;
@@ -255,14 +275,24 @@ function render(): void {
     row.onclick = () => { const u = row.dataset.url; if (u) relay.openExternal(u); };
     row.onmouseenter = () => { if (p) showPrHover(p, row); };
     row.onmouseleave = scheduleHidePrHover;   // delayed so moving into the (scrollable) card keeps it open
+    // ⚡ opens the review-pipeline assignment; the status chip manages a live run — both stop the row's open-in-provider.
+    const asg = row.querySelector<HTMLElement>('[data-prasg]');
+    if (asg) asg.onclick = (e) => { e.stopPropagation(); hidePrHover(); if (p) void openPrAssign(prRefOf(p), prCtxOf(p)); };
+    const chip = row.querySelector<HTMLElement>('[data-prrun]');
+    if (chip) chip.onclick = (e) => { e.stopPropagation(); if (p) onPrChip(prProvider(p), prRepo(p), p.number); };
   });
 }
 
 /* ----------------------------- wire-up ----------------------------- */
 export function initPrs(d: PrsDeps): void {
   deps = d;
+  initPrReview({ activeWsId: d.activeWsId, openAgentTab: d.openAgentTab, refresh: () => render() });
   const rsel = $('#prSideRepo'); if (rsel) rsel.onclick = (e) => { e.stopPropagation(); deps.focusIssues(); }; // repo is picked in the Issues rail
   const pull = $('#prPull'); if (pull) pull.onclick = () => void loadPrs();
+  const map = $('#prMap'); if (map) map.onclick = () => {
+    if (phase !== 'ready' || !prs.length) { toast('Pull some pull requests first'); return; }
+    void openPrMap(prs.map(prRefOf), { provider, repo: repo || '', dir: state.settings.workspace || '' });
+  };
   $('#prScope')?.querySelectorAll<HTMLElement>('.iss-seg').forEach((b) => {
     b.onclick = () => { const s = b.dataset.sc === 'all' ? 'all' : 'repo'; if (s === prScope) return; prScope = s; void loadPrs(); };
   });
