@@ -162,6 +162,7 @@ export function appHtml(panes: string): string {
       <label class="chk"><input type="checkbox" id="blocksViewSet"> Blocks view — show commands as blocks in the main terminal (full-screen apps drop to the live terminal automatically)</label>
       <label class="chk"><input type="checkbox" id="notifySet"> Notify me when a long command finishes while Slayer T isn't focused</label>
       <label class="chk"><input type="checkbox" id="notifyIssuesSet"> Notify me about new/closed issues &amp; pull requests across my tracked repos</label>
+      <div class="field"><label>Something broke?</label><div class="row"><button class="set" id="btnReportBug">Report a bug…</button><button class="set" id="btnRevealLog">Reveal error log</button></div><div class="fhint">Collects the app version, OS, and the recent error log (secrets scrubbed), copies it to your clipboard, and opens a pre-filled GitHub issue.</div></div>
     </div>
     <div class="modal-foot"><button class="btn primary" id="settingsClose">Done</button></div>
   </div>

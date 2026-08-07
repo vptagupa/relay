@@ -7,6 +7,7 @@ import http from 'node:http';
 import { createHash, randomBytes } from 'node:crypto';
 import { httpsReq, PROVIDERS, providerOf, providerFromRemote, bitbucketExchangeCode, bitbucketAuthorizeUrl, bbOAuthConfigured, BB_OAUTH_PORT, BB_REDIRECT_URI, getOAuthApp, setOAuthApp, githubClientId, migrateGlobalSecretsToWs, type ProviderId } from './providers';
 import { createTerm, writeTerm, resizeTerm, detachTerm, killTerm, killAll, isAltScreen } from './pty';
+import { startWebhookServer, stopWebhookServer, webhookRunning } from './webhooks';
 import * as store from './store';
 import * as keys from './keys';
 import { runAgent } from './agent/agent';
@@ -426,6 +427,39 @@ ipcMain.handle('provider:pr-detail', async (_e, p: { provider: ProviderId; ws: s
   const a = providerOf(p?.provider); if (!a) return badProvider;
   if (!validRepo(p?.repo) || !Number.isInteger(p?.number) || p.number <= 0) return { ok: false, error: 'Invalid request' };
   return a.prDetail(p?.ws, p.repo, p.number);
+});
+
+// Real-time notifications: a local webhook receiver (see webhooks.ts). The renderer toggles it on/off; parsed
+// issue/PR events are pushed back to the renderer, which routes them into the per-workspace notification bell.
+ipcMain.handle('webhook:control', async (_e, p: { enabled: boolean; port?: number; secret?: string }) => {
+  if (!p?.enabled) { stopWebhookServer(); return { ok: true, running: false }; }
+  const res = await startWebhookServer(Math.max(1, Math.min(65535, Number(p?.port) || 47824)), String(p?.secret || ''), (ev) => { if (win && !win.isDestroyed()) win.webContents.send('webhook:event', ev); });
+  return { ok: res.ok, running: webhookRunning(), error: res.error };
+});
+ipcMain.handle('webhook:status', () => ({ running: webhookRunning() }));
+
+// Diagnostics for the in-app "Report a bug" flow — app/OS versions + a scrubbed tail of the crash log. Tokens
+// never reach the log (they live in the keychain), but scrub defensively before this leaves for the clipboard.
+function scrubSecrets(s: string): string {
+  return s
+    .replace(/\bgh[posru]_[A-Za-z0-9]{20,}\b/g, '[redacted-token]')                 // GitHub tokens
+    .replace(/\bgithub_pat_[A-Za-z0-9_]{20,}\b/g, '[redacted-token]')               // GitHub fine-grained PAT
+    .replace(/\bglpat-[A-Za-z0-9_-]{16,}\b/g, '[redacted-token]')                   // GitLab PAT
+    .replace(/\bATO[A-Z0-9-]{16,}\b/gi, '[redacted-token]')                         // Atlassian / Bitbucket
+    .replace(/\benc:[A-Za-z0-9+/=]{16,}/g, 'enc:[redacted]')                        // safeStorage blobs
+    .replace(/\b(Bearer|token=|access_token=|secret=)\s*[A-Za-z0-9._-]{12,}/gi, '$1 [redacted]')
+    .replace(/([?&]token=)[^\s&"']+/gi, '$1[redacted]');
+}
+ipcMain.handle('diag:collect', async () => {
+  const v = process.versions;
+  let logTail = '';
+  try { const raw = await fsp.readFile(path.join(app.getPath('userData'), 'slayert-error.log'), 'utf8'); logTail = scrubSecrets(raw.slice(-16000)); } catch { /* no log yet */ }
+  return { version: app.getVersion(), os: `${os.type()} ${os.release()}`, arch: process.arch, electron: v.electron, chrome: v.chrome, node: v.node, logTail };
+});
+ipcMain.handle('diag:reveal', () => {
+  const p = path.join(app.getPath('userData'), 'slayert-error.log');
+  if (existsSync(p)) shell.showItemInFolder(p); else void shell.openPath(app.getPath('userData'));
+  return { ok: true };
 });
 
 // Which coding agents are installed on PATH (for the Assign-to picker). Names are hardcoded literals.

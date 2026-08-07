@@ -29,7 +29,7 @@ function relTime(ms: number): string {
   return `${Math.floor(d / 30)}mo ago`;
 }
 
-const POLL_MS = 180000;         // 3 minutes
+const POLL_MS = 60000;          // 1 minute
 const FIRST_POLL_MS = 15000;    // let boot + provider connections settle before the first sweep
 const CAP = 60;                 // max notifications kept per workspace
 const PUSH_CAP = 5;             // max individual native notifications per poll cycle (else one summary)
@@ -142,7 +142,30 @@ function commit(fresh: { ws: string; note: AppNotification }[]): void {
   if (!pushable.length) return;
   void persist(byWs);
   firePush(pushable);
+  playChime();
   renderBell();
+}
+
+// A short two-note chime, synthesized with Web Audio (no asset to bundle). Off if notifySound is disabled.
+let audioCtx: AudioContext | null = null;
+function playChime(): void {
+  if (state.settings.notifySound === false) return;
+  try {
+    audioCtx = audioCtx || new (window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext)();
+    const ctx = audioCtx; if (ctx.state === 'suspended') void ctx.resume();
+    const t0 = ctx.currentTime;
+    const master = ctx.createGain(); master.gain.value = 0.9; master.connect(ctx.destination); // headroom for the two overlapping tails
+    for (const [freq, at] of [[880, 0], [1174.66, 0.11]] as [number, number][]) {   // A5 → D6
+      const osc = ctx.createOscillator(), g = ctx.createGain();
+      osc.type = 'triangle';   // richer/louder-perceived than a pure sine at the same peak
+      osc.frequency.value = freq;
+      g.gain.setValueAtTime(0.0001, t0 + at);
+      g.gain.exponentialRampToValueAtTime(0.5, t0 + at + 0.012);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + at + 0.5);
+      osc.connect(g).connect(master);
+      osc.start(t0 + at); osc.stop(t0 + at + 0.52);
+    }
+  } catch { /* audio unavailable */ }
 }
 
 function firePush(notes: AppNotification[]): void {
@@ -204,6 +227,31 @@ function toggleMenu(open?: boolean): void {
 }
 function closeOnOutside(): void { toggleMenu(false); }  // menu-internal clicks stopPropagation, so this only fires for outside clicks
 
+/* ----------------------------- real-time webhooks ----------------------------- */
+const DEFAULT_WEBHOOK_PORT = 47824;
+function genSecret(): string {
+  const a = new Uint8Array(24); crypto.getRandomValues(a);
+  return [...a].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+// A parsed webhook event (main → renderer) → route into the bell for every workspace watching that repo. Dedup
+// against the poller happens in commit() by stable id, so webhooks (instant) and the poll (fallback) can't double.
+function handleWebhookEvent(ev: { kind: string; provider: string; repo: string; number: number; title: string; url: string }): void {
+  const kind = ev.kind as AppNotification['kind'];
+  if (kind !== 'new-issue' && kind !== 'closed-issue' && kind !== 'new-pr' && kind !== 'closed-pr') return;
+  const repoId = `${ev.provider}:${ev.repo}`;
+  const fresh: { ws: string; note: AppNotification }[] = [];
+  for (const ws of watchedWorkspaces()) {
+    if (watchedRepos(ws).includes(repoId)) fresh.push({ ws, note: { id: `${kind}:${ev.provider}:${ev.repo}#${ev.number}`, kind, provider: ev.provider, repo: ev.repo, number: ev.number, title: ev.title || '', url: ev.url || '', ts: Date.now(), read: false } });
+  }
+  if (fresh.length) commit(fresh);
+}
+// Push the current webhook settings to the main-process receiver (start/stop). Returns its running state.
+async function applyWebhook(): Promise<{ ok: boolean; running: boolean; error?: string }> {
+  const enabled = !!state.settings.webhookEnabled;
+  const port = Number(state.settings.webhookPort) || DEFAULT_WEBHOOK_PORT;
+  return relay.webhookControl(enabled, port, state.settings.webhookSecret || '').catch(() => ({ ok: false, running: false, error: 'control failed' }));
+}
+
 /* ----------------------------- settings dialog ----------------------------- */
 async function persistWatched(ws: string, repos: string[]): Promise<void> {
   const byWs = { ...(state.settings.notifyReposByWs || {}) }; byWs[ws] = repos;
@@ -237,11 +285,20 @@ function openNotifSettings(): void {
   const { root, close } = modal(`<div class="tpl-card iss-card ns-card">
       <div class="hd"><span class="dot" style="background:var(--accent)"></span><span class="t">Notification settings<small>this workspace · new / closed issues &amp; PRs</small></span></div>
       <div class="bd">
-        <label class="chk ns-push"><input type="checkbox" id="nsPush"${state.settings.issuePushNotify !== false ? ' checked' : ''}> Push notifications — native OS toasts when something changes</label>
+        <label class="chk"><input type="checkbox" id="nsPush"${state.settings.issuePushNotify !== false ? ' checked' : ''}> Push notifications — native OS toasts when something changes</label>
+        <label class="chk ns-push"><input type="checkbox" id="nsSound"${state.settings.notifySound !== false ? ' checked' : ''}> Play a sound when a notification arrives</label>
         <div class="ns-lbl">Repositories to watch</div>
         <div class="ns-provs">${PROVS_ALL.map(sectionHtml).join('')}</div>
+        <div class="ns-lbl" style="margin-top:16px">Real-time (webhooks) <span class="ns-wstat" id="nsWhStat"></span></div>
+        <label class="chk"><input type="checkbox" id="nsWh"${state.settings.webhookEnabled ? ' checked' : ''}> Receive webhooks for instant notifications (the 1-min poll stays as a fallback)</label>
+        <div class="ns-wh" id="nsWhBody"${state.settings.webhookEnabled ? '' : ' style="display:none"'}>
+          <div class="ns-wrow"><span class="ns-wl">Port</span><input class="iss-in ns-win" id="nsWhPort" value="${Number(state.settings.webhookPort) || DEFAULT_WEBHOOK_PORT}" spellcheck="false"></div>
+          <div class="ns-wrow"><span class="ns-wl">URL</span><code class="ns-wu" id="nsWhUrl"></code><button class="tpl-btn ghost" data-wcopy="url">Copy</button></div>
+          <div class="ns-wrow"><span class="ns-wl">Secret</span><code class="ns-wu" id="nsWhSec"></code><button class="tpl-btn ghost" data-wcopy="secret">Copy</button></div>
+          <div class="iss-wt">Localhost isn't reachable by the providers — expose this port with a tunnel (cloudflared / ngrok) or a reachable host, then add a webhook per repo. GitHub: Secret = above, content-type JSON, events Issues + Pull requests. GitLab: Secret token = above, Issues + Merge request events. Bitbucket: append <code>?token=SECRET</code> to the URL, Issue + Pull request events.</div>
+        </div>
       </div>
-      <div class="ft"><span class="hint">Polled every ~3 min. Only checked repos notify (bell + push).</span><span class="r"><button class="tpl-btn pri" data-x>Done</button></span></div>
+      <div class="ft"><span class="hint">Poll every ~1 min; webhooks (if set up) deliver instantly.</span><span class="r"><button class="tpl-btn pri" data-x>Done</button></span></div>
     </div>`);
 
   const renderList = (p: ProviderId): void => {
@@ -261,6 +318,11 @@ function openNotifSettings(): void {
     state.settings = await relay.patchSettings({ issuePushNotify: (e.target as HTMLInputElement).checked });
     const main = document.getElementById('notifyIssuesSet') as HTMLInputElement | null; if (main) main.checked = (e.target as HTMLInputElement).checked; // keep the main Settings toggle in sync
   });
+  (root.querySelector('#nsSound') as HTMLInputElement).addEventListener('change', async (e) => {
+    const on = (e.target as HTMLInputElement).checked;
+    state.settings = await relay.patchSettings({ notifySound: on });
+    if (on) playChime();   // a quick preview when turning it on
+  });
   root.querySelectorAll<HTMLElement>('[data-load]').forEach((b) => {
     b.onclick = async () => {
       const p = b.dataset.load as ProviderId; if (loading[p]) return;
@@ -272,6 +334,37 @@ function openNotifSettings(): void {
       else { const box = root.querySelector(`#nsList-${p}`) as HTMLElement | null; if (box && !avail[p].size) box.innerHTML = `<div class="src-empty">Not connected — connect ${PROV_NAME[p]} in Sources.</div>`; }
     };
   });
+
+  // Webhooks section
+  const whBody = root.querySelector('#nsWhBody') as HTMLElement;
+  const whUrl = root.querySelector('#nsWhUrl') as HTMLElement;
+  const whSec = root.querySelector('#nsWhSec') as HTMLElement;
+  const whStat = root.querySelector('#nsWhStat') as HTMLElement;
+  const whPort = root.querySelector('#nsWhPort') as HTMLInputElement;
+  const whPortNow = (): number => Number(state.settings.webhookPort) || DEFAULT_WEBHOOK_PORT;
+  const renderWebhook = (): void => { whUrl.textContent = `http://localhost:${whPortNow()}/`; whSec.textContent = state.settings.webhookSecret || '(generated on enable)'; };
+  const refreshStat = async (): Promise<void> => {
+    if (!state.settings.webhookEnabled) { whStat.textContent = 'off'; whStat.className = 'ns-wstat'; return; }
+    const r = await applyWebhook(); if (!root.isConnected) return;
+    whStat.textContent = r.running ? '● listening' : `⚠ ${r.error || 'not running'}`; whStat.className = 'ns-wstat' + (r.running ? ' on' : ' err');
+  };
+  renderWebhook(); void refreshStat();
+  (root.querySelector('#nsWh') as HTMLInputElement).addEventListener('change', async (e) => {
+    const on = (e.target as HTMLInputElement).checked;
+    const patch: Record<string, unknown> = { webhookEnabled: on };
+    if (on && !state.settings.webhookSecret) patch.webhookSecret = genSecret();
+    if (!state.settings.webhookPort) patch.webhookPort = DEFAULT_WEBHOOK_PORT;
+    state.settings = await relay.patchSettings(patch);
+    whBody.style.display = on ? '' : 'none'; renderWebhook(); void refreshStat();
+  });
+  whPort.addEventListener('change', async () => {
+    const port = Math.max(1, Math.min(65535, Number(whPort.value) || DEFAULT_WEBHOOK_PORT));
+    whPort.value = String(port); state.settings = await relay.patchSettings({ webhookPort: port });
+    renderWebhook(); void refreshStat();
+  });
+  root.querySelectorAll<HTMLElement>('[data-wcopy]').forEach((b) => {
+    b.onclick = () => { const txt = b.dataset.wcopy === 'secret' ? (state.settings.webhookSecret || '') : `http://localhost:${whPortNow()}/`; try { relay.copyText(txt); toast('Copied', true); } catch { /* clipboard unavailable */ } };
+  });
 }
 
 /* ----------------------------- wire-up ----------------------------- */
@@ -279,6 +372,8 @@ export function initNotifications(d: NotifDeps): void {
   deps = d;
   const bell = $('#notifBell'); if (bell) bell.onclick = (e) => { e.stopPropagation(); toggleMenu(); };
   renderBell();
+  relay.onWebhookEvent?.(handleWebhookEvent);   // real-time events → the bell (dedup with the poll by id)
+  void applyWebhook();                          // start the receiver if it was left enabled
   window.setTimeout(() => void pollAll(), FIRST_POLL_MS);
   window.setInterval(() => void pollAll(), POLL_MS);
 }

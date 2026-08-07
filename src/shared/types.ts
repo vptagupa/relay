@@ -149,7 +149,11 @@ export interface Settings {
   providersScopedMigrated?: boolean; // one-shot flag: the pre-scoping global provider secrets have been moved into a workspace
   notificationsByWs?: Record<string, AppNotification[]>; // per-workspace issue/PR notifications (persisted; survives restart)
   issuePushNotify?: boolean;         // fire native OS notifications for new/closed issues & PRs (default true)
+  notifySound?: boolean;             // play a chime when a new issue/PR notification arrives (default true)
   notifyReposByWs?: Record<string, string[]>; // qualified repo ids the poller watches, per workspace id. Undefined for a ws → default to that ws's tracked repos; defined (even []) → exactly these.
+  webhookEnabled?: boolean;          // run the local webhook receiver for near-real-time issue/PR notifications
+  webhookPort?: number;              // port the webhook receiver listens on (default 47824)
+  webhookSecret?: string;            // shared secret verifying incoming webhooks (GitHub HMAC / GitLab token / Bitbucket ?token)
 }
 
 // Streaming events emitted by the agent loop to the renderer.

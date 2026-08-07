@@ -91,6 +91,13 @@ const api = {
   providerPrs: (ws: string, provider: ProviderId, repo: string, state: 'open' | 'closed' = 'open', page = 1): Promise<{ ok: boolean; prs?: { number: number; branch: string; url: string; draft: boolean; title?: string; author?: string; state?: string; updatedAt?: number }[]; hasMore?: boolean; error?: string }> => ipcRenderer.invoke('provider:prs', { ws, provider, repo, state, page }),
   // Full PR/MR (with body/labels/reviewers/base branch) — fetched on demand for the details hover.
   providerPrDetail: (ws: string, provider: ProviderId, repo: string, number: number): Promise<{ ok: boolean; detail?: { number: number; title: string; body: string; state: string; draft: boolean; url: string; author?: string; sourceBranch: string; baseBranch: string; labels: string[]; reviewers: string[]; createdAt?: number; updatedAt?: number }; error?: string }> => ipcRenderer.invoke('provider:pr-detail', { ws, provider, repo, number }),
+  // Real-time notifications via a local webhook receiver: start/stop it, and subscribe to parsed issue/PR events.
+  webhookControl: (enabled: boolean, port: number, secret: string): Promise<{ ok: boolean; running: boolean; error?: string }> => ipcRenderer.invoke('webhook:control', { enabled, port, secret }),
+  webhookStatus: (): Promise<{ running: boolean }> => ipcRenderer.invoke('webhook:status'),
+  onWebhookEvent: (cb: (ev: { kind: string; provider: string; repo: string; number: number; title: string; url: string }) => void): void => { ipcRenderer.on('webhook:event', (_e, ev) => cb(ev)); },
+  // "Report a bug" diagnostics: app/OS versions + a scrubbed tail of the crash log; and reveal the log file.
+  collectDiagnostics: (): Promise<{ version: string; os: string; arch: string; electron: string; chrome: string; node: string; logTail: string }> => ipcRenderer.invoke('diag:collect'),
+  revealLog: (): Promise<{ ok: boolean }> => ipcRenderer.invoke('diag:reveal'),
   // Which coding agents are installed on PATH (for the Assign-to picker).
   agentsDetect: (): Promise<Record<string, boolean>> => ipcRenderer.invoke('agents:detect'),
   // Open a URL in the user's default browser (e.g. an issue on GitHub).

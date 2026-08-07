@@ -1484,6 +1484,21 @@ document.querySelectorAll('[data-closeg]').forEach((b) => b.addEventListener('cl
 $('#blocksViewSet').addEventListener('change', async (e) => { state.settings = await relay.patchSettings({ blocksView: (e.target as HTMLInputElement).checked }); updateMainView(); });
 $('#notifySet').addEventListener('change', async (e) => { state.settings = await relay.patchSettings({ notifications: (e.target as HTMLInputElement).checked }); });
 $('#notifyIssuesSet').addEventListener('change', async (e) => { state.settings = await relay.patchSettings({ issuePushNotify: (e.target as HTMLInputElement).checked }); });
+$('#btnRevealLog').onclick = () => void relay.revealLog();
+// Report a bug: collect diagnostics (version/OS + scrubbed error-log tail), copy them, open a pre-filled issue.
+$('#btnReportBug').onclick = async () => {
+  const btn = $('#btnReportBug') as HTMLButtonElement; const orig = btn.textContent;
+  btn.disabled = true; btn.textContent = 'Collecting…';
+  const d = await relay.collectDiagnostics().catch(() => null);
+  btn.disabled = false;
+  if (!d) { btn.textContent = 'Failed — use Reveal log'; setTimeout(() => { btn.textContent = orig; }, 2500); return; }
+  const env = `Slayer T ${d.version} · ${d.os} (${d.arch}) · Electron ${d.electron} / Chrome ${d.chrome} / Node ${d.node}`;
+  const full = `${env}\n\n--- recent error log (secrets scrubbed) ---\n${d.logTail || '(no errors logged)'}`;
+  try { relay.copyText(full); } catch { /* clipboard unavailable */ }
+  const body = `## What happened\n\n\n## Steps to reproduce\n\n\n## Environment\n${env}\n\n## Diagnostics\n<!-- Paste the diagnostics from your clipboard (they include the recent error log). -->\n`;
+  relay.openExternal(`https://github.com/vptagupa/relay/issues/new?title=${encodeURIComponent('Bug: ')}&body=${encodeURIComponent(body)}`);
+  btn.textContent = 'Copied ✓ — opening issue'; setTimeout(() => { btn.textContent = orig; }, 3000);
+};
 $('#btnSave').onclick = saveActive;
 $('#btnClear').onclick = clearActive;
 $('#btnSidebar').onclick = toggleSidebar;
