@@ -7,7 +7,10 @@
 export interface AgentDef { id: string; name: string; bin: string; launch: (rel: string) => string; }
 
 export const AGENTS: AgentDef[] = [
-  { id: 'claude', name: 'Claude Code', bin: 'claude', launch: (rel) => `claude "Read ${rel} and carry out the task it describes in this repository exactly as written, then summarize what you did."` },
+  // Claude Code runs fully hands-off (--permission-mode bypassPermissions): auto-accepts edits AND runs
+  // commands with no prompts, so a pipeline completes unattended in its isolated worktree. Flags go before
+  // the positional prompt.
+  { id: 'claude', name: 'Claude Code', bin: 'claude', launch: (rel) => `claude --permission-mode bypassPermissions "Read ${rel} and carry out the task it describes in this repository exactly as written, then summarize what you did."` },
   { id: 'gemini', name: 'Gemini CLI', bin: 'gemini', launch: (rel) => `gemini "Read ${rel} and carry out the task it describes in this repository exactly as written, then summarize what you did."` },
   { id: 'codex', name: 'Codex CLI', bin: 'codex', launch: (rel) => `codex "Read ${rel} and carry out the task it describes in this repository exactly as written, then summarize what you did."` },
   { id: 'aider', name: 'Aider', bin: 'aider', launch: (rel) => `aider --message "Read ${rel} and carry out the task it describes in this repository exactly as written, then summarize what you did."` },
