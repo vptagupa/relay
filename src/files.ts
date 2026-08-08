@@ -9,7 +9,7 @@ import { toast } from './ui';
 interface FsEntry { name: string; isDir: boolean }
 interface FsResult { path: string; parent: string; entries: FsEntry[]; error?: string; truncated?: boolean }
 type FsList = (path: string) => Promise<FsResult>;
-type FsOpen = (path: string) => Promise<{ method: string }>;
+type FsOpen = (path: string) => Promise<{ method: string; editor?: string }>;
 
 let fsList: FsList = async () => ({ path: '', parent: '', entries: [] });
 let fsOpen: FsOpen = async () => ({ method: 'error' });
@@ -42,6 +42,6 @@ export function initFiles(deps: { fsList: FsList; fsOpen: FsOpen }): void {
     if (el.dataset.dir === 'true') { state.browsePath = p; renderFiles(); return; }
     const r = await fsOpen(p);
     const name = p.split('/').pop();
-    toast(r.method === 'vscode' ? `Opening ${name} in VS Code` : r.method === 'error' ? `Couldn't open ${name}` : `Opening ${name}`, r.method !== 'error');
+    toast(r.method === 'editor' ? `Opening ${name} in ${r.editor || 'your editor'}` : r.method === 'error' ? `Couldn't open ${name}` : `Opening ${name}`, r.method !== 'error');
   });
 }

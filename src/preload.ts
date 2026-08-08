@@ -128,7 +128,7 @@ const api = {
 
   // --- file browser ---
   fsList: (dir: string): Promise<{ path: string; parent: string; entries: { name: string; isDir: boolean }[]; truncated?: boolean; error?: string }> => ipcRenderer.invoke('fs:list', dir),
-  fsOpen: (p: string): Promise<{ method: 'vscode' | 'default' | 'error'; error?: string }> => ipcRenderer.invoke('fs:open', p),
+  fsOpen: (p: string): Promise<{ method: 'editor' | 'default' | 'error'; editor?: string; error?: string }> => ipcRenderer.invoke('fs:open', p),
   // Open a path a terminal printed, resolved against the tab's cwd (for clickable file-path links). No-op if it's not a real file.
   revealPath: (cwd: string, target: string): Promise<{ ok: boolean; method?: string }> => ipcRenderer.invoke('fs:open-rel', { cwd, target }),
 

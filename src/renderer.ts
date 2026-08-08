@@ -24,6 +24,7 @@ import { initIssues, pullIssues, loadIssues } from './issues';
 import { initPrs, loadPrs } from './prs';
 import { initNotifications, renderBell } from './notifications';
 import type { Settings, SavedSession, AgentEvent, ApprovalRequest, ChatTurn, OpenTab, Workspace, WorkspaceDef, Block, Bookmark, BookmarkGroup } from './shared/types';
+import { EDITORS, DEFAULT_EDITOR } from './shared/editors';
 
 // TEMP DIAG: surface full stacks (minify is off) for the init crash.
 window.addEventListener('error', (e) => console.error('WERR ' + ((e as ErrorEvent).error?.stack || (e as ErrorEvent).message)));
@@ -1299,6 +1300,8 @@ function reflectSettings() {
   ($('#blocksViewSet') as HTMLInputElement).checked = state.settings.blocksView;
   ($('#notifySet') as HTMLInputElement).checked = state.settings.notifications;
   ($('#notifyIssuesSet') as HTMLInputElement).checked = state.settings.issuePushNotify !== false;
+  const edSel = $('#fileEditorSel') as HTMLSelectElement | null;
+  if (edSel) { if (!edSel.options.length) edSel.innerHTML = EDITORS.map((ed) => `<option value="${ed.id}">${ed.label}</option>`).join(''); edSel.value = state.settings.fileEditor || DEFAULT_EDITOR; }
   for (const p of ['anthropic', 'openai', 'google']) {
     const on = (state.settings.hasKey as any)[p];
     const s = $('#state' + p[0].toUpperCase() + p.slice(1));
@@ -1483,6 +1486,7 @@ for (let g = 0; g < 4; g++) {
 document.querySelectorAll('[data-closeg]').forEach((b) => b.addEventListener('click', (e) => { e.stopPropagation(); closeGroup(+(b as HTMLElement).dataset.closeg!); }));
 $('#blocksViewSet').addEventListener('change', async (e) => { state.settings = await relay.patchSettings({ blocksView: (e.target as HTMLInputElement).checked }); updateMainView(); });
 $('#notifySet').addEventListener('change', async (e) => { state.settings = await relay.patchSettings({ notifications: (e.target as HTMLInputElement).checked }); });
+$('#fileEditorSel').addEventListener('change', async (e) => { state.settings = await relay.patchSettings({ fileEditor: (e.target as HTMLSelectElement).value }); });
 $('#notifyIssuesSet').addEventListener('change', async (e) => { state.settings = await relay.patchSettings({ issuePushNotify: (e.target as HTMLInputElement).checked }); });
 $('#btnRevealLog').onclick = () => void relay.revealLog();
 // Report a bug: collect diagnostics (version/OS + scrubbed error-log tail), copy them, open a pre-filled issue.

@@ -14,6 +14,7 @@ import { runAgent } from './agent/agent';
 import squirrelStartup from 'electron-squirrel-startup';
 import type { ApprovalRequest, ChatTurn } from './shared/types';
 import type { Provider } from './shared/models';
+import { editorCmd, editorLabel } from './shared/editors';
 
 // On Windows, the Squirrel installer/uninstaller launches the app with a --squirrel-* arg
 // to do shortcut bookkeeping. On ANY such run the app must quit immediately and NEVER boot
@@ -575,11 +576,22 @@ ipcMain.handle('git:worktree-add', async (_e, p: { provider?: ProviderId; repo: 
     // An unborn repo (git init, no commits) can't seed a worktree branch — say so plainly.
     if (!(await runBin(git, ['-C', repoRoot, 'rev-parse', '--verify', '--quiet', 'HEAD'])).ok)
       return { ok: false, error: 'This repository has no commits yet — make an initial commit first.' };
-    // Base the fix branch on the repo's default branch (origin/HEAD), falling back to the current branch.
-    let base = '';
-    const dh = await runBin(git, ['-C', repoRoot, 'symbolic-ref', '--short', 'refs/remotes/origin/HEAD']);
-    if (dh.ok) base = dh.stdout.trim().replace(/^origin\//, '');
-    if (!base) { const cur = await runBin(git, ['-C', repoRoot, 'rev-parse', '--abbrev-ref', 'HEAD']); base = (cur.ok && cur.stdout.trim()) || 'HEAD'; }
+    // Always fetch so a NEW branch starts from the LATEST remote default — a stale base is the top cause of
+    // merge conflicts. fetch only advances remote-tracking refs (origin/*); it never touches your local
+    // branches or working tree. Best-effort: an offline/auth failure just falls back to what's already fetched.
+    await runBin(git, ['-C', repoRoot, 'fetch', 'origin', '--prune'], { timeout: 120000 });
+    // The remote default branch name (main / master / whatever origin points at). Prefer origin/HEAD; if it
+    // isn't recorded locally, ask the remote to set it, then re-read; else probe origin/main then origin/master.
+    let dh = await runBin(git, ['-C', repoRoot, 'symbolic-ref', '--short', 'refs/remotes/origin/HEAD']);
+    if (!dh.ok) { await runBin(git, ['-C', repoRoot, 'remote', 'set-head', 'origin', '-a']); dh = await runBin(git, ['-C', repoRoot, 'symbolic-ref', '--short', 'refs/remotes/origin/HEAD']); }
+    let base = dh.ok ? dh.stdout.trim().replace(/^origin\//, '') : '';
+    if (!base) { for (const b of ['main', 'master']) { if ((await runBin(git, ['-C', repoRoot, 'rev-parse', '--verify', '--quiet', `refs/remotes/origin/${b}`])).ok) { base = b; break; } } }
+    // Start point = the COMMIT at the freshly-fetched origin/<base> (NOT the local branch, which fetch never
+    // fast-forwards, so it can lag). Branching from the SHA sets NO upstream — issue-N still pushes to its own
+    // remote branch exactly as before; only the base gets fresher. Fall back to local HEAD if there's no remote default.
+    let startPoint = '';
+    if (base) { const rp = await runBin(git, ['-C', repoRoot, 'rev-parse', '--verify', '--quiet', `refs/remotes/origin/${base}`]); if (rp.ok) startPoint = rp.stdout.trim(); }
+    if (!startPoint) { const cur = await runBin(git, ['-C', repoRoot, 'rev-parse', '--abbrev-ref', 'HEAD']); base = (cur.ok && cur.stdout.trim()) || 'HEAD'; startPoint = base; }
     const branch = `issue-${num}`;
     const folder = worktreeFolder(repoRoot);
     const wtPath = path.join(app.getPath('userData'), 'worktrees', folder, branch);
@@ -593,7 +605,7 @@ ipcMain.handle('git:worktree-add', async (_e, p: { provider?: ProviderId; repo: 
       const hasBranch = (await runBin(git, ['-C', repoRoot, 'rev-parse', '--verify', '--quiet', `refs/heads/${branch}`])).ok;
       const addArgs = hasBranch
         ? ['-C', repoRoot, 'worktree', 'add', wtPath, branch]
-        : ['-C', repoRoot, 'worktree', 'add', wtPath, '-b', branch, base];
+        : ['-C', repoRoot, 'worktree', 'add', wtPath, '-b', branch, startPoint];
       const add = await runBin(git, addArgs, { timeout: 60000 });
       if (!add.ok) {
         const msg = (add.stderr || add.stdout || 'git worktree add failed').trim().split('\n').filter(Boolean).pop() || 'git worktree add failed';
@@ -726,16 +738,19 @@ function isCodeFile(p: string): boolean {
   if (['dockerfile', 'makefile', '.gitignore', '.gitattributes', '.env', '.bashrc', '.zshrc', '.npmrc', '.editorconfig'].includes(base)) return true;
   return CODE_EXTS.has(path.extname(p).toLowerCase());
 }
-function tryCode(p: string): Promise<boolean> {
+// Open `p` in the given editor launcher. `cmd` is ALWAYS an allowlisted token from shared/editors.ts (never a
+// raw renderer string), so interpolating it into the Windows shell line below can't inject a command.
+function tryEditor(cmd: string, p: string): Promise<boolean> {
   return new Promise((resolve) => {
+    if (!cmd) return resolve(false); // no editor (system default) — caller falls back to shell.openPath
     if (process.platform === 'win32') {
-      // `code` is code.cmd on Windows and needs a shell; reject chars that could break out of the
-      // quoted argument or trigger %VAR% expansion, so a crafted filename can't inject a command.
+      // Editor launchers are often .cmd on Windows and need a shell; reject chars in the PATH that could break
+      // out of the quoted argument or trigger %VAR% expansion, so a crafted filename can't inject a command.
       if (/["%\r\n]/.test(p)) return resolve(false);
-      exec(`code "${p}"`, { windowsHide: true, timeout: 15000 }, (err) => resolve(!err));
+      exec(`${cmd} "${p}"`, { windowsHide: true, timeout: 15000 }, (err) => resolve(!err));
     } else {
       // No shell → the path is a literal argv entry, so $(...)/backticks in a filename can't expand.
-      execFile('code', [p], { timeout: 15000 }, (err) => resolve(!err));
+      execFile(cmd, [p], { timeout: 15000 }, (err) => resolve(!err));
     }
   });
 }
@@ -754,8 +769,10 @@ ipcMain.handle('fs:list', async (_e, dir: string) => {
 });
 ipcMain.handle('fs:open', async (_e, p: string) => {
   const abs = path.resolve(p);
-  if (isCodeFile(abs) && (await tryCode(abs))) return { method: 'vscode' };
-  const err = await shell.openPath(abs); // OS default app for the file type
+  const id = (await store.getSettings()).fileEditor; // which editor the user chose (allowlisted in shared/editors.ts)
+  const cmd = editorCmd(id);
+  if (cmd && isCodeFile(abs) && (await tryEditor(cmd, abs))) return { method: 'editor', editor: editorLabel(id) };
+  const err = await shell.openPath(abs); // OS default app for the file type (non-code files, 'system', or a missing editor)
   return { method: err ? 'error' : 'default', error: err || undefined };
 });
 // Open a path the terminal printed — relative paths resolve against the tab's cwd. Strips a trailing
@@ -768,7 +785,8 @@ ipcMain.handle('fs:open-rel', async (_e, p: { cwd?: string; target: string }) =>
   const cwd = typeof p?.cwd === 'string' && p.cwd ? p.cwd : app.getPath('home');
   const abs = path.isAbsolute(bare) ? bare : path.resolve(cwd, bare);
   if (!existsSync(abs)) return { ok: false };
-  if (isCodeFile(abs) && (await tryCode(abs))) return { ok: true, method: 'vscode' };
+  const cmd = editorCmd((await store.getSettings()).fileEditor);
+  if (cmd && isCodeFile(abs) && (await tryEditor(cmd, abs))) return { ok: true, method: 'editor' };
   const err = await shell.openPath(abs);
   return { ok: !err, method: err ? 'error' : 'default' };
 });
