@@ -661,6 +661,13 @@ body.tabdrag .dz{display:block;pointer-events:auto}
 /* pipeline picker (Assign) — the sequence-graph preview box + one-line description under the dropdown */
 .pipe-preview{padding:11px 10px;border:1px solid var(--border);border-radius:9px;margin:0 0 9px}
 .iss-pipedesc{font:11px/1.5 var(--sans);color:var(--muted);margin:0 0 13px}
+/* per-issue dependency repos (read-only reference) — a compact scrollable checklist */
+.iss-deps{display:flex;flex-direction:column;gap:2px;max-height:118px;overflow-y:auto;margin:0 0 13px;border:1px solid var(--border);border-radius:9px;padding:5px}
+.iss-dep{display:flex;align-items:center;gap:8px;padding:5px 7px;border-radius:6px;cursor:pointer;font:11.5px var(--sans);color:var(--text)}
+.iss-dep:hover{background:var(--surface-2)}
+.iss-dep input{margin:0;flex:none;cursor:pointer}
+.iss-dep b{font-weight:600}
+.iss-dep .mut{margin-left:auto;font:10px var(--mono);color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 /* ----- sequence graph (issue → stages → PR): Assign preview (neutral) + LIVE in Details ----- */
 .sg-wrap{overflow-x:auto;padding:1px 0}
 .sg{display:inline-flex;align-items:center;min-width:max-content}
@@ -907,6 +914,26 @@ body.tabdrag .dz{display:block;pointer-events:auto}
 .prp-st{display:inline-flex;align-items:center;gap:5px;font-size:11px;color:var(--text-dim)}
 .prp-dot{width:7px;height:7px;border-radius:50%;display:inline-block;flex:none}
 .prp-arr{margin:0 6px;color:var(--muted);font-size:10px}
+/* Tasks rail (draft → validate → file-if-valid) */
+.tk-row{display:flex;gap:8px;align-items:flex-start;padding:9px;border-radius:9px;cursor:pointer;border:1px solid transparent}
+.tk-row:hover{background:var(--surface-2);border-color:var(--border)}
+.tk-body{min-width:0;flex:1;display:flex;flex-direction:column;gap:3px}
+.tk-title{font:600 12px/1.35 var(--sans);color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tk-meta{display:flex;align-items:center;gap:8px;font:10px var(--mono);color:var(--muted);min-width:0}
+.tk-meta .pr-repo-lbl{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tk-issue{color:var(--accent-2);cursor:pointer;flex:none}
+.tk-issue:hover{text-decoration:underline}
+.tk-result{font:10.5px/1.45 var(--sans);color:var(--text-dim);white-space:pre-wrap}
+.tk-result.trunc{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;white-space:normal}
+.tk-side{flex:none}
+.tk-st{font:8.5px/1.4 var(--mono);border:1px solid var(--border-strong);border-radius:999px;padding:1px 6px;white-space:nowrap;color:var(--muted);text-transform:lowercase}
+.tk-st.validating{border-color:#a78bfa66;color:#a78bfa}
+.tk-st.valid,.tk-st.open{border-color:#2ea04366;color:#3fb950}
+.tk-st.closed{border-color:#8957e566;color:#a371f7}
+.tk-st.invalid{border-color:#e0a44a66;color:#e0a44a}
+.tk-st.error{border-color:#da363366;color:#f85149}
+.tk-input{width:100%;box-sizing:border-box;background:var(--surface-2);border:1px solid var(--border-strong);border-radius:9px;padding:9px 11px;color:var(--text);font:12.5px var(--sans);margin-bottom:2px}
+.tk-input:focus{outline:none;border-color:var(--accent-line)}
 /* PR hover detail card — hoverable + scrollable so a long description can be read */
 .pr-hover{position:fixed;z-index:95;width:460px;max-width:calc(100vw - 16px);max-height:min(66vh,460px);overflow-y:auto;overscroll-behavior:contain;background:var(--surface);border:1px solid var(--border-strong);border-radius:10px;box-shadow:var(--shadow);padding:10px 12px 0;display:none}
 .prh-top{display:flex;align-items:center;gap:6px;margin-bottom:6px}

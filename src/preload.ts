@@ -107,6 +107,12 @@ const api = {
   // Review-assign a PR: create (or reuse) an isolated worktree with the PR's SOURCE branch checked out
   // (fetches the PR head; `branch` = source branch, needed for Bitbucket which has no numbered PR ref).
   prWorktreeAdd: (provider: ProviderId, repo: string, dir: string, number: number, branch: string, brief: string): Promise<{ ok: boolean; path?: string; branch?: string; reused?: boolean; briefRel?: string; error?: string }> => ipcRenderer.invoke('git:pr-worktree-add', { provider, repo, dir, number, branch, brief }),
+  // Link dependency repos into an issue worktree as read-only reference (checked out to their latest default under .deps/).
+  linkDeps: (wt: string, dir: string, deps: { provider: ProviderId; repo: string }[]): Promise<{ ok: boolean; linked?: { name: string; repo: string }[]; error?: string }> => ipcRenderer.invoke('git:link-deps', { wt, dir, deps }),
+  // Tasks: a validate-only worktree (branch task-<id> off the latest default) + filing a validated task as a real issue.
+  taskWorktreeAdd: (provider: ProviderId, repo: string, dir: string, id: string, brief: string): Promise<{ ok: boolean; path?: string; branch?: string; reused?: boolean; briefRel?: string; error?: string }> => ipcRenderer.invoke('git:task-worktree-add', { provider, repo, dir, id, brief }),
+  providerCreateIssue: (ws: string, provider: ProviderId, repo: string, title: string, body: string): Promise<{ ok: boolean; number?: number; url?: string; error?: string }> => ipcRenderer.invoke('provider:create-issue', { ws, provider, repo, title, body }),
+  providerIssueState: (ws: string, provider: ProviderId, repo: string, number: number): Promise<{ ok: boolean; state?: 'open' | 'closed'; error?: string }> => ipcRenderer.invoke('provider:issue-state', { ws, provider, repo, number }),
 
   // --- issue pipelines (staged agent runs) ---
   // Prep a stage before launch: write its brief file into the worktree's .slayer/ (skip for stage 0 —

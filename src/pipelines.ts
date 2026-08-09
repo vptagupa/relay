@@ -20,7 +20,7 @@ export type StageStatus = 'validating' | 'fixing' | 'working';
 export const stageStatus = (kind: StageKind): StageStatus => (kind === 'validate' ? 'validating' : kind === 'fix' ? 'fixing' : 'working');
 
 /* ----------------------------- brief templates (by kind) ----------------------------- */
-const VALIDATE_BRIEF = `{issue}
+export const VALIDATE_BRIEF = `{issue}
 
 ---
 
@@ -75,9 +75,13 @@ const REVIEW_BRIEF = `{issue}
 ---
 
 ## Review — adversarially check the change
-Review the change on this branch as a skeptical reviewer: correctness, edge cases, regressions, and whether it actually resolves the issue. Don't make new changes.
+Review the change on this branch as a skeptical reviewer: correctness, edge cases, regressions, and whether it actually resolves the issue. Don't modify the code — but DO build and run it to verify (not just read it):
+- **No errors:** it builds / compiles / type-checks cleanly.
+- **No runtime errors:** exercising the affected path (or the project's tests) raises no exceptions or crashes.
+- **Correct behaviour:** the right result on normal AND edge-case inputs, with no regression to existing behaviour.
+Call out every error, exception, or incorrect behaviour you find.
 
-Write \`{verdictRel}\` as JSON: {"passed": true, "summary": "your review verdict + any concerns"} — passed=true only if the change is correct and ready.`;
+Write \`{verdictRel}\` as JSON: {"passed": true, "summary": "your review verdict + any concerns"} — passed=true only if the change is correct, builds, runs without errors, and behaves correctly.`;
 
 const CUSTOM_BRIEF = `{issue}
 
@@ -93,11 +97,17 @@ export const PR_REVIEW_BRIEF = `{issue}
 ---
 
 ## Review this pull request — do not change any code
-The PR's source branch is checked out in THIS worktree. Review the change as a skeptical reviewer: read the diff against the base branch (\`git diff {base}...HEAD\`, or your tools), and judge correctness, edge cases, regressions, security, tests, and whether it does what the PR claims. Do NOT edit code, commit, or push in this stage.
+The PR's source branch is checked out in THIS worktree. Review the change as a skeptical reviewer: read the diff against the base branch (\`git diff {base}...HEAD\`, or your tools), and judge correctness, edge cases, regressions, security, tests, and whether it does what the PR claims.
+
+Beyond reading the diff, verify it actually works (don't edit, commit, or push — but DO build/run):
+- **No errors:** it builds / compiles / type-checks cleanly.
+- **No runtime errors:** exercising the affected path (or the project's tests) raises no exceptions or crashes.
+- **Correct behaviour:** the right result on normal AND edge-case inputs, with no regression to existing behaviour.
+Call out every error, exception, or incorrect behaviour you find.
 
 When you're done, write your verdict to \`{verdictRel}\` as JSON on one object:
 {"passed": true, "summary": "one short paragraph: your review — is it correct & ready to merge, and any concerns/risks"}
-Set passed=true if the change is correct and ready to merge; false if it needs changes (bugs, missing tests, risky). The verdict decides the review outcome.`;
+Set passed=true only if it builds, runs without errors, behaves correctly, and is ready to merge; false if it needs changes (errors, runtime failures, wrong behaviour, bugs, missing tests, risky).`;
 
 /* ----------------------------- stage-kind catalog ----------------------------- */
 // One entry per kind: the palette label, the graph dot colour, whether it typically GATES (→ its brief

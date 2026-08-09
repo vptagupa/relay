@@ -52,6 +52,14 @@ async function apiGet(host: string, pathname: string, headers: Record<string, st
   let json: unknown = null; try { json = JSON.parse(r.text); } catch { /* non-json error body */ }
   return { ok: r.status >= 200 && r.status < 300, status: r.status, json };
 }
+// A JSON POST (creating an issue), same shape as apiGet. Never rejects. Sends an explicit Content-Length so a
+// strict API can't reject a chunked body with 411.
+async function apiPost(host: string, pathname: string, headers: Record<string, string>, bodyObj: unknown): Promise<ApiResult> {
+  const bodyStr = JSON.stringify(bodyObj);
+  const r = await httpsReq(host, pathname, 'POST', { ...headers, 'Content-Type': 'application/json', 'Content-Length': String(Buffer.byteLength(bodyStr)) }, bodyStr);
+  let json: unknown = null; try { json = JSON.parse(r.text); } catch { /* non-json error body */ }
+  return { ok: r.status >= 200 && r.status < 300, status: r.status, json };
+}
 const asObj = (x: unknown): Record<string, unknown> => (x && typeof x === 'object' ? x as Record<string, unknown> : {});
 const asArr = (x: unknown): Array<Record<string, unknown>> => (Array.isArray(x) ? x as Array<Record<string, unknown>> : []);
 const str = (x: unknown): string => (x == null ? '' : String(x));
@@ -74,6 +82,20 @@ const github = {
     const who = await ghApi(ws, '/user');
     if (who.status === 401) return { connected: false };   // ONLY a real 401 means the token is revoked
     return { connected: true, login: str(asObj(who.json).login) };
+  },
+  // Create an issue (used by Tasks: file a validated task as a real issue). Returns its number + url.
+  async createIssue(ws: string, repo: string, title: string, body: string): Promise<{ ok: boolean; number?: number; url?: string; error?: string }> {
+    const h = await ghHeaders(ws); if (!h) return { ok: false, error: 'Not connected to GitHub' };
+    const r = await apiPost('api.github.com', `/repos/${repo}/issues`, h, { title, body });
+    if (!r.ok) return { ok: false, error: `${str(asObj(r.json).message) || 'Could not create issue'} (HTTP ${r.status})` };
+    const j = asObj(r.json);
+    return { ok: true, number: Number(j.number) || 0, url: str(j.html_url) };
+  },
+  // Current open/closed state of a single issue (Tasks track their filed issue's lifecycle).
+  async issueState(ws: string, repo: string, number: number): Promise<{ ok: boolean; state?: 'open' | 'closed'; error?: string }> {
+    const r = await ghApi(ws, `/repos/${repo}/issues/${number}`);
+    if (!r.ok || !r.json || typeof r.json !== 'object') return { ok: false, error: `HTTP ${r.status}` };
+    return { ok: true, state: str(asObj(r.json).state) === 'closed' ? 'closed' : 'open' };
   },
   // One page (100) of issues, for infinite scroll. hasMore = the raw page was full (issues + PRs, before the
   // PR filter), so another page likely exists.
@@ -159,6 +181,18 @@ const gitlab = {
     const who = await glApi(ws, '/user');
     if (who.status === 401) return { connected: false };
     return { connected: true, login: str(asObj(who.json).username) };
+  },
+  async createIssue(ws: string, repo: string, title: string, body: string): Promise<{ ok: boolean; number?: number; url?: string; error?: string }> {
+    const h = await glHeaders(ws); if (!h) return { ok: false, error: 'Not connected to GitLab' };
+    const r = await apiPost(await glHost(ws), `/api/v4/projects/${enc(repo)}/issues`, h, { title, description: body });
+    if (!r.ok) return { ok: false, error: `${str(asObj(r.json).message) || 'Could not create issue'} (HTTP ${r.status})` };
+    const j = asObj(r.json);
+    return { ok: true, number: Number(j.iid) || 0, url: str(j.web_url) };
+  },
+  async issueState(ws: string, repo: string, number: number): Promise<{ ok: boolean; state?: 'open' | 'closed'; error?: string }> {
+    const r = await glApi(ws, `/projects/${enc(repo)}/issues/${number}`);
+    if (!r.ok || !r.json || typeof r.json !== 'object') return { ok: false, error: `HTTP ${r.status}` };
+    return { ok: true, state: str(asObj(r.json).state) === 'closed' ? 'closed' : 'open' };   // GitLab: 'opened' | 'closed'
   },
   // One page (100) of issues, for infinite scroll. hasMore = the page came back full.
   async issues(ws: string, repo: string, state: IssueState = 'open', page = 1): Promise<{ ok: boolean; issues?: Issue[]; hasMore?: boolean; error?: string }> {
@@ -325,6 +359,21 @@ const bitbucket = {
     const u = asObj(who.json);
     return { connected: true, login: str(u.nickname || u.username || u.display_name) };
   },
+  async createIssue(ws: string, repo: string, title: string, body: string): Promise<{ ok: boolean; number?: number; url?: string; error?: string }> {
+    let h = await bbHeaders(ws); if (!h) return { ok: false, error: 'Not connected to Bitbucket' };
+    const path = `/2.0/repositories/${repo}/issues`, payload = { title, content: { raw: body } };
+    let r = await apiPost('api.bitbucket.org', path, h, payload);
+    if (r.status === 401 && (await bbRefresh(ws))) { h = await bbHeaders(ws); if (h) r = await apiPost('api.bitbucket.org', path, h, payload); } // token went stale → refresh + retry once
+    if (!r.ok) return { ok: false, error: `${str(asObj(asObj(r.json).error).message) || 'Could not create issue — is the issue tracker enabled on this repo?'} (HTTP ${r.status})` };
+    const j = asObj(r.json);
+    return { ok: true, number: Number(j.id) || 0, url: str(asObj(asObj(j.links).html).href) };
+  },
+  async issueState(ws: string, repo: string, number: number): Promise<{ ok: boolean; state?: 'open' | 'closed'; error?: string }> {
+    const r = await bbApi(ws, `/2.0/repositories/${repo}/issues/${number}`);
+    if (!r.ok || !r.json || typeof r.json !== 'object') return { ok: false, error: `HTTP ${r.status}` };
+    const st = str(asObj(r.json).state).toLowerCase();   // new|open|on hold|resolved|closed|invalid|duplicate|wontfix
+    return { ok: true, state: ['resolved', 'closed', 'invalid', 'duplicate', 'wontfix'].includes(st) ? 'closed' : 'open' };
+  },
   // One page (50) of issues, for infinite scroll. Bitbucket has no state= filter, so we page raw and filter
   // client-side; hasMore uses the response's `next` link (more raw pages to scan).
   async issues(ws: string, repo: string, state: IssueState = 'open', page = 1): Promise<{ ok: boolean; issues?: Issue[]; hasMore?: boolean; error?: string }> {
@@ -440,6 +489,8 @@ export interface Adapter {
   repos(ws: string, opts?: RepoListOpts): Promise<{ ok: boolean; repos?: RepoRow[]; error?: string }>;
   prs(ws: string, repo: string, state?: IssueState, page?: number): Promise<{ ok: boolean; prs?: PrRow[]; hasMore?: boolean; error?: string }>;
   prDetail(ws: string, repo: string, number: number): Promise<{ ok: boolean; detail?: PrDetail; error?: string }>;
+  createIssue(ws: string, repo: string, title: string, body: string): Promise<{ ok: boolean; number?: number; url?: string; error?: string }>;
+  issueState(ws: string, repo: string, number: number): Promise<{ ok: boolean; state?: 'open' | 'closed'; error?: string }>;
   repoFromRemote(url: string): string | null;
   cloneUrl(repo: string): Promise<string>;
   cli?: string;

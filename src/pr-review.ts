@@ -298,7 +298,8 @@ export async function openPrAssign(pr: PrRef, ctx: PrCtx): Promise<void> {
     assigning = true; okBtn.disabled = true; okBtn.textContent = 'Checking out PR…';
     const res = await relay.prWorktreeAdd(prov, repo, dir, num, pr.branch, ta.value).catch(() => ({ ok: false, error: 'Worktree creation failed' }));
     assigning = false;
-    if (!root.isConnected) return;                 // user backed out while the worktree was being created
+    // Launch even if the dialog was Escaped during checkout — the worktree exists and the agent/brief are already
+    // captured; an accidental Escape must not silently drop the run (the review toast still fires).
     if (!res.ok) { okBtn.disabled = false; okBtn.textContent = primary; toast(res.error || 'Could not check out the PR'); return; }
     const brief0Rel = res.briefRel || '';
     const agent = AGENTS.find((a) => a.id === agentId);

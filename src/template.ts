@@ -47,6 +47,7 @@ export function appHtml(panes: string): string {
           <button class="rail-btn" data-view="library" title="Library"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><line x1="8" y1="9" x2="16" y2="9"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="13" y2="17"/></svg><span>Library</span></button>
           <button class="rail-btn" data-view="issues" title="Issues"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="1.7" fill="currentColor" stroke="none"/></svg><span>Issues</span></button>
           <button class="rail-btn" data-view="prs" title="Pull Requests"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M13 6h3a2 2 0 0 1 2 2v7"/><line x1="6" y1="9" x2="6" y2="21"/></svg><span>PR</span></button>
+          <button class="rail-btn" data-view="tasks" title="Tasks"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3 8-8"/><path d="M20 12v6a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h9"/></svg><span>Tasks</span></button>
           <button class="rail-btn" data-act="agent" title="Agent"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l2.2 5.6L20 10l-5 3.4L16.5 20 12 16.4 7.5 20 9 13.4 4 10l5.8-1.4z"/></svg><span>Agent</span></button>
         </nav>
         <div class="side-body">
@@ -74,6 +75,10 @@ export function appHtml(panes: string): string {
             <div class="iss-state" id="prScope"><button class="iss-seg on" data-sc="repo">This repo</button><button class="iss-seg" data-sc="all">All repos</button></div>
             <div class="iss-state" id="prState" style="display:none"><button class="iss-seg on" data-st="open">Open</button><button class="iss-seg" data-st="closed">Closed</button></div>
             <div class="side-list" id="prList"></div>
+          </div>
+          <div class="side-view side-tasks" id="viewTasks">
+            <div class="side-head"><span class="side-title">Tasks</span><button class="files-up" id="taskNew" title="New task"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button></div>
+            <div class="side-list" id="taskList"></div>
           </div>
           <div class="side-foot"><span class="sdot" id="storeDot"></span><span id="storeText">Saved on this machine</span></div>
         </div>

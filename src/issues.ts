@@ -162,6 +162,25 @@ function setIssuePipeline(prov: ProviderId, rpo: string, n: number, id: string):
   });
   return pipeWriteChain;
 }
+// Per-issue dependency repos (read-only reference), keyed like the per-issue pipeline. Stored as qualified
+// "provider:repo" ids — the OTHER repos whose codebase the agent should be able to read while fixing this issue.
+function issueDepsFor(prov: ProviderId, rpo: string, n: number): string[] { return (state.settings.issueDepsByKey || {})[pipeKeyFor(prov, rpo, n)] || []; }
+let depsWriteChain: Promise<void> = Promise.resolve();
+function setIssueDeps(prov: ProviderId, rpo: string, n: number, ids: string[]): Promise<void> {
+  depsWriteChain = depsWriteChain.then(async () => {
+    const map = { ...(state.settings.issueDepsByKey || {}) };
+    if (ids.length) map[pipeKeyFor(prov, rpo, n)] = ids; else delete map[pipeKeyFor(prov, rpo, n)];
+    try { state.settings = await relay.patchSettings({ issueDepsByKey: map }); } catch { /* keep the in-memory pick */ }
+  });
+  return depsWriteChain;
+}
+// The brief section that points the agent at the read-only reference repos (linked under .deps/ at build time).
+function depsNote(ids: string[]): string {
+  if (!ids.length) return '';
+  const lines = ids.map((id) => { const { repo: r } = parseRepoId(id); return `- \`.deps/${r.split('/').pop()}\` — ${id}`; }).join('\n');
+  return `\n\n---\n\n## Reference repositories (read-only — do NOT modify or commit these)\nThese related repos are checked out under \`.deps/\` for context:\n${lines}\nRead them to understand interfaces/contracts; your changes belong ONLY in this repository.`;
+}
+
 // A defensive copy of a pipeline captured at assign time — so an in-flight run keeps the wiring it started
 // with even if the (custom) pipeline is later edited or deleted in the builder.
 const clonePipeline = (p: PipelineDef): PipelineDef => JSON.parse(JSON.stringify(p));
@@ -817,6 +836,11 @@ async function openAssign(i: Issue): Promise<void> {
   let pipeline = pipelineById(pipelineId, customPipelines());
   let briefDirty = false;                    // once the user edits the brief, stop re-seeding it on pipeline change
   const primary = agentOk ? '⚡ Run pipeline' : 'Create worktree & open';
+  // Dependency repos = the workspace's OTHER tracked repos (any provider) the agent may READ while fixing this
+  // issue (e.g. a FE issue that needs the BE codebase). Persisted per-issue; linked read-only under .deps/.
+  const depCandidates = ((state.settings.issueReposByWs || {})[wsKey()] || []).filter((id) => id !== `${asgProvider}:${asgRepo || ''}`);
+  const selectedDeps = new Set(issueDepsFor(asgProvider, asgRepo || '', i.number).filter((id) => depCandidates.includes(id)));
+  const seedBrief = () => stageBriefText(pipeline, 0, i, asgProvider) + depsNote([...selectedDeps]); // brief + the .deps/ reference note
   const { root, close } = modal(`<div class="tpl-card iss-card">
       <div class="hd"><span class="dot" style="background:var(--accent)"></span><span class="t">Assign #${i.number}<small>${esc(i.title)}</small></span></div>
       <div class="bd">
@@ -825,8 +849,10 @@ async function openAssign(i: Issue): Promise<void> {
         <div class="iss-agentrow"><label class="iss-lbl" style="margin:0">Pipeline</label><select class="iss-agentsel" id="issPipeSel">${pipeOpts()}</select><button class="iss-pipebuild" id="issPipeBuild" title="Build / edit pipelines">✎ Build</button></div>
         <div class="pipe-preview" id="issGraph">${seqGraph(pipeline, i.number, { preview: true })}</div>
         <div class="iss-pipedesc" id="issPipeDesc">${esc(pipeline.desc)}</div>
+        ${depCandidates.length ? `<label class="iss-lbl">Dependencies <span class="mut">— read-only repos the agent can view under <code>.deps/</code></span></label>
+        <div class="iss-deps" id="issDeps">${depCandidates.map((id) => { const { repo: r } = parseRepoId(id); return `<label class="iss-dep"><input type="checkbox" value="${esc(id)}"${selectedDeps.has(id) ? ' checked' : ''}><b>${esc(r.split('/').pop() || r)}</b><span class="mut">${esc(id)}</span></label>`; }).join('')}</div>` : ''}
         <label class="iss-lbl">Brief · <span id="issBriefStage">${esc(pipeline.stages[0].name)}</span> stage <span class="mut">— edit before launch</span></label>
-        <textarea class="iss-brief" spellcheck="false" rows="10">${esc(stageBriefText(pipeline, 0, i, asgProvider))}</textarea>
+        <textarea class="iss-brief" spellcheck="false" rows="10">${esc(seedBrief())}</textarea>
         <div class="iss-wt">Creates an isolated worktree on branch <code>issue-${i.number}</code> and runs the pipeline there. Later stages use their built-in briefs.</div>
       </div>
       <div class="ft"><span class="hint">Saved as <code>.slayer/issue-${i.number}.md</code> (git-excluded)</span><span class="r"><button class="tpl-btn ghost" data-x>Cancel</button><button class="tpl-btn pri" data-ok>${primary}</button></span></div>
@@ -843,8 +869,15 @@ async function openAssign(i: Issue): Promise<void> {
     const g = root.querySelector('#issGraph'); if (g) g.innerHTML = seqGraph(pipeline, i.number, { preview: true });
     const d = root.querySelector('#issPipeDesc'); if (d) d.textContent = pipeline.desc;
     const bs = root.querySelector('#issBriefStage'); if (bs) bs.textContent = pipeline.stages[0]?.name || '';
-    if (!briefDirty) ta.value = stageBriefText(pipeline, 0, i, asgProvider);
+    if (!briefDirty) ta.value = seedBrief();
   };
+  // Toggle a dependency repo → persist it for this issue and re-seed the brief's .deps/ note (unless edited).
+  root.querySelector('#issDeps')?.addEventListener('change', () => {
+    selectedDeps.clear();
+    root.querySelectorAll<HTMLInputElement>('#issDeps input:checked').forEach((cb) => selectedDeps.add(cb.value));
+    void setIssueDeps(asgProvider, asgRepo || '', i.number, [...selectedDeps]);
+    if (!briefDirty) ta.value = seedBrief();
+  });
   if (psel) psel.onchange = () => {
     pipelineId = psel.value;
     void setIssuePipeline(asgProvider, asgRepo || '', i.number, pipelineId); // remember THIS issue's pipeline
@@ -868,8 +901,12 @@ async function openAssign(i: Issue): Promise<void> {
     // ta.value is stage 0's brief → worktree-add writes it as .slayer/issue-N.md (stage 0's brief file).
     const res = await relay.worktreeAdd(asgProvider, asgRepo || '', dir, i.number, ta.value).catch(() => ({ ok: false, error: 'Worktree creation failed' }));
     assigning = false;
-    if (!root.isConnected) return; // user backed out (Escape/scrim) while the worktree was being created — don't launch
+    // Launch even if the dialog was Escaped during creation — the worktree exists and the agent/pipeline/brief/deps
+    // are already captured; an accidental Escape must not silently drop the run (the launch toast still fires).
     if (!res.ok) { okBtn.disabled = false; okBtn.textContent = primary; toast(res.error || 'Could not create worktree'); return; }
+    // Link the selected dependency repos read-only under .deps/ (best-effort — a dep that won't clone is skipped).
+    const depIds = [...selectedDeps];
+    if (depIds.length) { okBtn.textContent = 'Linking dependencies…'; await relay.linkDeps(res.path!, dir, depIds.map((id) => parseRepoId(id))).catch(() => null); }
     const brief0Rel = res.briefRel || '';
     const agent = AGENTS.find((a) => a.id === agentId);
     // No coding agent on PATH → just open the worktree; there's nothing to run the pipeline with.
@@ -1041,11 +1078,12 @@ function openRepoMenu(): void {
   const r = btn.getBoundingClientRect();
   menu.style.left = Math.round(r.left) + 'px'; menu.style.top = Math.round(r.bottom + 4) + 'px';
   menu.querySelectorAll<HTMLElement>('.iss-mi').forEach((mi) => {
-    mi.onclick = (e) => {
+    mi.onclick = async (e) => {
       e.stopPropagation();
       if (mi.dataset.sources) { closeRepoMenu(); void openSources(); return; }
-      void setActiveRepo(mi.dataset.repo || '');
-      closeRepoMenu(); void loadIssues();
+      closeRepoMenu();
+      await setActiveRepo(mi.dataset.repo || '');   // persist the pick FIRST — else loadIssues() reads the old curRepo()
+      void loadIssues();
     };
   });
   setTimeout(() => document.addEventListener('click', closeRepoMenu, { once: true }), 0);

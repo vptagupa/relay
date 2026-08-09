@@ -22,6 +22,7 @@ import { openTplMenu, saveAsTemplate, runStartupIfPending } from './blueprints';
 import { initWorkspaces, loadWorkspaceMeta, restoreWorkspaceSnapshot, settleDeeplink, createWorkspace, openWsMenu, closeWsMenu, handleDeeplink, setActiveWsRoot, setActiveWsTheme, getActiveWsId, duplicateWorkspace, exportWorkspace, importWorkspace, toggleTrust, copyWorkspaceLink, activeWorkspaceDef, isWorkspaceTrusted } from './workspaces';
 import { initIssues, pullIssues, loadIssues } from './issues';
 import { initPrs, loadPrs } from './prs';
+import { initTasks, renderTasks } from './tasks';
 import { initNotifications, renderBell } from './notifications';
 import type { Settings, SavedSession, AgentEvent, ApprovalRequest, ChatTurn, OpenTab, Workspace, WorkspaceDef, Block, Bookmark, BookmarkGroup } from './shared/types';
 import { EDITORS, DEFAULT_EDITOR } from './shared/editors';
@@ -743,13 +744,14 @@ function applySplit() { /* no-op (kept: still called on boot + sidebar resize) *
 // Which sidebar panel (Files / Library / Issues) the rail has active.
 function applySidebarView() {
   const v = state.settings.sidebarView || 'library';
-  const map: Record<string, string> = { library: '#viewLibrary', files: '#viewFiles', issues: '#viewIssues', prs: '#viewPRs' };
+  const map: Record<string, string> = { library: '#viewLibrary', files: '#viewFiles', issues: '#viewIssues', prs: '#viewPRs', tasks: '#viewTasks' };
   for (const [name, id] of Object.entries(map)) (document.querySelector(id) as HTMLElement | null)?.classList.toggle('active', name === v);
   document.querySelectorAll<HTMLElement>('.rail-btn[data-view]').forEach((b) => b.classList.toggle('on', b.dataset.view === v));
 }
-function switchSidebarView(v: 'library' | 'files' | 'issues' | 'prs') {
+function switchSidebarView(v: 'library' | 'files' | 'issues' | 'prs' | 'tasks') {
   state.settings.sidebarView = v; applySidebarView(); void relay.patchSettings({ sidebarView: v });
   if (v === 'prs') void loadPrs();   // load-on-show — PRs refresh whenever the rail is opened
+  if (v === 'tasks') renderTasks();
 }
 function applySidebarWidth() { ($('#main') as HTMLElement).style.setProperty('--sidebar-w', (state.settings.sidebarWidth || 260) + 'px'); }
 async function toggleToolbar() { state.settings = await relay.patchSettings({ toolbarShown: !state.settings.toolbarShown }); applyToolbar(); }
@@ -1702,7 +1704,7 @@ $('#libList').addEventListener('dragend', endLibDrag);
 function r(el: HTMLElement) { return el.getBoundingClientRect(); }
 
 // rail: New (new terminal) · Files/Library/Issues (switch the active panel) · Agent (open agent panel)
-document.querySelectorAll<HTMLElement>('.rail-btn[data-view]').forEach((b) => { b.onclick = () => switchSidebarView(b.dataset.view as 'library' | 'files' | 'issues' | 'prs'); });
+document.querySelectorAll<HTMLElement>('.rail-btn[data-view]').forEach((b) => { b.onclick = () => switchSidebarView(b.dataset.view as 'library' | 'files' | 'issues' | 'prs' | 'tasks'); });
 (document.querySelector('.rail-btn[data-act="new"]') as HTMLElement | null)?.addEventListener('click', () => void newTab());
 (document.querySelector('.rail-btn[data-act="agent"]') as HTMLElement | null)?.addEventListener('click', () => openAgent());
 
@@ -1850,7 +1852,7 @@ new ResizeObserver(() => { clearTimeout(_roT); _roT = setTimeout(() => { fitPane
 (async function boot() {
   state.settings = await relay.getSettings();
   state.library = await relay.listSessions();
-  initWorkspaces({ newTab, snapshotTabs, reconcilePanes, fitPanes, renderTabs, updateStatus, reflectModel, renderChat, updateMainView, reflectSettings, persistWorkspace, applyTheme, blocksMode, confirmDialog, shortCwd, sendCommand, renderLibrary, reloadIssues: () => { void loadIssues(); if (state.settings.sidebarView === 'prs') void loadPrs(); renderBell(); }, pcmd: P_CMD });
+  initWorkspaces({ newTab, snapshotTabs, reconcilePanes, fitPanes, renderTabs, updateStatus, reflectModel, renderChat, updateMainView, reflectSettings, persistWorkspace, applyTheme, blocksMode, confirmDialog, shortCwd, sendCommand, renderLibrary, reloadIssues: () => { void loadIssues(); if (state.settings.sidebarView === 'prs') void loadPrs(); renderTasks(); renderBell(); }, pcmd: P_CMD });
   initIssues({
     // Assign → open a fresh terminal tab rooted in the issue's worktree, seeded to launch the agent.
     openAgentTab: (o) => { void newTab({ cwd: o.cwd, name: o.name, runCmd: o.runCmd }); },
@@ -1859,6 +1861,8 @@ new ResizeObserver(() => { clearTimeout(_roT); _roT = setTimeout(() => { fitPane
   // PR rail — shares the Issues rail's active repo; clicking its repo chip jumps to Issues to change it.
   // openAgentTab powers PR review pipelines (an agent tab rooted in the PR's checked-out worktree).
   initPrs({ activeWsId: getActiveWsId, focusIssues: () => switchSidebarView('issues'), openAgentTab: (o) => { void newTab({ cwd: o.cwd, name: o.name, runCmd: o.runCmd }); } });
+  // Tasks rail — draft/validate a proposed issue, file it only if valid. Its own validate worktree + agent tab.
+  initTasks({ activeWsId: getActiveWsId, openAgentTab: (o) => { void newTab({ cwd: o.cwd, name: o.name, runCmd: o.runCmd }); } });
   if ((state.settings.sidebarView || 'library') === 'prs') void loadPrs(); // restore-on-boot when PR was the last view
   // Notifications — background poller (all workspaces) + the per-workspace header bell.
   initNotifications({ activeWsId: getActiveWsId });

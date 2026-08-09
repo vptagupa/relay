@@ -137,7 +137,7 @@ export interface Settings {
   bookmarkGroups: BookmarkGroup[];  // groups for organizing bookmarks (display order = array order)
   hasKey: Record<string, boolean>;  // provider -> whether a key is stored (never the key itself)
   issueTags?: Record<string, string[]>; // private local tags, keyed "repo#number" → ["mine","reviewing"] (never touch GitHub)
-  sidebarView?: 'library' | 'files' | 'issues' | 'prs'; // which rail panel is active in the sidebar
+  sidebarView?: 'library' | 'files' | 'issues' | 'prs' | 'tasks'; // which rail panel is active in the sidebar
   issueRepos?: string[]; // LEGACY (pre per-workspace): global tracked repos — migrated into issueReposByWs
   issueRepo?: string;    // LEGACY (pre per-workspace): global active repo — migrated into issueRepoByWs
   issueReposByWs?: Record<string, string[]>; // tracked repos per workspace id (Issues are per-workspace)
@@ -145,7 +145,9 @@ export interface Settings {
   issueAgent?: string;   // preferred coding agent id for Assign (claude/gemini/codex/aider/antigravity)
   issueConcurrency?: number; // max agents the assign queue runs at once (per repo); default 2
   issuePipelineByKey?: Record<string, string>; // per-issue pipeline id, keyed "provider:repo#number"; unset → default validate-fix
+  issueDepsByKey?: Record<string, string[]>;   // per-issue dependency repo ids (qualified "provider:repo"), keyed "provider:repo#number" — checked out read-only under .deps/ in the worktree for reference
   prPipelineByKey?: Record<string, string>;    // per-PR review pipeline id, keyed "provider:repo#number"; unset → default review-pr
+  tasksByWs?: Record<string, Task[]>;          // per-workspace Tasks: draft an issue, validate it against the repo, file it only if valid
   pipelines?: PipelineDef[]; // user-authored custom pipelines (built-ins live in code); merged into the registry
   bitbucketWorkspacesByWs?: Record<string, string[]>; // Bitbucket workspace ids to list repos from, per Slayer T workspace id (CHANGE-2770)
   providersScopedMigrated?: boolean; // one-shot flag: the pre-scoping global provider secrets have been moved into a workspace
@@ -188,6 +190,24 @@ export interface ChatTurn {
 
 // A per-workspace notification for a provider event (new/closed issue or PR), shown in the header bell and
 // (optionally) fired as a native OS notification. Detected by the background poller diffing each repo over time.
+// A Task = a proposed issue you validate against the repo BEFORE filing it. Run a validate-only pipeline; if
+// the agent judges it valid, an issue is created on the provider with the validation result; if not, no issue
+// is filed and the result is kept on the task. Persisted per-workspace in Settings.tasksByWs.
+export interface Task {
+  id: string;
+  provider: string;                              // github | gitlab | bitbucket
+  repo: string;                                  // native repo id (owner/name)
+  title: string;
+  body: string;                                  // the proposed issue description (what to validate)
+  status: 'draft' | 'validating' | 'invalid' | 'error' | 'open' | 'closed' | 'valid'; // 'valid' = legacy (filed); tracked to 'open'/'closed' from the issue
+  result?: string;                               // the validation summary (set once it runs)
+  issueNumber?: number;                          // if valid → the filed issue
+  issueUrl?: string;
+  agentId?: string;                              // agent used for the validate run
+  deps?: string[];                               // dependency repo ids ("provider:repo") linked read-only under .deps/ for the validate run
+  ts: number;                                    // created (epoch ms)
+  ranAt?: number;                                // last validated (epoch ms)
+}
 export interface AppNotification {
   id: string;                                    // stable dedupe key: `${kind}:${provider}:${repo}#${number}`
   kind: 'new-issue' | 'closed-issue' | 'new-pr' | 'closed-pr';

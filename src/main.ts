@@ -429,6 +429,20 @@ ipcMain.handle('provider:pr-detail', async (_e, p: { provider: ProviderId; ws: s
   if (!validRepo(p?.repo) || !Number.isInteger(p?.number) || p.number <= 0) return { ok: false, error: 'Invalid request' };
   return a.prDetail(p?.ws, p.repo, p.number);
 });
+// Create an issue on the provider (Tasks: file a validated task as a real issue).
+ipcMain.handle('provider:create-issue', async (_e, p: { provider: ProviderId; ws: string; repo: string; title: string; body: string }) => {
+  const a = providerOf(p?.provider); if (!a) return badProvider;
+  if (!validRepo(p?.repo)) return { ok: false, error: 'Invalid repository' };
+  const title = typeof p?.title === 'string' ? p.title.trim() : '';
+  if (!title) return { ok: false, error: 'Title is required' };
+  return a.createIssue(p?.ws, p.repo, title, typeof p?.body === 'string' ? p.body : '');
+});
+// Current open/closed state of a filed issue (Tasks sync their status from it).
+ipcMain.handle('provider:issue-state', async (_e, p: { provider: ProviderId; ws: string; repo: string; number: number }) => {
+  const a = providerOf(p?.provider); if (!a) return badProvider;
+  if (!validRepo(p?.repo) || !Number.isInteger(p?.number) || p.number <= 0) return { ok: false, error: 'Invalid request' };
+  return a.issueState(p?.ws, p.repo, p.number);
+});
 
 // Real-time notifications: a local webhook receiver (see webhooks.ts). The renderer toggles it on/off; parsed
 // issue/PR events are pushed back to the renderer, which routes them into the per-workspace notification bell.
@@ -480,11 +494,13 @@ ipcMain.handle('open:external', (_e, url: string) => {
 // else use — or create — a managed clone under %APPDATA%\Relay\repos\<provider>__<owner>__<repo>. The
 // provider CLI (gh/glab) carries your login so private/org repos clone without a token in .git/config;
 // Bitbucket (no CLI) falls back to `git clone`, using the OS git credential helper.
-async function resolveRepoRoot(git: string, provider: ProviderId, repo: string, dir?: string): Promise<{ ok: true; repoRoot: string } | { ok: false; error: string }> {
+// `preferManaged` (deps only): NEVER use the open folder — always the isolated managed clone. Dep-linking
+// hard-resets the resolved clone to the latest default, which must never touch the user's working directory.
+async function resolveRepoRoot(git: string, provider: ProviderId, repo: string, dir?: string, preferManaged = false): Promise<{ ok: true; repoRoot: string } | { ok: false; error: string }> {
   const adapter = providerOf(provider);
   if (!adapter) return { ok: false, error: 'Unknown provider' };
   let repoRoot = '';
-  if (typeof dir === 'string' && dir) {
+  if (!preferManaged && typeof dir === 'string' && dir) {
     const top = await runBin(git, ['-C', dir, 'rev-parse', '--show-toplevel']);
     if (top.ok) {
       const root = top.stdout.trim();
@@ -661,6 +677,99 @@ ipcMain.handle('git:pr-worktree-add', async (_e, p: { provider?: ProviderId; rep
     const briefRel = await dropSlayerBrief(git, wtPath, `.slayer/pr-${num}.md`, typeof p?.brief === 'string' ? p.brief : '');
     return { ok: true, path: wtPath, branch, reused, briefRel };
   } catch (err) { logFatal('git:pr-worktree-add', err); return { ok: false, error: 'Worktree creation failed' }; }
+});
+
+// Link one or more DEPENDENCY repos into an issue worktree as READ-ONLY reference (e.g. a FE issue that needs
+// to read the BE codebase). Each dep is resolved/cloned like an issue repo, updated to its LATEST default
+// branch, then junction/symlinked into `<wt>/.deps/<name>` (git-excluded, so it never enters the issue's PR).
+// The agent reads `.deps/<name>/…` for context; the "read-only" contract is by instruction (in the brief).
+ipcMain.handle('git:link-deps', async (_e, p: { wt: string; dir?: string; deps: { provider?: ProviderId; repo: string }[] }) => {
+  try {
+    const wt = p?.wt;
+    if (!wt || !existsSync(wt)) return { ok: false, error: 'worktree missing' };
+    const git = await resolveBin('git');
+    if (!git) return { ok: false, error: 'git not found on PATH' };
+    const depsDir = path.join(wt, '.deps');
+    await fsp.mkdir(depsDir, { recursive: true });
+    // Locally git-exclude .deps/ (same as .slayer/) so the linked repos never show up in the issue's diff.
+    try {
+      const gp = await runBin(git, ['-C', wt, 'rev-parse', '--git-path', 'info/exclude']);
+      if (gp.ok) {
+        const excl = path.isAbsolute(gp.stdout.trim()) ? gp.stdout.trim() : path.join(wt, gp.stdout.trim());
+        const cur = await fsp.readFile(excl, 'utf8').catch(() => '');
+        if (!/^\.deps\/?$/m.test(cur.replace(/\r/g, ''))) await fsp.writeFile(excl, (!cur || cur.endsWith('\n') ? cur : cur + '\n') + '.deps/\n', 'utf8');
+      }
+    } catch (err) { logFatal('git:link-deps/exclude', err); }
+    const linked: { name: string; repo: string }[] = [];
+    for (const d of (p?.deps || [])) {
+      const provider = (d?.provider || 'github') as ProviderId;
+      if (!d?.repo || !/^[\w.-]+(\/[\w.-]+)+$/.test(d.repo)) continue;
+      const rr = await resolveRepoRoot(git, provider, d.repo, p?.dir, true); // preferManaged: never reset the open folder
+      if (!rr.ok) continue;                                     // a dep that won't resolve/clone is skipped (best-effort)
+      const clone = rr.repoRoot;
+      // Update the (shared cache) clone to the latest default branch — reset is safe: it's a read-only reference.
+      await runBin(git, ['-C', clone, 'fetch', 'origin', '--prune'], { timeout: 120000 });
+      let dh = await runBin(git, ['-C', clone, 'symbolic-ref', '--short', 'refs/remotes/origin/HEAD']);
+      if (!dh.ok) { await runBin(git, ['-C', clone, 'remote', 'set-head', 'origin', '-a']); dh = await runBin(git, ['-C', clone, 'symbolic-ref', '--short', 'refs/remotes/origin/HEAD']); }
+      let def = dh.ok ? dh.stdout.trim().replace(/^origin\//, '') : '';
+      if (!def) { for (const b of ['main', 'master']) { if ((await runBin(git, ['-C', clone, 'rev-parse', '--verify', '--quiet', `refs/remotes/origin/${b}`])).ok) { def = b; break; } } }
+      if (def && (await runBin(git, ['-C', clone, 'rev-parse', '--verify', '--quiet', `refs/remotes/origin/${def}`])).ok) {
+        await runBin(git, ['-C', clone, 'checkout', '-f', def]);
+        await runBin(git, ['-C', clone, 'reset', '--hard', `origin/${def}`]);
+      }
+      const name = d.repo.split('/').pop() || 'dep';
+      const link = path.join(depsDir, name);
+      // The junction target (the managed clone) is a STABLE path, so an existing link already reflects the
+      // just-refreshed content — only create it when missing. (Never remove-recurse a junction: that could
+      // delete the target.) 'junction' on Windows needs no admin; 'dir' symlink elsewhere.
+      if (!existsSync(link)) {
+        try { await fsp.symlink(clone, link, process.platform === 'win32' ? 'junction' : 'dir'); }
+        catch (err) { logFatal('git:link-deps/symlink', err); continue; }
+      }
+      linked.push({ name, repo: d.repo });
+    }
+    return { ok: true, linked };
+  } catch (err) { logFatal('git:link-deps', err); return { ok: false, error: 'Could not link dependencies' }; }
+});
+
+// Create (or reuse) a worktree for a TASK's validate run — a branch `task-<id>` off the LATEST remote default,
+// so the agent can investigate the repo to validate a proposed issue (read-only; no PR). Brief → .slayer/task-<id>.md.
+ipcMain.handle('git:task-worktree-add', async (_e, p: { provider?: ProviderId; repo: string; dir: string; id: string; brief?: string }) => {
+  try {
+    const repo = p?.repo, dir = p?.dir;
+    const provider = (p?.provider || 'github') as ProviderId;
+    const id = String(p?.id || '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 40);   // sanitize → safe branch/folder name
+    if (!providerOf(provider) || typeof repo !== 'string' || !/^[\w.-]+(\/[\w.-]+)+$/.test(repo) || !id) return { ok: false, error: 'Invalid request' };
+    const git = await resolveBin('git'); if (!git) return { ok: false, error: 'git not found on PATH' };
+    const rr = await resolveRepoRoot(git, provider, repo, dir);
+    if (!rr.ok) return { ok: false, error: rr.error };
+    const repoRoot = rr.repoRoot;
+    if (!(await runBin(git, ['-C', repoRoot, 'rev-parse', '--verify', '--quiet', 'HEAD'])).ok) return { ok: false, error: 'This repository has no commits yet.' };
+    // Start from the freshly-fetched remote default (same logic as issue worktrees).
+    await runBin(git, ['-C', repoRoot, 'fetch', 'origin', '--prune'], { timeout: 120000 });
+    let dh = await runBin(git, ['-C', repoRoot, 'symbolic-ref', '--short', 'refs/remotes/origin/HEAD']);
+    if (!dh.ok) { await runBin(git, ['-C', repoRoot, 'remote', 'set-head', 'origin', '-a']); dh = await runBin(git, ['-C', repoRoot, 'symbolic-ref', '--short', 'refs/remotes/origin/HEAD']); }
+    let base = dh.ok ? dh.stdout.trim().replace(/^origin\//, '') : '';
+    if (!base) { for (const b of ['main', 'master']) { if ((await runBin(git, ['-C', repoRoot, 'rev-parse', '--verify', '--quiet', `refs/remotes/origin/${b}`])).ok) { base = b; break; } } }
+    let startPoint = '';
+    if (base) { const rp = await runBin(git, ['-C', repoRoot, 'rev-parse', '--verify', '--quiet', `refs/remotes/origin/${base}`]); if (rp.ok) startPoint = rp.stdout.trim(); }
+    if (!startPoint) { const cur = await runBin(git, ['-C', repoRoot, 'rev-parse', '--abbrev-ref', 'HEAD']); startPoint = (cur.ok && cur.stdout.trim()) || 'HEAD'; }
+    const branch = `task-${id}`;
+    const folder = worktreeFolder(repoRoot);
+    const wtPath = path.join(app.getPath('userData'), 'worktrees', folder, branch);
+    const norm = (s: string) => s.replace(/\\/g, '/').toLowerCase();
+    await pruneAndSweepWorktrees(git, repoRoot);
+    const list = await runBin(git, ['-C', repoRoot, 'worktree', 'list', '--porcelain']);
+    const reused = list.ok && norm(list.stdout).split('\n').some((ln) => ln.startsWith('worktree ') && norm(ln.slice(9).trim()) === norm(wtPath));
+    if (!reused) {
+      const hasBranch = (await runBin(git, ['-C', repoRoot, 'rev-parse', '--verify', '--quiet', `refs/heads/${branch}`])).ok;
+      const addArgs = hasBranch ? ['-C', repoRoot, 'worktree', 'add', wtPath, branch] : ['-C', repoRoot, 'worktree', 'add', wtPath, '-b', branch, startPoint];
+      const add = await runBin(git, addArgs, { timeout: 60000 });
+      if (!add.ok) { const msg = (add.stderr || add.stdout || 'git worktree add failed').trim().split('\n').filter(Boolean).pop() || 'git worktree add failed'; return { ok: false, error: msg }; }
+    }
+    const briefRel = await dropSlayerBrief(git, wtPath, `.slayer/task-${id}.md`, typeof p?.brief === 'string' ? p.brief : '');
+    return { ok: true, path: wtPath, branch, reused, briefRel };
+  } catch (err) { logFatal('git:task-worktree-add', err); return { ok: false, error: 'Worktree creation failed' }; }
 });
 
 /* -------------------- issue pipelines (staged agent runs, gated by verdict files) -------------------- */
