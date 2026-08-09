@@ -332,13 +332,34 @@ button{font-family:inherit;color:inherit;cursor:pointer;border:none;background:n
 .modal.show{opacity:1;pointer-events:auto;transform:translateX(-50%) scale(1)}
 .modal-head{padding:16px 18px 6px;font-weight:650;font-size:15px;flex-shrink:0}
 .modal-sub{padding:0 18px 12px;font-size:12.5px;color:var(--muted);line-height:1.5;flex-shrink:0}
-.modal-body{padding:0 18px 18px;display:flex;flex-direction:column;gap:14px;overflow-y:auto;min-height:0}
+/* Settings tabs: an underline tab bar under the head; one panel visible at a time, the body scrolls per-tab. */
+.set-tabs{display:flex;gap:4px;padding:8px 14px 0;border-bottom:1px solid var(--border);margin-bottom:2px;overflow-x:auto;flex-shrink:0}
+.set-tabs::-webkit-scrollbar{height:0}
+.set-tab{flex:none;padding:8px 11px;margin-bottom:-1px;background:none;border:none;border-bottom:2px solid transparent;color:var(--muted);font:600 12px var(--sans);cursor:pointer;white-space:nowrap;transition:color .12s,border-color .12s}
+.set-tab:hover{color:var(--text-dim)}
+.set-tab.active{color:var(--text);border-bottom-color:var(--accent)}
+.set-panel{display:none;flex-direction:column;gap:14px}
+.set-panel.active{display:flex}
+.set-note{font-size:12px;color:var(--muted);line-height:1.5}
+.modal-body{padding:14px 18px 18px;display:flex;flex-direction:column;gap:14px;overflow-y:auto;min-height:0}
 .field label{display:block;font-size:12px;color:var(--text-dim);margin-bottom:5px}
 .field .row{display:flex;gap:8px}
 .field input{flex:1;background:var(--surface-2);border:1px solid var(--border);border-radius:8px;color:var(--text);font-family:var(--mono);font-size:12.5px;padding:9px 10px}
 .field input:focus{outline:none;border-color:var(--accent-line)}
 .field select{width:100%;background:var(--surface-2);border:1px solid var(--border);border-radius:8px;color:var(--text);font-family:var(--sans);font-size:12.5px;padding:9px 10px;cursor:pointer}
 .field select:focus{outline:none;border-color:var(--accent-line)}
+.field .row select{flex:1}
+.pbrief-ta{width:100%;box-sizing:border-box;resize:vertical;min-height:120px;margin-top:8px;background:var(--surface-2);border:1px solid var(--border);border-radius:8px;color:var(--text);font:11.5px/1.5 var(--mono);padding:9px 10px}
+.pbrief-ta:focus{outline:none;border-color:var(--accent-line)}
+/* Database credential templates (Settings panel) */
+.db-list{display:flex;flex-direction:column;gap:6px;margin-bottom:8px}
+.db-empty{color:var(--muted);font-size:12px;padding:8px 2px}
+.db-row{display:flex;align-items:baseline;gap:10px;width:100%;text-align:left;background:var(--surface-2);border:1px solid var(--border);border-radius:8px;padding:8px 11px;cursor:pointer;color:var(--text)}
+.db-row:hover{border-color:var(--accent-line);background:var(--surface-3,var(--surface-2))}
+.db-label{font-size:12.5px;font-weight:600}
+.db-sub{font-size:11px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.db-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px 12px;margin:4px 0 2px}
+.db-extras{min-height:56px;font:11.5px/1.5 var(--mono)}
 .field .set{padding:0 12px;border-radius:8px;background:var(--accent);color:var(--on-accent);font-weight:600;font-size:12.5px}
 .field .state{font-size:11px;margin-top:5px}
 /* theme picker */
@@ -934,6 +955,13 @@ body.tabdrag .dz{display:block;pointer-events:auto}
 .tk-st.error{border-color:#da363366;color:#f85149}
 .tk-input{width:100%;box-sizing:border-box;background:var(--surface-2);border:1px solid var(--border-strong);border-radius:9px;padding:9px 11px;color:var(--text);font:12.5px var(--sans);margin-bottom:2px}
 .tk-input:focus{outline:none;border-color:var(--accent-line)}
+/* task type tags (bug / enhancement) — checkboxes in the form + chips on the row */
+.tk-tags{display:flex;gap:14px;flex:1}
+.tk-tag{display:inline-flex;align-items:center;gap:5px;font:11.5px var(--sans);color:var(--text);cursor:pointer}
+.tk-tag input{margin:0;cursor:pointer;flex:none}
+.tk-tagchip{font:8.5px/1.4 var(--mono);border:1px solid var(--border-strong);border-radius:999px;padding:1px 6px;color:var(--muted);text-transform:lowercase;flex:none}
+.tk-tagchip.bug{border-color:#da363366;color:#f85149}
+.tk-tagchip.enhancement{border-color:#a78bfa66;color:#a78bfa}
 /* PR hover detail card — hoverable + scrollable so a long description can be read */
 .pr-hover{position:fixed;z-index:95;width:460px;max-width:calc(100vw - 16px);max-height:min(66vh,460px);overflow-y:auto;overscroll-behavior:contain;background:var(--surface);border:1px solid var(--border-strong);border-radius:10px;box-shadow:var(--shadow);padding:10px 12px 0;display:none}
 .prh-top{display:flex;align-items:center;gap:6px;margin-bottom:6px}

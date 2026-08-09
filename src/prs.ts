@@ -15,7 +15,7 @@ const relay = (window as any).relay;
 export interface PrsDeps {
   activeWsId: () => string;   // active workspace id — connections + the shared active repo are per-workspace
   focusIssues: () => void;    // jump to the Issues rail (where the shared repo is picked)
-  openAgentTab: (o: { cwd: string; name: string; runCmd?: string }) => void; // for PR review pipelines (agent tab in the PR worktree)
+  openAgentTab: (o: { cwd: string; name: string; runCmd?: string; dbCredId?: string }) => void; // for PR review pipelines (agent tab in the PR worktree; dbCredId → inject a DB credential template)
 }
 let deps: PrsDeps;
 

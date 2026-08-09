@@ -210,10 +210,13 @@ if (!isSquirrel) {
 }
 
 /* -------------------- PTY IPC -------------------- */
-ipcMain.handle('pty:create', async (e, { id, cwd, cols, rows, restore, runCmd }) => {
+ipcMain.handle('pty:create', async (e, { id, cwd, cols, rows, restore, runCmd, dbCredId }) => {
   try {
     const integrate = (await store.getSettings()).shellIntegration;
-    const reattached = createTerm(id, cwd, e.sender, cols, rows, restore, integrate, typeof runCmd === 'string' ? runCmd : undefined);
+    // A pipeline run may reference a saved DB credential template — resolve it HERE (main-only) into env vars
+    // for this shell, so the agent can connect without the secret ever touching the renderer or a file on disk.
+    const envExtra = typeof dbCredId === 'string' && dbCredId ? await keys.resolveDbCredEnv(dbCredId).catch(() => ({})) : undefined;
+    const reattached = createTerm(id, cwd, e.sender, cols, rows, restore, integrate, typeof runCmd === 'string' ? runCmd : undefined, envExtra);
     // `alt` lets the renderer restore the live-interactive view for a reattached full-screen TUI (Claude Code).
     return { reattached, alt: isAltScreen(id) };
   } catch (err) { logFatal('pty:create', err); return { reattached: false, alt: false }; } // a spawn failure must not reject into the renderer
@@ -243,6 +246,13 @@ ipcMain.handle('keys:set', async (_e, { provider, value }: { provider: Provider;
   await keys.setKey(provider, value);
   return { ...(await store.getSettings()), hasKey: await keys.hasKeys() };
 });
+
+/* -------------------- database credential templates -------------------- */
+// Encrypted at rest; only sanitized metadata (no password / no extra-var values) is ever returned. Every result
+// is the fresh list so the renderer can re-render without a second round trip.
+ipcMain.handle('dbcreds:list', async () => { try { return await keys.listDbCreds(); } catch (err) { logFatal('dbcreds:list', err); return []; } });
+ipcMain.handle('dbcreds:save', async (_e, input: keys.DbCredInput) => { try { return await keys.saveDbCred(input); } catch (err) { logFatal('dbcreds:save', err); return await keys.listDbCreds().catch(() => []); } });
+ipcMain.handle('dbcreds:delete', async (_e, { id }: { id: string }) => { try { return await keys.deleteDbCred(id); } catch (err) { logFatal('dbcreds:delete', err); return await keys.listDbCreds().catch(() => []); } });
 
 /* -------------------- sessions -------------------- */
 ipcMain.handle('sessions:list', () => store.listSessions());

@@ -11,7 +11,7 @@
 import { state } from './state';
 import { esc } from './dom';
 import { toast } from './ui';
-import { STAGE_KINDS, kindSpec, isGate, STOP, type PipelineDef, type StageDef, type EdgeWhen, type StageKind } from './pipelines';
+import { STAGE_KINDS, kindSpec, stageBrief, isGate, STOP, type PipelineDef, type StageDef, type EdgeWhen, type StageKind } from './pipelines';
 
 const relay = (window as any).relay;
 
@@ -96,7 +96,7 @@ export function openPipelineBuilder(base: PipelineDef, onSaved: (savedId?: strin
     pushUndo();
     const spec = kindSpec(kind);
     const n = def.stages.length;
-    const s: StageDef = { id: newStageId(), name: spec.label, kind, brief: spec.brief, edges: [], x: 40 + (n % 3) * 175, y: 40 + Math.floor(n / 3) * 120 };
+    const s: StageDef = { id: newStageId(), name: spec.label, kind, brief: stageBrief(kind, state.settings.stageBriefs), edges: [], x: 40 + (n % 3) * 175, y: 40 + Math.floor(n / 3) * 120 };
     def.stages.push(s); selected = s.id; renderAll();
   }
   function removeStage(id: string): void {

@@ -146,9 +146,12 @@ export interface Settings {
   issueConcurrency?: number; // max agents the assign queue runs at once (per repo); default 2
   issuePipelineByKey?: Record<string, string>; // per-issue pipeline id, keyed "provider:repo#number"; unset → default validate-fix
   issueDepsByKey?: Record<string, string[]>;   // per-issue dependency repo ids (qualified "provider:repo"), keyed "provider:repo#number" — checked out read-only under .deps/ in the worktree for reference
+  issueDbCredByKey?: Record<string, string>;   // per-issue DB credential template id (see DbCredMeta), keyed "provider:repo#number"; injected into the run's env
   prPipelineByKey?: Record<string, string>;    // per-PR review pipeline id, keyed "provider:repo#number"; unset → default review-pr
+  prDbCredByKey?: Record<string, string>;      // per-PR DB credential template id, keyed "provider:repo#number"; injected into the review run's env
   tasksByWs?: Record<string, Task[]>;          // per-workspace Tasks: draft an issue, validate it against the repo, file it only if valid
   pipelines?: PipelineDef[]; // user-authored custom pipelines (built-ins live in code); merged into the registry
+  stageBriefs?: Record<string, string>; // per stage-kind (validate/fix/reproduce/test/review/custom) default-brief override; seeds new stages in the builder + task validation
   bitbucketWorkspacesByWs?: Record<string, string[]>; // Bitbucket workspace ids to list repos from, per Slayer T workspace id (CHANGE-2770)
   providersScopedMigrated?: boolean; // one-shot flag: the pre-scoping global provider secrets have been moved into a workspace
   notificationsByWs?: Record<string, AppNotification[]>; // per-workspace issue/PR notifications (persisted; survives restart)
@@ -204,9 +207,30 @@ export interface Task {
   issueNumber?: number;                          // if valid → the filed issue
   issueUrl?: string;
   agentId?: string;                              // agent used for the validate run
+  tags?: string[];                               // 'bug' | 'enhancement' — inject type-appropriate validation guidance into the brief
   deps?: string[];                               // dependency repo ids ("provider:repo") linked read-only under .deps/ for the validate run
+  dbCredId?: string;                             // DB credential template id (see DbCredMeta) injected into the validate run's env
   ts: number;                                    // created (epoch ms)
   ranAt?: number;                                // last validated (epoch ms)
+}
+
+// A saved database-credential TEMPLATE. The full record (incl. password + extra values) is encrypted at rest
+// in the OS keychain and lives ONLY in the main process (see keys.ts). This is the SANITIZED shape the renderer
+// receives: connection metadata for display/editing, but NEVER the password or any extra-var value. When a
+// pipeline run references a template, the main process injects it into that run's shell environment as the
+// `envVars` (DB_*, DATABASE_URL, engine aliases, extras) — the secret is never written to a file or the brief.
+export interface DbCredMeta {
+  id: string;
+  label: string;                 // human name shown in the picker (e.g. "PRIISMS prod DB")
+  engine?: string;               // postgres | mysql | mongodb | mssql | redis | sqlite | other
+  host?: string;
+  port?: string;
+  database?: string;
+  user?: string;
+  hasPassword: boolean;          // a password is stored (its value is never returned)
+  extraKeys: string[];           // NAMES of the extra env vars (values are secret, not returned)
+  envVars: string[];             // full list of env var NAMES this template injects — drives the brief note
+  ts?: number;                   // created (epoch ms) — display order
 }
 export interface AppNotification {
   id: string;                                    // stable dedupe key: `${kind}:${provider}:${repo}#${number}`

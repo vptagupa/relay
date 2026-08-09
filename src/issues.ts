@@ -13,11 +13,12 @@ import type { Issue } from './shared/types';
 import { allPipelines, pipelineById, isGate, nextEdge, stageIndexById, STOP, renderBrief, stageStatus, type PipelineDef, type BriefCtx } from './pipelines';
 import { openPipelineBuilder } from './pipeline-editor';
 import { AGENTS } from './agents-list';
+import { dbCredOptions, dbCredNote, loadDbCreds, dbCredMetas } from './dbcreds';
 
 const relay = (window as any).relay;
 
 export interface IssuesDeps {
-  openAgentTab: (o: { cwd: string; name: string; runCmd?: string }) => void; // open a terminal tab in the issue worktree, launching the agent
+  openAgentTab: (o: { cwd: string; name: string; runCmd?: string; dbCredId?: string }) => void; // open a terminal tab in the issue worktree, launching the agent (dbCredId → inject a DB credential template into its env)
   activeWsId: () => string;   // the active workspace id — Issues (tracked repos + active repo) are per-workspace
 }
 let deps: IssuesDeps;
@@ -173,6 +174,18 @@ function setIssueDeps(prov: ProviderId, rpo: string, n: number, ids: string[]): 
     try { state.settings = await relay.patchSettings({ issueDepsByKey: map }); } catch { /* keep the in-memory pick */ }
   });
   return depsWriteChain;
+}
+// Per-issue DB credential template id (see dbcreds.ts), keyed like the per-issue pipeline. Injected into the
+// run's env at each stage launch so the agent can connect to the DB without being asked for credentials.
+function issueDbCredFor(prov: ProviderId, rpo: string, n: number): string { return (state.settings.issueDbCredByKey || {})[pipeKeyFor(prov, rpo, n)] || ''; }
+let dbCredWriteChain: Promise<void> = Promise.resolve();
+function setIssueDbCred(prov: ProviderId, rpo: string, n: number, id: string): Promise<void> {
+  dbCredWriteChain = dbCredWriteChain.then(async () => {
+    const map = { ...(state.settings.issueDbCredByKey || {}) };
+    if (id) map[pipeKeyFor(prov, rpo, n)] = id; else delete map[pipeKeyFor(prov, rpo, n)];
+    try { state.settings = await relay.patchSettings({ issueDbCredByKey: map }); } catch { /* keep the in-memory pick */ }
+  });
+  return dbCredWriteChain;
 }
 // The brief section that points the agent at the read-only reference repos (linked under .deps/ at build time).
 function depsNote(ids: string[]): string {
@@ -595,12 +608,20 @@ async function launchStage(key: string, idx: number): Promise<void> {
   run.stageIdx = idx; run.awaiting = !!stage.edges?.length; run.reason = undefined;
   runStatus.set(key, stageStatus(stage.kind)); // set synchronously so workingCount() is correct before the async prep
   const briefRel = idx === 0 ? run.brief0Rel : `.slayer/stage-${idx}.md`;
+  // A referenced DB credential template → injected into this stage's env (every stage is its own shell) and its
+  // note appended to LATER-stage briefs too (stage 0 already carries the note from the Assign dialog's textarea).
+  const dbCredId = issueDbCredFor(run.provider, run.repo, run.number);
   // Write the brief for later stages (stage 0's is already there) + clear this stage's stale verdict so a
   // reused worktree can't read a previous run's pass/fail. Then launch the agent on the brief FILE.
-  const brief = renderBrief(stage.brief, briefCtx(run.issue, run.provider, idx));
+  // The .deps/ + DB-creds notes are appended to LATER stages too — the reference repos and env vars persist
+  // in the worktree across every stage, so Fix/Test/Review must be told about them (stage 0's file already has
+  // both, from the Assign dialog's textarea). issueDepsFor filters to nothing → depsNote returns '' (no-op).
+  const brief = renderBrief(stage.brief, briefCtx(run.issue, run.provider, idx))
+    + depsNote(issueDepsFor(run.provider, run.repo, run.number))
+    + dbCredNote(dbCredId);
   await relay.pipelinePrep(run.wt, idx === 0 ? null : briefRel, idx === 0 ? null : brief, idx).catch(() => {});
   const agent = AGENTS.find((a) => a.id === run.agentId);
-  deps.openAgentTab({ cwd: run.wt, name: `#${run.number} · ${stage.name.toLowerCase()}`, runCmd: agent ? agent.launch(briefRel) : undefined });
+  deps.openAgentTab({ cwd: run.wt, name: `#${run.number} · ${stage.name.toLowerCase()}`, runCmd: agent ? agent.launch(briefRel) : undefined, dbCredId: dbCredId || undefined });
   render(); ensurePolling(); ensureStagePoll();
 }
 
@@ -822,6 +843,7 @@ function openDetails(i: Issue): void {
 let assigning = false; // guard the whole create-worktree round-trip against a double submit
 async function openAssign(i: Issue): Promise<void> {
   const dir = state.settings.workspace || '';
+  await loadDbCreds();   // refresh the saved DB credential templates so the picker is current
   const detected = await relay.agentsDetect().catch(() => ({} as Record<string, boolean>));
   const installed = AGENTS.filter((a) => detected[a.id]);
   const agentOk = installed.length > 0;
@@ -840,7 +862,8 @@ async function openAssign(i: Issue): Promise<void> {
   // issue (e.g. a FE issue that needs the BE codebase). Persisted per-issue; linked read-only under .deps/.
   const depCandidates = ((state.settings.issueReposByWs || {})[wsKey()] || []).filter((id) => id !== `${asgProvider}:${asgRepo || ''}`);
   const selectedDeps = new Set(issueDepsFor(asgProvider, asgRepo || '', i.number).filter((id) => depCandidates.includes(id)));
-  const seedBrief = () => stageBriefText(pipeline, 0, i, asgProvider) + depsNote([...selectedDeps]); // brief + the .deps/ reference note
+  let selectedDbCred = issueDbCredFor(asgProvider, asgRepo || '', i.number); // DB credential template injected into the run's env
+  const seedBrief = () => stageBriefText(pipeline, 0, i, asgProvider) + depsNote([...selectedDeps]) + dbCredNote(selectedDbCred); // brief + .deps/ note + DB-creds note
   const { root, close } = modal(`<div class="tpl-card iss-card">
       <div class="hd"><span class="dot" style="background:var(--accent)"></span><span class="t">Assign #${i.number}<small>${esc(i.title)}</small></span></div>
       <div class="bd">
@@ -851,6 +874,7 @@ async function openAssign(i: Issue): Promise<void> {
         <div class="iss-pipedesc" id="issPipeDesc">${esc(pipeline.desc)}</div>
         ${depCandidates.length ? `<label class="iss-lbl">Dependencies <span class="mut">— read-only repos the agent can view under <code>.deps/</code></span></label>
         <div class="iss-deps" id="issDeps">${depCandidates.map((id) => { const { repo: r } = parseRepoId(id); return `<label class="iss-dep"><input type="checkbox" value="${esc(id)}"${selectedDeps.has(id) ? ' checked' : ''}><b>${esc(r.split('/').pop() || r)}</b><span class="mut">${esc(id)}</span></label>`; }).join('')}</div>` : ''}
+        ${dbCredMetas().length ? `<div class="iss-agentrow"><label class="iss-lbl" style="margin:0">Database</label><select class="iss-agentsel" id="issDbSel">${dbCredOptions(selectedDbCred)}</select></div>` : ''}
         <label class="iss-lbl">Brief · <span id="issBriefStage">${esc(pipeline.stages[0].name)}</span> stage <span class="mut">— edit before launch</span></label>
         <textarea class="iss-brief" spellcheck="false" rows="10">${esc(seedBrief())}</textarea>
         <div class="iss-wt">Creates an isolated worktree on branch <code>issue-${i.number}</code> and runs the pipeline there. Later stages use their built-in briefs.</div>
@@ -878,6 +902,9 @@ async function openAssign(i: Issue): Promise<void> {
     void setIssueDeps(asgProvider, asgRepo || '', i.number, [...selectedDeps]);
     if (!briefDirty) ta.value = seedBrief();
   });
+  // Pick a DB credential template → persist it for this issue and re-seed the brief's DB note (unless edited).
+  const dbSel = root.querySelector('#issDbSel') as HTMLSelectElement | null;
+  if (dbSel) dbSel.onchange = () => { selectedDbCred = dbSel.value; void setIssueDbCred(asgProvider, asgRepo || '', i.number, selectedDbCred); if (!briefDirty) ta.value = seedBrief(); };
   if (psel) psel.onchange = () => {
     pipelineId = psel.value;
     void setIssuePipeline(asgProvider, asgRepo || '', i.number, pipelineId); // remember THIS issue's pipeline

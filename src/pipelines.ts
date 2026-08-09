@@ -123,6 +123,11 @@ export const STAGE_KINDS: KindSpec[] = [
   { kind: 'custom',    label: 'Custom',    dot: '#9aa3af', gates: false, brief: CUSTOM_BRIEF },
 ];
 export const kindSpec = (kind: StageKind): KindSpec => STAGE_KINDS.find((k) => k.kind === kind) || STAGE_KINDS[STAGE_KINDS.length - 1];
+// The default brief for a stage kind, honoring a user override (Settings.stageBriefs) when set; else the built-in.
+export function stageBrief(kind: StageKind, overrides?: Record<string, string>): string {
+  const o = overrides?.[kind];
+  return (o && o.trim()) ? o : kindSpec(kind).brief;
+}
 
 /* ----------------------------- brief rendering ----------------------------- */
 export interface BriefCtx { issue: string; number: number; title: string; closeStep: string; verdictRel: string; base?: string; }

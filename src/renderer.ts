@@ -24,8 +24,10 @@ import { initIssues, pullIssues, loadIssues } from './issues';
 import { initPrs, loadPrs } from './prs';
 import { initTasks, renderTasks } from './tasks';
 import { initNotifications, renderBell } from './notifications';
+import { initDbCreds } from './dbcreds';
 import type { Settings, SavedSession, AgentEvent, ApprovalRequest, ChatTurn, OpenTab, Workspace, WorkspaceDef, Block, Bookmark, BookmarkGroup } from './shared/types';
 import { EDITORS, DEFAULT_EDITOR } from './shared/editors';
+import { STAGE_KINDS, kindSpec, type StageKind } from './pipelines';
 
 // TEMP DIAG: surface full stacks (minify is off) for the init crash.
 window.addEventListener('error', (e) => console.error('WERR ' + ((e as ErrorEvent).error?.stack || (e as ErrorEvent).message)));
@@ -124,7 +126,7 @@ function wireTermLinks(term: Terminal, tab: Tab): void {
     },
   });
 }
-async function newTab(seed?: Partial<OpenTab> & { libId?: string; runCmd?: string }, activate = true): Promise<Tab> {
+async function newTab(seed?: Partial<OpenTab> & { libId?: string; runCmd?: string; dbCredId?: string }, activate = true): Promise<Tab> {
   // Don't open the same terminal twice — switch to it instead.
   if (seed?.id) { const ex = state.tabs.find((t) => t.id === seed.id); if (ex) { if (activate) switchTab(ex.id); return ex; } }
   const id = seed?.id || uid();
@@ -188,7 +190,7 @@ async function newTab(seed?: Partial<OpenTab> & { libId?: string; runCmd?: strin
   renderTabs();
   // Reattach to a live shell if one exists (replays its real output); otherwise spawn a
   // fresh shell, seeded with the saved snapshot as scrollback (main handles ordering).
-  const { reattached, alt } = await relay.ptyCreate(id, cwd, term.cols || 80, term.rows || 24, seed?.scrollback, seed?.runCmd);
+  const { reattached, alt } = await relay.ptyCreate(id, cwd, term.cols || 80, term.rows || 24, seed?.scrollback, seed?.runCmd, seed?.dbCredId);
   // A reattached shell running a full-screen TUI (Claude Code, vim, top…) must show its LIVE terminal, not
   // the Blocks list — newTab reset liveInteractive to false, so restore it from the shell's real alt-screen
   // state. Without this, Blocks view hides the still-running agent after a workspace switch (Classic view is
@@ -1294,6 +1296,15 @@ function paletteActions(): PalAction[] {
 initPalette(paletteActions); // hand the registry to the palette module (open/close/render/keyboard)
 
 /* ----------------------------- settings ----------------------------- */
+// Load the pipeline-prompt editor: populate the stage-kind dropdown (once) + show the override (or built-in default) for the picked kind.
+function pbriefLoad(): void {
+  const sel = $('#pbriefKind') as HTMLSelectElement | null; const ta = $('#pbriefText') as HTMLTextAreaElement | null;
+  if (!sel || !ta) return;
+  if (!sel.options.length) sel.innerHTML = STAGE_KINDS.map((k) => `<option value="${k.kind}">${k.label}</option>`).join('');
+  const kind = sel.value as StageKind;
+  const ov = (state.settings.stageBriefs || {})[kind];
+  ta.value = (ov && ov.trim()) ? ov : kindSpec(kind).brief;
+}
 function reflectSettings() {
   ($('#setWs') as HTMLInputElement).value = state.settings.workspace || '';
   renderThemeGrid();
@@ -1304,6 +1315,7 @@ function reflectSettings() {
   ($('#notifyIssuesSet') as HTMLInputElement).checked = state.settings.issuePushNotify !== false;
   const edSel = $('#fileEditorSel') as HTMLSelectElement | null;
   if (edSel) { if (!edSel.options.length) edSel.innerHTML = EDITORS.map((ed) => `<option value="${ed.id}">${ed.label}</option>`).join(''); edSel.value = state.settings.fileEditor || DEFAULT_EDITOR; }
+  pbriefLoad();
   for (const p of ['anthropic', 'openai', 'google']) {
     const on = (state.settings.hasKey as any)[p];
     const s = $('#state' + p[0].toUpperCase() + p.slice(1));
@@ -1317,7 +1329,14 @@ function reflectSettings() {
     else { s.textContent = 'not set — will try your Claude login'; s.className = 'state off'; }
   }).catch(() => {});
 }
-function openSettings() { reflectSettings(); $('#settings').classList.add('show'); $('#scrim').classList.add('show'); }
+// Settings tabs — show one panel at a time (elements in hidden panels stay in the DOM, so all field wiring is
+// unaffected); reset the body scroll when switching so a tall panel doesn't inherit the previous one's offset.
+function selectSettingsTab(id: string): void {
+  document.querySelectorAll<HTMLElement>('#setTabs .set-tab').forEach((t) => t.classList.toggle('active', t.dataset.tab === id));
+  document.querySelectorAll<HTMLElement>('#settings .set-panel').forEach((p) => p.classList.toggle('active', p.dataset.panel === id));
+  const body = document.querySelector('#settings .modal-body') as HTMLElement | null; if (body) body.scrollTop = 0;
+}
+function openSettings() { reflectSettings(); selectSettingsTab('general'); $('#settings').classList.add('show'); $('#scrim').classList.add('show'); }
 function closeSettings() { $('#settings').classList.remove('show'); if (!$('#palette').classList.contains('show')) $('#scrim').classList.remove('show'); }
 
 /* ----------------------------- rename ----------------------------- */
@@ -1489,6 +1508,20 @@ document.querySelectorAll('[data-closeg]').forEach((b) => b.addEventListener('cl
 $('#blocksViewSet').addEventListener('change', async (e) => { state.settings = await relay.patchSettings({ blocksView: (e.target as HTMLInputElement).checked }); updateMainView(); });
 $('#notifySet').addEventListener('change', async (e) => { state.settings = await relay.patchSettings({ notifications: (e.target as HTMLInputElement).checked }); });
 $('#fileEditorSel').addEventListener('change', async (e) => { state.settings = await relay.patchSettings({ fileEditor: (e.target as HTMLSelectElement).value }); });
+// Pipeline stage prompts — edit the default brief per stage kind; blank / == built-in clears the override.
+$('#pbriefKind').addEventListener('change', pbriefLoad);
+$('#pbriefText').addEventListener('change', async () => {
+  const kind = ($('#pbriefKind') as HTMLSelectElement).value as StageKind;
+  const val = ($('#pbriefText') as HTMLTextAreaElement).value;
+  const map = { ...(state.settings.stageBriefs || {}) };
+  if (!val.trim() || val === kindSpec(kind).brief) delete map[kind]; else map[kind] = val;
+  state.settings = await relay.patchSettings({ stageBriefs: map });
+});
+$('#pbriefReset').addEventListener('click', async () => {
+  const kind = ($('#pbriefKind') as HTMLSelectElement).value as StageKind;
+  const map = { ...(state.settings.stageBriefs || {}) }; delete map[kind];
+  state.settings = await relay.patchSettings({ stageBriefs: map }); pbriefLoad(); toast('Reset to the built-in default', true);
+});
 $('#notifyIssuesSet').addEventListener('change', async (e) => { state.settings = await relay.patchSettings({ issuePushNotify: (e.target as HTMLInputElement).checked }); });
 $('#btnRevealLog').onclick = () => void relay.revealLog();
 // Report a bug: collect diagnostics (version/OS + scrubbed error-log tail), copy them, open a pre-filled issue.
@@ -1771,6 +1804,8 @@ $('#palList').addEventListener('click', (e) => { const it = (e.target as HTMLEle
 $('#btnSettings').onclick = openSettings;
 $('#winSettings').onclick = openSettings;
 $('#settingsClose').onclick = closeSettings;
+// Settings tab bar — delegate clicks to switch the visible panel.
+$('#setTabs').addEventListener('click', (e) => { const t = (e.target as HTMLElement).closest('.set-tab') as HTMLElement | null; if (t?.dataset.tab) selectSettingsTab(t.dataset.tab); });
 $('#cfOk').onclick = () => closeConfirm(true);
 $('#cfCancel').onclick = () => closeConfirm(false);
 $('#scrim').onclick = () => { closeConfirm(false); closeSettings(); closePalette(); };
@@ -1855,17 +1890,20 @@ new ResizeObserver(() => { clearTimeout(_roT); _roT = setTimeout(() => { fitPane
   initWorkspaces({ newTab, snapshotTabs, reconcilePanes, fitPanes, renderTabs, updateStatus, reflectModel, renderChat, updateMainView, reflectSettings, persistWorkspace, applyTheme, blocksMode, confirmDialog, shortCwd, sendCommand, renderLibrary, reloadIssues: () => { void loadIssues(); if (state.settings.sidebarView === 'prs') void loadPrs(); renderTasks(); renderBell(); }, pcmd: P_CMD });
   initIssues({
     // Assign → open a fresh terminal tab rooted in the issue's worktree, seeded to launch the agent.
-    openAgentTab: (o) => { void newTab({ cwd: o.cwd, name: o.name, runCmd: o.runCmd }); },
+    // dbCredId (optional) → main injects a referenced DB credential template into the run's env.
+    openAgentTab: (o) => { void newTab({ cwd: o.cwd, name: o.name, runCmd: o.runCmd, dbCredId: o.dbCredId }); },
     activeWsId: getActiveWsId, // Issues (tracked repos + active repo) are scoped per workspace
   });
   // PR rail — shares the Issues rail's active repo; clicking its repo chip jumps to Issues to change it.
   // openAgentTab powers PR review pipelines (an agent tab rooted in the PR's checked-out worktree).
-  initPrs({ activeWsId: getActiveWsId, focusIssues: () => switchSidebarView('issues'), openAgentTab: (o) => { void newTab({ cwd: o.cwd, name: o.name, runCmd: o.runCmd }); } });
+  initPrs({ activeWsId: getActiveWsId, focusIssues: () => switchSidebarView('issues'), openAgentTab: (o) => { void newTab({ cwd: o.cwd, name: o.name, runCmd: o.runCmd, dbCredId: o.dbCredId }); } });
   // Tasks rail — draft/validate a proposed issue, file it only if valid. Its own validate worktree + agent tab.
-  initTasks({ activeWsId: getActiveWsId, openAgentTab: (o) => { void newTab({ cwd: o.cwd, name: o.name, runCmd: o.runCmd }); } });
+  initTasks({ activeWsId: getActiveWsId, openAgentTab: (o) => { void newTab({ cwd: o.cwd, name: o.name, runCmd: o.runCmd, dbCredId: o.dbCredId }); } });
   if ((state.settings.sidebarView || 'library') === 'prs') void loadPrs(); // restore-on-boot when PR was the last view
   // Notifications — background poller (all workspaces) + the per-workspace header bell.
   initNotifications({ activeWsId: getActiveWsId });
+  // Database credential templates (Settings panel) — the encrypted list the assign dialogs reference.
+  initDbCreds();
   await loadWorkspaceMeta(); // load workspace defs + blueprints, mirror the active workspace's folder + theme into settings before first paint
   // Per-workspace Library migration: sessions saved before Libraries were per-workspace have no wsId.
   // Assign them to the (now-known) active workspace so they land in one Library instead of vanishing from
