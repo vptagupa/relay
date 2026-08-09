@@ -11,7 +11,7 @@ type BlockEvt = { type: 'start' | 'update' | 'end'; block: Block } | { type: 'cw
 // The only surface the renderer can touch. No Node, no fs, no API keys here.
 const api = {
   // --- terminals (real PTYs) ---
-  ptyCreate: (id: string, cwd: string, cols: number, rows: number, restore?: string, runCmd?: string): Promise<boolean> => ipcRenderer.invoke('pty:create', { id, cwd, cols, rows, restore, runCmd }),
+  ptyCreate: (id: string, cwd: string, cols: number, rows: number, restore?: string, runCmd?: string): Promise<{ reattached: boolean; alt: boolean }> => ipcRenderer.invoke('pty:create', { id, cwd, cols, rows, restore, runCmd }),
   ptyWrite: (id: string, data: string) => ipcRenderer.send('pty:write', { id, data }),
   ptyResize: (id: string, cols: number, rows: number) => ipcRenderer.send('pty:resize', { id, cols, rows }),
   ptyDetach: (id: string) => ipcRenderer.send('pty:detach', { id }),
@@ -62,29 +62,64 @@ const api = {
   saveWorkspaceSnapshot: (id: string, ws: Workspace) => ipcRenderer.send('workspace:save-snapshot', { id, ws }),
 
   // --- Issue Agent — multi-provider (GitHub / GitLab / Bitbucket) ---
-  // GitHub connects via OAuth device flow; GitLab/Bitbucket via a pasted read-token. All tokens are
-  // encrypted in the OS keychain in the main process — the renderer only ever sees { connected, login }.
-  githubDeviceStart: (): Promise<{ ok: boolean; userCode?: string; verificationUri?: string; deviceCode?: string; interval?: number; expiresIn?: number; error?: string }> => ipcRenderer.invoke('github:device-start'),
-  githubDevicePoll: (deviceCode: string): Promise<{ status: string; login?: string; interval?: number; error?: string }> => ipcRenderer.invoke('github:device-poll', { deviceCode }),
-  // Connection state for a provider (never the token).
-  providerAuthState: (provider: ProviderId): Promise<{ connected: boolean; login?: string }> => ipcRenderer.invoke('provider:auth-state', provider),
-  // Connect GitLab/Bitbucket with a pasted token (+ optional host for self-managed GitLab).
-  providerConnect: (provider: ProviderId, token: string, host?: string): Promise<{ ok: boolean; login?: string; error?: string }> => ipcRenderer.invoke('provider:connect', { provider, token, host }),
-  providerDisconnect: (provider: ProviderId): Promise<{ ok: boolean }> => ipcRenderer.invoke('provider:disconnect', provider),
+  // GitHub + Bitbucket connect via OAuth (device flow / in-browser loopback); GitLab via a pasted PAT. All
+  // tokens are encrypted in the OS keychain in the main process — the renderer only ever sees { connected, login }.
+  // Every provider call carries the active Slayer T workspace id `ws` — connections + creds are isolated per workspace.
+  githubDeviceStart: (ws: string): Promise<{ ok: boolean; userCode?: string; verificationUri?: string; deviceCode?: string; interval?: number; expiresIn?: number; error?: string }> => ipcRenderer.invoke('github:device-start', { ws }),
+  githubDevicePoll: (ws: string, deviceCode: string): Promise<{ status: string; login?: string; interval?: number; error?: string }> => ipcRenderer.invoke('github:device-poll', { ws, deviceCode }),
+  // Bitbucket connects via OAuth 2.0 authorization-code + loopback redirect (no device flow). One call runs
+  // the whole browser round trip in main and resolves when it finishes — the renderer just awaits it.
+  bitbucketOAuth: (ws: string): Promise<{ ok: boolean; login?: string; error?: string }> => ipcRenderer.invoke('bitbucket:oauth', { ws }),
+  // OAuth-app config (client id / secret used to START the login flow), per workspace. Get returns the public
+  // client id + a hasSecret flag (never the secret). Set stores them encrypted in the OS keychain.
+  providerOAuthConfigGet: (ws: string, provider: ProviderId): Promise<{ clientId: string; hasSecret: boolean; needsSecret: boolean; configured: boolean }> => ipcRenderer.invoke('provider:oauth-config-get', { ws, provider }),
+  providerOAuthConfigSet: (ws: string, provider: ProviderId, clientId: string, secret?: string): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke('provider:oauth-config-set', { ws, provider, clientId, secret }),
+  // Move the pre-scoping global secrets into a workspace once (renderer guards with a settings flag).
+  providerMigrateGlobal: (ws: string): Promise<{ ok: boolean }> => ipcRenderer.invoke('provider:migrate-global', { ws }),
+  // Connection state for a provider in a workspace (never the token).
+  providerAuthState: (ws: string, provider: ProviderId): Promise<{ connected: boolean; login?: string }> => ipcRenderer.invoke('provider:auth-state', { ws, provider }),
+  // Connect GitLab with a pasted token (+ optional host for self-managed GitLab), scoped to the workspace.
+  providerConnect: (ws: string, provider: ProviderId, token: string, host?: string): Promise<{ ok: boolean; login?: string; error?: string }> => ipcRenderer.invoke('provider:connect', { ws, provider, token, host }),
+  providerDisconnect: (ws: string, provider: ProviderId): Promise<{ ok: boolean }> => ipcRenderer.invoke('provider:disconnect', { ws, provider }),
   // Infer { provider, repo } from a folder's git `origin` remote (null if not a recognized provider remote).
   providerRepoFromRemote: (dir: string): Promise<{ provider: ProviderId; repo: string } | null> => ipcRenderer.invoke('provider:repo-from-remote', dir),
-  // Pull a repo's open issues (normalized) for the given provider.
-  providerIssues: (provider: ProviderId, repo: string): Promise<{ ok: boolean; issues?: Issue[]; error?: string }> => ipcRenderer.invoke('provider:issues', { provider, repo }),
-  // List the connected user's repos/projects for the Sources picker.
-  providerRepos: (provider: ProviderId): Promise<{ ok: boolean; repos?: { repo: string; desc: string; priv: boolean }[]; error?: string }> => ipcRenderer.invoke('provider:repos', provider),
-  // Open PRs/MRs for a repo — to link an assigned issue's branch to its PR (review → ship).
-  providerPrs: (provider: ProviderId, repo: string): Promise<{ ok: boolean; prs?: { number: number; branch: string; url: string; draft: boolean }[]; error?: string }> => ipcRenderer.invoke('provider:prs', { provider, repo }),
+  // Pull ONE page (100 GH/GL, 50 BB) of a repo's issues for infinite scroll; hasMore signals another page exists.
+  providerIssues: (ws: string, provider: ProviderId, repo: string, state: 'open' | 'closed' = 'open', page = 1): Promise<{ ok: boolean; issues?: Issue[]; hasMore?: boolean; error?: string }> => ipcRenderer.invoke('provider:issues', { ws, provider, repo, state, page }),
+  // List the connected user's repos/projects for the Sources picker (Bitbucket also needs workspace ids).
+  providerRepos: (ws: string, provider: ProviderId, workspaces?: string[]): Promise<{ ok: boolean; repos?: { repo: string; desc: string; priv: boolean }[]; error?: string }> => ipcRenderer.invoke('provider:repos', { ws, provider, workspaces }),
+  // PRs/MRs for a repo by state (default open, page 1) — links an issue's branch to its PR AND drives the PR rail.
+  providerPrs: (ws: string, provider: ProviderId, repo: string, state: 'open' | 'closed' = 'open', page = 1): Promise<{ ok: boolean; prs?: { number: number; branch: string; url: string; draft: boolean; title?: string; author?: string; state?: string; updatedAt?: number }[]; hasMore?: boolean; error?: string }> => ipcRenderer.invoke('provider:prs', { ws, provider, repo, state, page }),
+  // Full PR/MR (with body/labels/reviewers/base branch) — fetched on demand for the details hover.
+  providerPrDetail: (ws: string, provider: ProviderId, repo: string, number: number): Promise<{ ok: boolean; detail?: { number: number; title: string; body: string; state: string; draft: boolean; url: string; author?: string; sourceBranch: string; baseBranch: string; labels: string[]; reviewers: string[]; createdAt?: number; updatedAt?: number }; error?: string }> => ipcRenderer.invoke('provider:pr-detail', { ws, provider, repo, number }),
+  // Real-time notifications via a local webhook receiver: start/stop it, and subscribe to parsed issue/PR events.
+  webhookControl: (enabled: boolean, port: number, secret: string): Promise<{ ok: boolean; running: boolean; error?: string }> => ipcRenderer.invoke('webhook:control', { enabled, port, secret }),
+  webhookStatus: (): Promise<{ running: boolean }> => ipcRenderer.invoke('webhook:status'),
+  onWebhookEvent: (cb: (ev: { kind: string; provider: string; repo: string; number: number; title: string; url: string; actor?: string }) => void): void => { ipcRenderer.on('webhook:event', (_e, ev) => cb(ev)); },
+  // "Report a bug" diagnostics: app/OS versions + a scrubbed tail of the crash log; and reveal the log file.
+  collectDiagnostics: (): Promise<{ version: string; os: string; arch: string; electron: string; chrome: string; node: string; logTail: string }> => ipcRenderer.invoke('diag:collect'),
+  revealLog: (): Promise<{ ok: boolean }> => ipcRenderer.invoke('diag:reveal'),
   // Which coding agents are installed on PATH (for the Assign-to picker).
   agentsDetect: (): Promise<Record<string, boolean>> => ipcRenderer.invoke('agents:detect'),
   // Open a URL in the user's default browser (e.g. an issue on GitHub).
   openExternal: (url: string): Promise<void> => ipcRenderer.invoke('open:external', url),
   // Assign: create (or reuse) an isolated worktree for an issue and drop the edited brief inside it.
   worktreeAdd: (provider: ProviderId, repo: string, dir: string, number: number, brief: string): Promise<{ ok: boolean; path?: string; branch?: string; base?: string; reused?: boolean; briefRel?: string; error?: string }> => ipcRenderer.invoke('git:worktree-add', { provider, repo, dir, number, brief }),
+  // Review-assign a PR: create (or reuse) an isolated worktree with the PR's SOURCE branch checked out
+  // (fetches the PR head; `branch` = source branch, needed for Bitbucket which has no numbered PR ref).
+  prWorktreeAdd: (provider: ProviderId, repo: string, dir: string, number: number, branch: string, brief: string): Promise<{ ok: boolean; path?: string; branch?: string; reused?: boolean; briefRel?: string; error?: string }> => ipcRenderer.invoke('git:pr-worktree-add', { provider, repo, dir, number, branch, brief }),
+  // Link dependency repos into an issue worktree as read-only reference (checked out to their latest default under .deps/).
+  linkDeps: (wt: string, dir: string, deps: { provider: ProviderId; repo: string }[]): Promise<{ ok: boolean; linked?: { name: string; repo: string }[]; error?: string }> => ipcRenderer.invoke('git:link-deps', { wt, dir, deps }),
+  // Tasks: a validate-only worktree (branch task-<id> off the latest default) + filing a validated task as a real issue.
+  taskWorktreeAdd: (provider: ProviderId, repo: string, dir: string, id: string, brief: string): Promise<{ ok: boolean; path?: string; branch?: string; reused?: boolean; briefRel?: string; error?: string }> => ipcRenderer.invoke('git:task-worktree-add', { provider, repo, dir, id, brief }),
+  providerCreateIssue: (ws: string, provider: ProviderId, repo: string, title: string, body: string): Promise<{ ok: boolean; number?: number; url?: string; error?: string }> => ipcRenderer.invoke('provider:create-issue', { ws, provider, repo, title, body }),
+  providerIssueState: (ws: string, provider: ProviderId, repo: string, number: number): Promise<{ ok: boolean; state?: 'open' | 'closed'; error?: string }> => ipcRenderer.invoke('provider:issue-state', { ws, provider, repo, number }),
+
+  // --- issue pipelines (staged agent runs) ---
+  // Prep a stage before launch: write its brief file into the worktree's .slayer/ (skip for stage 0 —
+  // worktree-add already wrote it) and clear this stage's stale verdict so a re-run starts clean.
+  pipelinePrep: (wt: string, briefRel: string | null, brief: string | null, stage: number): Promise<{ ok: boolean }> => ipcRenderer.invoke('pipeline:prep', { wt, briefRel: briefRel || undefined, brief: brief || undefined, stage }),
+  // Poll a gate stage's verdict — { found:false } until the agent has written { passed, summary }.
+  pipelineVerdict: (wt: string, stage: number): Promise<{ found: boolean; passed?: boolean; summary?: string }> => ipcRenderer.invoke('pipeline:verdict', { wt, stage }),
 
   // --- workspace blueprints (reusable "Templates") ---
   getBlueprints: (): Promise<WorkspaceBlueprint[]> => ipcRenderer.invoke('blueprints:get'),
@@ -99,7 +134,9 @@ const api = {
 
   // --- file browser ---
   fsList: (dir: string): Promise<{ path: string; parent: string; entries: { name: string; isDir: boolean }[]; truncated?: boolean; error?: string }> => ipcRenderer.invoke('fs:list', dir),
-  fsOpen: (p: string): Promise<{ method: 'vscode' | 'default' | 'error'; error?: string }> => ipcRenderer.invoke('fs:open', p),
+  fsOpen: (p: string): Promise<{ method: 'editor' | 'default' | 'error'; editor?: string; error?: string }> => ipcRenderer.invoke('fs:open', p),
+  // Open a path a terminal printed, resolved against the tab's cwd (for clickable file-path links). No-op if it's not a real file.
+  revealPath: (cwd: string, target: string): Promise<{ ok: boolean; method?: string }> => ipcRenderer.invoke('fs:open-rel', { cwd, target }),
 
   // --- agent ---
   agentSend: (payload: { model: string; history: ChatTurn[]; userMessage: string }): Promise<void> =>
@@ -129,8 +166,9 @@ const api = {
     return () => ipcRenderer.off('win:state', h);
   },
 
-  // Write text to the OS clipboard via Electron (no focus / user-gesture requirement, unlike navigator.clipboard).
+  // Read/write the OS clipboard via Electron (no focus / user-gesture requirement, unlike navigator.clipboard).
   copyText: (text: string): void => clipboard.writeText(text),
+  readText: (): string => clipboard.readText(),
 
   // --- slayert:// deeplinks (main → renderer) ---
   onDeeplink: (cb: (intent: { kind: string; name: string }) => void) => {

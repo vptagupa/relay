@@ -1,5 +1,5 @@
 import '@xterm/xterm/css/xterm.css';
-import { Terminal } from '@xterm/xterm';
+import { Terminal, type ILink } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { SerializeAddon } from '@xterm/addon-serialize';
 import { MODELS, modelById } from './shared/models';
@@ -20,8 +20,12 @@ import { initFiles, renderFiles } from './files';
 import { initBlockView, blockHtml, bvBlockHtml, collapsedBlocks, fmtDur } from './block-view';
 import { openTplMenu, saveAsTemplate, runStartupIfPending } from './blueprints';
 import { initWorkspaces, loadWorkspaceMeta, restoreWorkspaceSnapshot, settleDeeplink, createWorkspace, openWsMenu, closeWsMenu, handleDeeplink, setActiveWsRoot, setActiveWsTheme, getActiveWsId, duplicateWorkspace, exportWorkspace, importWorkspace, toggleTrust, copyWorkspaceLink, activeWorkspaceDef, isWorkspaceTrusted } from './workspaces';
-import { initIssues, pullIssues } from './issues';
+import { initIssues, pullIssues, loadIssues } from './issues';
+import { initPrs, loadPrs } from './prs';
+import { initTasks, renderTasks } from './tasks';
+import { initNotifications, renderBell } from './notifications';
 import type { Settings, SavedSession, AgentEvent, ApprovalRequest, ChatTurn, OpenTab, Workspace, WorkspaceDef, Block, Bookmark, BookmarkGroup } from './shared/types';
+import { EDITORS, DEFAULT_EDITOR } from './shared/editors';
 
 // TEMP DIAG: surface full stacks (minify is off) for the init crash.
 window.addEventListener('error', (e) => console.error('WERR ' + ((e as ErrorEvent).error?.stack || (e as ErrorEvent).message)));
@@ -86,6 +90,40 @@ initBlockView(relay.sys as { user: string; host: string; home: string } | undefi
 function baseName(p: string): string { const s = p.replace(/[\\/]+$/, ''); const i = Math.max(s.lastIndexOf('\\'), s.lastIndexOf('/')); return (i >= 0 ? s.slice(i + 1) : s) || s; }
 
 /* ----------------------------- terminals ----------------------------- */
+// Make URLs and file paths the terminal prints clickable: a URL opens in the browser; a path opens the
+// file (resolved against the tab's cwd) in the editor/OS. Uses xterm's built-in registerLinkProvider +
+// OSC-8 linkHandler — no extra addon. Detection is per buffer line, so a link wrapped across rows isn't
+// matched (rare in a wide terminal). Non-file "paths" are guarded in main (existence check) — a stray
+// match just no-ops on click.
+const URL_RE = /\bhttps?:\/\/[^\s"'`<>()[\]{}|]+/g;
+const PATH_RE = /(?:(?:[A-Za-z]:[\\/]|~[\\/]|\.{1,2}[\\/]|[\\/])[\w.@+~-]+(?:[\\/][\w.@+~-]+)*|[\w.@+~-]+(?:[\\/][\w.@+~-]+)+)(?::\d+(?::\d+)?)?/g;
+const trimTrail = (s: string) => s.replace(/[).,;!?'"\]}]+$/, ''); // drop trailing punctuation but keep a :line suffix
+function wireTermLinks(term: Terminal, tab: Tab): void {
+  const openTarget = (uri: string) => { if (/^https?:\/\//i.test(uri)) relay.openExternal(uri); else void relay.revealPath(tab.cwd || '', uri.replace(/^file:\/\//i, '')); };
+  term.options.linkHandler = { activate: (_e, uri) => openTarget(uri), allowNonHttpProtocols: true }; // OSC-8 hyperlinks
+  term.registerLinkProvider({
+    provideLinks(y, callback) {
+      const bl = term.buffer.active.getLine(y - 1);
+      if (!bl) { callback(undefined); return; }
+      const text = bl.translateToString(false);
+      const links: ILink[] = [];
+      const spans: [number, number][] = [];
+      const push = (re: RegExp, activate: (t: string) => void) => {
+        re.lastIndex = 0;
+        for (let m = re.exec(text); m; m = re.exec(text)) {
+          const clean = trimTrail(m[0]); if (!clean) continue;
+          const s = m.index, e = s + clean.length;
+          if (spans.some(([a, b]) => s < b && e > a)) continue; // don't double-link (a URL's path etc.)
+          spans.push([s, e]);
+          links.push({ range: { start: { x: s + 1, y }, end: { x: e, y } }, text: clean, activate: (_ev, t) => activate(t) });
+        }
+      };
+      push(URL_RE, (t) => relay.openExternal(t));
+      push(PATH_RE, (t) => { void relay.revealPath(tab.cwd || '', t); });
+      callback(links.length ? links : undefined);
+    },
+  });
+}
 async function newTab(seed?: Partial<OpenTab> & { libId?: string; runCmd?: string }, activate = true): Promise<Tab> {
   // Don't open the same terminal twice — switch to it instead.
   if (seed?.id) { const ex = state.tabs.find((t) => t.id === seed.id); if (ex) { if (activate) switchTab(ex.id); return ex; } }
@@ -104,7 +142,18 @@ async function newTab(seed?: Partial<OpenTab> & { libId?: string; runCmd?: strin
   const tab: Tab = { id, name: seed?.name || (n > 1 ? `terminal ${n}` : 'terminal'), model: seed?.model || state.settings.defaultModel, cwd, libId: seed?.libId, term, fit, ser, el, tabBg: seed?.tabBg, tabFg: seed?.tabFg, bodyBg: seed?.bodyBg, bodyFg: seed?.bodyFg, chat: seed?.chat ? [...seed.chat] : [], blocks: seed?.blocks ? [...seed.blocks] : [], bkNonce: seed?.bkNonce || uid(), cmdHistory: [], histIdx: 0, liveInteractive: false, group };
   state.tabs.push(tab);
   applyTermColors(tab); // honor any restored per-terminal body/text colors
+  wireTermLinks(term, tab); // clickable URLs + file paths in the terminal
   term.onData((d) => relay.ptyWrite(id, d));
+  // Right-click in the terminal PASTES the clipboard (classic terminal paste). It's unconditional — NOT
+  // "copy if there's a selection", which would overwrite the clipboard when you meant to paste. Copy is
+  // handled by the selection pill and Ctrl+Shift+C. term.paste() routes through xterm so bracketed-paste
+  // works for TUIs (Claude Code, vim). Reads the Electron clipboard (relay.readText) — navigator.clipboard
+  // needs focus/permission and fails silently in the terminal, which is why right-click paste "didn't work".
+  el.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    const text = relay.readText();
+    if (text) { term.focus(); term.paste(text); }
+  });
   // Shift+Enter → send a literal newline so multiline TUIs (e.g. Claude Code) insert a line instead
   // of submitting; xterm otherwise emits the same \r as plain Enter. Plain Enter is unchanged.
   term.attachCustomKeyEventHandler((e) => {
@@ -139,7 +188,12 @@ async function newTab(seed?: Partial<OpenTab> & { libId?: string; runCmd?: strin
   renderTabs();
   // Reattach to a live shell if one exists (replays its real output); otherwise spawn a
   // fresh shell, seeded with the saved snapshot as scrollback (main handles ordering).
-  const reattached = await relay.ptyCreate(id, cwd, term.cols || 80, term.rows || 24, seed?.scrollback, seed?.runCmd);
+  const { reattached, alt } = await relay.ptyCreate(id, cwd, term.cols || 80, term.rows || 24, seed?.scrollback, seed?.runCmd);
+  // A reattached shell running a full-screen TUI (Claude Code, vim, top…) must show its LIVE terminal, not
+  // the Blocks list — newTab reset liveInteractive to false, so restore it from the shell's real alt-screen
+  // state. Without this, Blocks view hides the still-running agent after a workspace switch (Classic view is
+  // unaffected). The follow-up updateMainView (switchTab, or the caller's post-restore call) reflects it.
+  if (alt) tab.liveInteractive = true;
   // A restored tab whose shell was NOT reattached (cold restart) gets a fresh block-id namespace so the
   // new shell's blocks can't collide with the restored ones. A reattached (keep-alive) shell keeps the
   // saved nonce, so its continuing/flushed block ids line up with the restored blocks.
@@ -376,9 +430,10 @@ function tabHtml(t: Tab): string {
   const fgStyle = t.tabFg ? ` style="color:${t.tabFg}"` : '';
   const activeInGroup = t.id === state.gv[t.group]; // the visible tab of its own group
   const running = runningTabs.has(t.id) ? ' running' : '';
+  // VS Code-style: while a tab is producing live output, the close slot shows a dot (reverts to ✕ on hover).
   return `<div class="tab ${activeInGroup ? 'active' : ''}${(t.tabBg || t.tabFg) ? ' colored' : ''}${running}" draggable="true" data-tab="${t.id}" title="${esc(t.name)} · ${esc(modelById(t.model).short)}"${style}>
-      <span class="tab-glyph"${fgStyle}>${svgIcon('i-term', 13)}<i class="tab-live" title="Running — live output"></i></span><span class="tab-name" data-rename="${t.id}">${esc(t.name)}</span>
-      <span class="tab-close" data-close="${t.id}">✕</span>
+      <span class="tab-glyph"${fgStyle}>${svgIcon('i-term', 13)}</span><span class="tab-name" data-rename="${t.id}">${esc(t.name)}</span>
+      <span class="tab-close" data-close="${t.id}" title="Close"><i class="tab-live" title="Running — live output"></i><span class="tab-x">✕</span></span>
     </div>`;
 }
 /* ---- per-tab "running" indicator: a live green pulse while a tab's terminal is producing output ---- */
@@ -579,11 +634,13 @@ async function toggleAutosave() {
 }
 
 /* ----------------------------- library ----------------------------- */
-// Pure sort lives in ./library; this reads the current list + mode from state.
-const sortedLibrary = (): SavedSession[] => sortSessions(state.library, state.settings.librarySort);
+// The Library is per-workspace: each session belongs to the workspace it was saved in, and the list
+// shows only the active workspace's sessions. Pure sort lives in ./library; this reads state + mode.
+const wsLibrary = (): SavedSession[] => state.library.filter((s) => s.wsId === getActiveWsId());
+const sortedLibrary = (): SavedSession[] => sortSessions(wsLibrary(), state.settings.librarySort);
 function renderLibrary() {
   const el = $('#libList');
-  if (!state.library.length) { el.innerHTML = '<div class="lib-empty">No saved terminals yet.<br>Open one and press ⤓ Save.</div>'; return; }
+  if (!wsLibrary().length) { el.innerHTML = '<div class="lib-empty">No saved terminals in this workspace yet.<br>Open one and press ⤓ Save.</div>'; return; }
   el.innerHTML = sortedLibrary().map((s) => `
     <div class="lib-item" draggable="true" data-open="${s.id}">
       <div class="lib-row"><span class="lib-ic">${svgIcon('i-term', 14)}</span><span class="lib-name" data-libname="${s.id}">${esc(s.name)}</span>
@@ -598,7 +655,7 @@ async function saveActive() {
   const libId = t.libId || state.library.find((s) => s.termId === t.id)?.id || uid();
   const prev = state.library.find((s) => s.id === libId);
   t.libId = libId;
-  const rec: SavedSession = { id: libId, termId: t.id, name: t.name, cwd: t.cwd, model: t.model, scrollback: t.ser.serialize({ scrollback: 800 }), tabBg: t.tabBg, tabFg: t.tabFg, bodyBg: t.bodyBg, bodyFg: t.bodyFg, chat: t.chat.slice(-100), blocks: slimBlocks(t.blocks), createdAt: prev?.createdAt ?? Date.now(), lastUsed: Date.now() };
+  const rec: SavedSession = { id: libId, termId: t.id, wsId: prev?.wsId || getActiveWsId(), name: t.name, cwd: t.cwd, model: t.model, scrollback: t.ser.serialize({ scrollback: 800 }), tabBg: t.tabBg, tabFg: t.tabFg, bodyBg: t.bodyBg, bodyFg: t.bodyFg, chat: t.chat.slice(-100), blocks: slimBlocks(t.blocks), createdAt: prev?.createdAt ?? Date.now(), lastUsed: Date.now() };
   state.library = await relay.upsertSession(rec);
   renderLibrary(); persistWorkspace(); toast(prev ? `Updated "${t.name}"` : `Saved "${t.name}"`, true);
 }
@@ -613,7 +670,7 @@ function flushTabToLibrary(t: Tab) {
   const libId = t.libId || state.library.find((s) => s.termId === t.id)?.id;
   if (!libId) return; // not a saved terminal — it isn't listed in the Library, so nothing to restore
   const prev = state.library.find((s) => s.id === libId);
-  const rec: SavedSession = { id: libId, termId: t.id, name: t.name, cwd: t.cwd, model: t.model, scrollback: t.ser.serialize({ scrollback: 800 }), tabBg: t.tabBg, tabFg: t.tabFg, bodyBg: t.bodyBg, bodyFg: t.bodyFg, chat: t.chat.slice(-100), blocks: slimBlocks(t.blocks), createdAt: prev?.createdAt ?? Date.now(), lastUsed: Date.now() };
+  const rec: SavedSession = { id: libId, termId: t.id, wsId: prev?.wsId || getActiveWsId(), name: t.name, cwd: t.cwd, model: t.model, scrollback: t.ser.serialize({ scrollback: 800 }), tabBg: t.tabBg, tabFg: t.tabFg, bodyBg: t.bodyBg, bodyFg: t.bodyFg, chat: t.chat.slice(-100), blocks: slimBlocks(t.blocks), createdAt: prev?.createdAt ?? Date.now(), lastUsed: Date.now() };
   const idx = state.library.findIndex((s) => s.id === libId);
   if (idx >= 0) state.library[idx] = rec; else state.library.push(rec);
   relay.upsertSession(rec).then((lib: SavedSession[]) => { state.library = lib; renderLibrary(); }).catch(() => {});
@@ -687,12 +744,14 @@ function applySplit() { /* no-op (kept: still called on boot + sidebar resize) *
 // Which sidebar panel (Files / Library / Issues) the rail has active.
 function applySidebarView() {
   const v = state.settings.sidebarView || 'library';
-  const map: Record<string, string> = { library: '#viewLibrary', files: '#viewFiles', issues: '#viewIssues' };
+  const map: Record<string, string> = { library: '#viewLibrary', files: '#viewFiles', issues: '#viewIssues', prs: '#viewPRs', tasks: '#viewTasks' };
   for (const [name, id] of Object.entries(map)) (document.querySelector(id) as HTMLElement | null)?.classList.toggle('active', name === v);
   document.querySelectorAll<HTMLElement>('.rail-btn[data-view]').forEach((b) => b.classList.toggle('on', b.dataset.view === v));
 }
-function switchSidebarView(v: 'library' | 'files' | 'issues') {
+function switchSidebarView(v: 'library' | 'files' | 'issues' | 'prs' | 'tasks') {
   state.settings.sidebarView = v; applySidebarView(); void relay.patchSettings({ sidebarView: v });
+  if (v === 'prs') void loadPrs();   // load-on-show — PRs refresh whenever the rail is opened
+  if (v === 'tasks') renderTasks();
 }
 function applySidebarWidth() { ($('#main') as HTMLElement).style.setProperty('--sidebar-w', (state.settings.sidebarWidth || 260) + 'px'); }
 async function toggleToolbar() { state.settings = await relay.patchSettings({ toolbarShown: !state.settings.toolbarShown }); applyToolbar(); }
@@ -985,7 +1044,13 @@ function updatePaneView(g: number) {
     // (Claude Code, vim, top) redraws to the exact size (its bottom line isn't clipped).
     requestAnimationFrame(() => {
       t.fit.fit();
-      if (t.term.cols > 0) { t.lastCols = t.term.cols; t.lastRows = t.term.rows; relay.ptyResize(t.id, t.term.cols, t.term.rows); }
+      if (t.term.cols > 0) {
+        // First time this (reattached) tab is actually VISIBLE: flush the output buffered while it had no
+        // measured size — otherwise a full-screen app reattached after a workspace switch shows a blank
+        // frame here even though its shell is alive (this was the "Blocks view shows nothing" bug).
+        if (!t.fitted) { t.fitted = true; if (t.replayQ) { t.term.write(t.replayQ); t.replayQ = undefined; } }
+        t.lastCols = t.term.cols; t.lastRows = t.term.rows; relay.ptyResize(t.id, t.term.cols, t.term.rows);
+      }
       if (g === state.focus) { t.term.focus(); t.term.scrollToBottom(); }
     });
   }
@@ -1223,7 +1288,7 @@ function paletteActions(): PalAction[] {
     { g: 'Window', t: 'Close window', run: () => relay.winClose() },
   ];
   const models: PalAction[] = MODELS.map((m) => ({ g: 'Model · this terminal', t: `${m.name}${m.id === ((activeTab()?.model) || state.settings.defaultModel) ? '  (current)' : ''}`, run: () => setModel(m.id) }));
-  const lib: PalAction[] = state.library.map((s) => ({ g: 'Open from Library', t: `${s.name}  ·  ${modelById(s.model).short}`, run: () => openSession(s) }));
+  const lib: PalAction[] = wsLibrary().map((s) => ({ g: 'Open from Library', t: `${s.name}  ·  ${modelById(s.model).short}`, run: () => openSession(s) }));
   return base.concat(models, lib);
 }
 initPalette(paletteActions); // hand the registry to the palette module (open/close/render/keyboard)
@@ -1236,6 +1301,9 @@ function reflectSettings() {
   ($('#shellIntegration') as HTMLInputElement).checked = state.settings.shellIntegration;
   ($('#blocksViewSet') as HTMLInputElement).checked = state.settings.blocksView;
   ($('#notifySet') as HTMLInputElement).checked = state.settings.notifications;
+  ($('#notifyIssuesSet') as HTMLInputElement).checked = state.settings.issuePushNotify !== false;
+  const edSel = $('#fileEditorSel') as HTMLSelectElement | null;
+  if (edSel) { if (!edSel.options.length) edSel.innerHTML = EDITORS.map((ed) => `<option value="${ed.id}">${ed.label}</option>`).join(''); edSel.value = state.settings.fileEditor || DEFAULT_EDITOR; }
   for (const p of ['anthropic', 'openai', 'google']) {
     const on = (state.settings.hasKey as any)[p];
     const s = $('#state' + p[0].toUpperCase() + p.slice(1));
@@ -1420,6 +1488,23 @@ for (let g = 0; g < 4; g++) {
 document.querySelectorAll('[data-closeg]').forEach((b) => b.addEventListener('click', (e) => { e.stopPropagation(); closeGroup(+(b as HTMLElement).dataset.closeg!); }));
 $('#blocksViewSet').addEventListener('change', async (e) => { state.settings = await relay.patchSettings({ blocksView: (e.target as HTMLInputElement).checked }); updateMainView(); });
 $('#notifySet').addEventListener('change', async (e) => { state.settings = await relay.patchSettings({ notifications: (e.target as HTMLInputElement).checked }); });
+$('#fileEditorSel').addEventListener('change', async (e) => { state.settings = await relay.patchSettings({ fileEditor: (e.target as HTMLSelectElement).value }); });
+$('#notifyIssuesSet').addEventListener('change', async (e) => { state.settings = await relay.patchSettings({ issuePushNotify: (e.target as HTMLInputElement).checked }); });
+$('#btnRevealLog').onclick = () => void relay.revealLog();
+// Report a bug: collect diagnostics (version/OS + scrubbed error-log tail), copy them, open a pre-filled issue.
+$('#btnReportBug').onclick = async () => {
+  const btn = $('#btnReportBug') as HTMLButtonElement; const orig = btn.textContent;
+  btn.disabled = true; btn.textContent = 'Collecting…';
+  const d = await relay.collectDiagnostics().catch(() => null);
+  btn.disabled = false;
+  if (!d) { btn.textContent = 'Failed — use Reveal log'; setTimeout(() => { btn.textContent = orig; }, 2500); return; }
+  const env = `Slayer T ${d.version} · ${d.os} (${d.arch}) · Electron ${d.electron} / Chrome ${d.chrome} / Node ${d.node}`;
+  const full = `${env}\n\n--- recent error log (secrets scrubbed) ---\n${d.logTail || '(no errors logged)'}`;
+  try { relay.copyText(full); } catch { /* clipboard unavailable */ }
+  const body = `## What happened\n\n\n## Steps to reproduce\n\n\n## Environment\n${env}\n\n## Diagnostics\n<!-- Paste the diagnostics from your clipboard (they include the recent error log). -->\n`;
+  relay.openExternal(`https://github.com/vptagupa/relay/issues/new?title=${encodeURIComponent('Bug: ')}&body=${encodeURIComponent(body)}`);
+  btn.textContent = 'Copied ✓ — opening issue'; setTimeout(() => { btn.textContent = orig; }, 3000);
+};
 $('#btnSave').onclick = saveActive;
 $('#btnClear').onclick = clearActive;
 $('#btnSidebar').onclick = toggleSidebar;
@@ -1619,7 +1704,7 @@ $('#libList').addEventListener('dragend', endLibDrag);
 function r(el: HTMLElement) { return el.getBoundingClientRect(); }
 
 // rail: New (new terminal) · Files/Library/Issues (switch the active panel) · Agent (open agent panel)
-document.querySelectorAll<HTMLElement>('.rail-btn[data-view]').forEach((b) => { b.onclick = () => switchSidebarView(b.dataset.view as 'library' | 'files' | 'issues'); });
+document.querySelectorAll<HTMLElement>('.rail-btn[data-view]').forEach((b) => { b.onclick = () => switchSidebarView(b.dataset.view as 'library' | 'files' | 'issues' | 'prs' | 'tasks'); });
 (document.querySelector('.rail-btn[data-act="new"]') as HTMLElement | null)?.addEventListener('click', () => void newTab());
 (document.querySelector('.rail-btn[data-act="agent"]') as HTMLElement | null)?.addEventListener('click', () => openAgent());
 
@@ -1684,6 +1769,7 @@ $('#palList').addEventListener('click', (e) => { const it = (e.target as HTMLEle
 
 // settings
 $('#btnSettings').onclick = openSettings;
+$('#winSettings').onclick = openSettings;
 $('#settingsClose').onclick = closeSettings;
 $('#cfOk').onclick = () => closeConfirm(true);
 $('#cfCancel').onclick = () => closeConfirm(false);
@@ -1766,12 +1852,40 @@ new ResizeObserver(() => { clearTimeout(_roT); _roT = setTimeout(() => { fitPane
 (async function boot() {
   state.settings = await relay.getSettings();
   state.library = await relay.listSessions();
-  initWorkspaces({ newTab, snapshotTabs, reconcilePanes, fitPanes, renderTabs, updateStatus, reflectModel, renderChat, updateMainView, reflectSettings, persistWorkspace, applyTheme, blocksMode, confirmDialog, shortCwd, sendCommand, pcmd: P_CMD });
+  initWorkspaces({ newTab, snapshotTabs, reconcilePanes, fitPanes, renderTabs, updateStatus, reflectModel, renderChat, updateMainView, reflectSettings, persistWorkspace, applyTheme, blocksMode, confirmDialog, shortCwd, sendCommand, renderLibrary, reloadIssues: () => { void loadIssues(); if (state.settings.sidebarView === 'prs') void loadPrs(); renderTasks(); renderBell(); }, pcmd: P_CMD });
   initIssues({
     // Assign → open a fresh terminal tab rooted in the issue's worktree, seeded to launch the agent.
     openAgentTab: (o) => { void newTab({ cwd: o.cwd, name: o.name, runCmd: o.runCmd }); },
+    activeWsId: getActiveWsId, // Issues (tracked repos + active repo) are scoped per workspace
   });
+  // PR rail — shares the Issues rail's active repo; clicking its repo chip jumps to Issues to change it.
+  // openAgentTab powers PR review pipelines (an agent tab rooted in the PR's checked-out worktree).
+  initPrs({ activeWsId: getActiveWsId, focusIssues: () => switchSidebarView('issues'), openAgentTab: (o) => { void newTab({ cwd: o.cwd, name: o.name, runCmd: o.runCmd }); } });
+  // Tasks rail — draft/validate a proposed issue, file it only if valid. Its own validate worktree + agent tab.
+  initTasks({ activeWsId: getActiveWsId, openAgentTab: (o) => { void newTab({ cwd: o.cwd, name: o.name, runCmd: o.runCmd }); } });
+  if ((state.settings.sidebarView || 'library') === 'prs') void loadPrs(); // restore-on-boot when PR was the last view
+  // Notifications — background poller (all workspaces) + the per-workspace header bell.
+  initNotifications({ activeWsId: getActiveWsId });
   await loadWorkspaceMeta(); // load workspace defs + blueprints, mirror the active workspace's folder + theme into settings before first paint
+  // Per-workspace Library migration: sessions saved before Libraries were per-workspace have no wsId.
+  // Assign them to the (now-known) active workspace so they land in one Library instead of vanishing from
+  // every filtered view. Stamp in memory immediately (so the first render is correct); persist in the background.
+  const legacyWs = getActiveWsId();
+  const orphans = state.library.filter((s) => !s.wsId);
+  if (orphans.length && legacyWs) {
+    for (const s of orphans) s.wsId = legacyWs;
+    void (async () => { for (const s of orphans) { try { await relay.upsertSession(s); } catch { /* best-effort persist */ } } })();
+  }
+  // Per-workspace Issues migration: earlier builds kept ONE global tracked list + active repo. Seed them
+  // into the active workspace (normalizing legacy bare "owner/name" ids to "github:owner/name") so this
+  // workspace keeps its repos and others start fresh. Runs once — subsequent picks write the per-ws maps.
+  if (legacyWs && !state.settings.issueRepoByWs && !state.settings.issueReposByWs && (state.settings.issueRepo || (state.settings.issueRepos || []).length)) {
+    const norm = (id: string) => (!id ? id : /^(github|gitlab|bitbucket):/.test(id) ? id : `github:${id}`);
+    state.settings = await relay.patchSettings({
+      issueRepoByWs: { [legacyWs]: norm(state.settings.issueRepo || '') },
+      issueReposByWs: { [legacyWs]: (state.settings.issueRepos || []).map(norm) },
+    });
+  }
   ($('#libSort') as HTMLSelectElement).value = state.settings.librarySort || 'recent';
   applyTheme(); applySidebarWidth(); applySidebar(); applyToolbar(); applySplit(); applySidebarView(); reflectAutosave(); renderLibrary(); updateStatus(); reflectModel(); reflectSettings();
   ($('#storeText') as HTMLElement).textContent = 'Saved on this machine';

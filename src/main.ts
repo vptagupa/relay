@@ -1,17 +1,20 @@
 import { app, BrowserWindow, ipcMain, dialog, Menu, shell } from 'electron';
 import path from 'node:path';
 import os from 'node:os';
-import { promises as fsp, appendFileSync, existsSync } from 'node:fs';
+import { promises as fsp, appendFileSync, existsSync, mkdirSync, copyFileSync, renameSync } from 'node:fs';
 import { exec, execFile } from 'node:child_process';
-import { createHash } from 'node:crypto';
-import { httpsReq, PROVIDERS, providerOf, providerFromRemote, type ProviderId } from './providers';
-import { createTerm, writeTerm, resizeTerm, detachTerm, killTerm, killAll } from './pty';
+import http from 'node:http';
+import { createHash, randomBytes } from 'node:crypto';
+import { httpsReq, PROVIDERS, providerOf, providerFromRemote, bitbucketExchangeCode, bitbucketAuthorizeUrl, bbOAuthConfigured, BB_OAUTH_PORT, BB_REDIRECT_URI, getOAuthApp, setOAuthApp, githubClientId, migrateGlobalSecretsToWs, type ProviderId } from './providers';
+import { createTerm, writeTerm, resizeTerm, detachTerm, killTerm, killAll, isAltScreen } from './pty';
+import { startWebhookServer, stopWebhookServer, webhookRunning } from './webhooks';
 import * as store from './store';
 import * as keys from './keys';
 import { runAgent } from './agent/agent';
 import squirrelStartup from 'electron-squirrel-startup';
 import type { ApprovalRequest, ChatTurn } from './shared/types';
 import type { Provider } from './shared/models';
+import { editorCmd, editorLabel } from './shared/editors';
 
 // On Windows, the Squirrel installer/uninstaller launches the app with a --squirrel-* arg
 // to do shortcut bookkeeping. On ANY such run the app must quit immediately and NEVER boot
@@ -24,13 +27,44 @@ const SQUIRREL_EVENTS = ['--squirrel-install', '--squirrel-updated', '--squirrel
 const isSquirrel = squirrelStartup || process.argv.some((a) => SQUIRREL_EVENTS.includes(a));
 if (isSquirrel) app.quit();
 
+// --- Rebrand: move the data directory from the legacy "Relay" name to "SlayerT" ------------------
+// Older builds kept everything under %APPDATA%\Relay (the app's old productName). Point userData at
+// %APPDATA%\SlayerT and, on the first run of the rebranded build, copy the important files across so
+// nothing is orphaned (relay-error.log carries over as slayert-error.log). Non-destructive: the old
+// dir is left in place as a backup. Only 5 small config files are copied — the worktrees/ and repos/
+// caches are NOT: existing git worktrees keep working (they're registered by absolute path under the old
+// Relay dir, which remains), but the managed clone cache re-populates under the new dir on next use (old
+// clones become dead disk — regenerable, not a correctness issue). MUST run before any module reads
+// app.getPath('userData'). Skipped on a Squirrel (un)install run — that path already called app.quit()
+// and must do NOTHING else (no file I/O that could delay the quit and keep the exe locked, failing the
+// install). NOTE: package.json productName stays "Relay" ON PURPOSE — safeStorage's master key is scoped
+// to the app identity, so renaming it would make the migrated keys.json undecryptable (tokens lost).
+if (!isSquirrel) try {
+  const appData = app.getPath('appData');                 // %APPDATA% (Roaming)
+  const newDir = path.join(appData, 'SlayerT');
+  const oldDir = path.join(appData, 'Relay');
+  const fresh = !existsSync(path.join(newDir, 'slayert.json')) && !existsSync(path.join(newDir, 'relay.json'));
+  if (fresh && existsSync(oldDir)) {
+    mkdirSync(newDir, { recursive: true });
+    for (const f of ['slayert.json', 'relay.json', 'workspace.json', 'keys.json', 'relay-error.log']) {
+      const src = path.join(oldDir, f);
+      const dst = path.join(newDir, f === 'relay-error.log' ? 'slayert-error.log' : f);
+      // Copy atomically (temp + rename) so an interrupted first run can't leave a TRUNCATED dst — that
+      // would make `fresh` false next boot (dst exists) and permanently skip the re-copy, stranding the
+      // good data in the old dir. A rename is atomic on the same volume; a leftover .migrating is ignored.
+      if (existsSync(src)) { try { const tmp = dst + '.migrating'; copyFileSync(src, tmp); renameSync(tmp, dst); } catch { /* skip a locked/odd file */ } }
+    }
+  }
+  app.setPath('userData', newDir);
+} catch (err) { try { console.error('userData migration skipped:', err); } catch { /* */ } } // on any failure fall back to the default (Relay) dir — a fresh dir just starts clean
+
 // Last-resort diagnostics: record any uncaught main-process error to a log the user can
 // share, instead of only flashing Electron's generic "A JavaScript error occurred" dialog.
 // This is how we pin down crashes that only reproduce on a specific machine.
 function logFatal(kind: string, err: unknown): void {
   try {
     const stack = (err as { stack?: string })?.stack || String(err);
-    appendFileSync(path.join(app.getPath('userData'), 'relay-error.log'), `[${new Date().toISOString()}] ${kind}: ${stack}\n`);
+    appendFileSync(path.join(app.getPath('userData'), 'slayert-error.log'), `[${new Date().toISOString()}] ${kind}: ${stack}\n`);
   } catch { /* nothing more we can do */ }
 }
 // Async, size-capped mirror for renderer console messages — a warn-in-a-loop must never block the
@@ -41,7 +75,7 @@ let rendererLogCapped = false; // once renderer console output hits the cap we S
 async function logRenderer(text: string): Promise<void> {
   if (rendererLogCapped) return;
   try {
-    const f = path.join(app.getPath('userData'), 'relay-error.log');
+    const f = path.join(app.getPath('userData'), 'slayert-error.log');
     const line = `[${new Date().toISOString()}] renderer-console: ${text}\n`;
     rendererLogBytes += line.length;
     if (rendererLogBytes > 1_000_000) {
@@ -111,7 +145,7 @@ function createWindow(): void {
     },
   });
 
-  // TEMP DIAG: mirror renderer console errors/warnings into relay-error.log so we can
+  // TEMP DIAG: mirror renderer console errors/warnings into slayert-error.log so we can
   // diagnose init crashes that leave the UI unresponsive (no main-process exception fires).
   win.webContents.on('console-message', (_e, level, message, line, sourceId) => {
     if (level >= 2) void logRenderer(`${message}  (${sourceId}:${line})`);
@@ -179,8 +213,10 @@ if (!isSquirrel) {
 ipcMain.handle('pty:create', async (e, { id, cwd, cols, rows, restore, runCmd }) => {
   try {
     const integrate = (await store.getSettings()).shellIntegration;
-    return createTerm(id, cwd, e.sender, cols, rows, restore, integrate, typeof runCmd === 'string' ? runCmd : undefined);
-  } catch (err) { logFatal('pty:create', err); return false; } // a spawn failure must not reject into the renderer
+    const reattached = createTerm(id, cwd, e.sender, cols, rows, restore, integrate, typeof runCmd === 'string' ? runCmd : undefined);
+    // `alt` lets the renderer restore the live-interactive view for a reattached full-screen TUI (Claude Code).
+    return { reattached, alt: isAltScreen(id) };
+  } catch (err) { logFatal('pty:create', err); return { reattached: false, alt: false }; } // a spawn failure must not reject into the renderer
 });
 ipcMain.on('pty:write', (_e, { id, data }) => writeTerm(id, data));
 ipcMain.on('pty:resize', (_e, { id, cols, rows }) => resizeTerm(id, cols, rows));
@@ -262,14 +298,19 @@ function runBin(bin: string, args: string[], opts: { cwd?: string; timeout?: num
 }
 
 // --- Git providers, app-owned auth --------------------------------------------------------------
-// GitHub connects via OAuth device flow (below); GitLab/Bitbucket via a pasted read-token. All REST +
-// token storage lives in providers.ts — the renderer only ever sees { connected, login } + normalized
-// issues/repos/PRs, never a token.
-const GH_CLIENT_ID = 'Ov23li0p7Bql1ilOiKXT'; // public OAuth App client id (device flow uses NO secret)
+// GitHub connects via OAuth device flow and Bitbucket via OAuth authorization-code + loopback (both below);
+// GitLab via a pasted PAT. All REST + token storage lives in providers.ts — the renderer only ever sees
+// { connected, login } + normalized issues/repos/PRs, never a token.
+// GitHub's OAuth App client id is supplied once in-app (Sources → Connect) and stored encrypted — not
+// hardcoded. It's a PUBLIC value (the device flow uses no secret), but keeping it out of source lets each
+// install point at its own OAuth App. The app must have "Device Flow" enabled in its GitHub settings.
 
 // Start the GitHub OAuth device flow: returns the one-time user code + verification URL for the renderer.
-ipcMain.handle('github:device-start', async () => {
-  const r = await httpsReq('github.com', '/login/device/code', 'POST', { Accept: 'application/json', 'Content-Type': 'application/x-www-form-urlencoded' }, `client_id=${GH_CLIENT_ID}&scope=repo`);
+// `ws` is the active Slayer T workspace — its client id + resulting token are scoped to it.
+ipcMain.handle('github:device-start', async (_e, { ws }: { ws: string }) => {
+  const clientId = await githubClientId(ws);
+  if (!clientId) return { ok: false, error: 'GitHub OAuth app is not configured', needsConfig: true };
+  const r = await httpsReq('github.com', '/login/device/code', 'POST', { Accept: 'application/json', 'Content-Type': 'application/x-www-form-urlencoded' }, `client_id=${encodeURIComponent(clientId)}&scope=repo`);
   try {
     const j = JSON.parse(r.text) as Record<string, unknown>;
     if (j.device_code) return { ok: true, userCode: String(j.user_code || ''), verificationUri: String(j.verification_uri || 'https://github.com/login/device'), deviceCode: String(j.device_code), interval: Number(j.interval) || 5, expiresIn: Number(j.expires_in) || 900 };
@@ -277,13 +318,15 @@ ipcMain.handle('github:device-start', async () => {
   } catch { return { ok: false, error: 'Could not start device flow' }; }
 });
 // One poll of the token endpoint. The renderer loops this on the interval until it's no longer pending.
-ipcMain.handle('github:device-poll', async (_e, { deviceCode }: { deviceCode: string }) => {
+ipcMain.handle('github:device-poll', async (_e, { ws, deviceCode }: { ws: string; deviceCode: string }) => {
   if (typeof deviceCode !== 'string' || !deviceCode) return { status: 'error', error: 'bad request' };
-  const r = await httpsReq('github.com', '/login/oauth/access_token', 'POST', { Accept: 'application/json', 'Content-Type': 'application/x-www-form-urlencoded' }, `client_id=${GH_CLIENT_ID}&device_code=${deviceCode}&grant_type=urn:ietf:params:oauth:grant-type:device_code`);
+  const clientId = await githubClientId(ws);
+  if (!clientId) return { status: 'error', error: 'GitHub OAuth app is not configured' };
+  const r = await httpsReq('github.com', '/login/oauth/access_token', 'POST', { Accept: 'application/json', 'Content-Type': 'application/x-www-form-urlencoded' }, `client_id=${encodeURIComponent(clientId)}&device_code=${deviceCode}&grant_type=urn:ietf:params:oauth:grant-type:device_code`);
   let j: Record<string, unknown> = {}; try { j = JSON.parse(r.text) as Record<string, unknown>; } catch { /* */ }
   if (j.access_token) {
-    await keys.setSecret('github_oauth', String(j.access_token));   // encrypted in the OS keychain
-    const who = await PROVIDERS.github.authState();
+    await keys.setSecret(`${ws}:github_oauth`, String(j.access_token));   // encrypted in the OS keychain, scoped to the workspace
+    const who = await PROVIDERS.github.authState(ws);
     return { status: 'ok', login: who.login || '' };
   }
   if (r.status === 0) return { status: 'pending' }; // transient network/timeout mid-authorization — keep waiting, don't abort
@@ -295,21 +338,71 @@ ipcMain.handle('github:device-poll', async (_e, { deviceCode }: { deviceCode: st
   return { status: 'error', error: String(j.error_description || err || 'authorization failed') };
 });
 
+// Bitbucket connect — OAuth 2.0 authorization-code with a LOOPBACK redirect (Bitbucket Cloud has no device
+// flow). One IPC does the whole round trip: spin a one-shot localhost server on the consumer's callback port,
+// open the system browser to the authorize page (with a CSRF `state`), catch the `?code` callback, hand it to
+// providers.bitbucketExchangeCode (which owns the secret + token storage), and resolve. The renderer only ever
+// sees { ok, login } — never a token. Resolves once: on success, denial, timeout, or a port/exchange error.
+ipcMain.handle('bitbucket:oauth', async (_e, { ws }: { ws: string }) => {
+  if (!(await bbOAuthConfigured(ws))) return { ok: false, error: 'Bitbucket OAuth app is not configured' };
+  return new Promise<{ ok: boolean; login?: string; error?: string }>((resolve) => {
+  let settled = false;
+  const state = randomBytes(16).toString('hex');
+  const page = (title: string, sub: string) => `<!doctype html><meta charset="utf-8"><title>Slayer T</title>` +
+    `<body style="font:15px/1.5 system-ui,Segoe UI,sans-serif;background:#0f1115;color:#e6e6e6;display:grid;place-items:center;height:100vh;margin:0">` +
+    `<div style="text-align:center;max-width:380px"><div style="font-size:34px">🔗</div><h2 style="margin:.4em 0 .2em">${title}</h2><p style="opacity:.7;margin:0">${sub}</p></div>`;
+  const finish = (v: { ok: boolean; login?: string; error?: string }) => {
+    if (settled) return; settled = true;
+    clearTimeout(timer); try { server.close(); } catch { /* already closed */ }
+    resolve(v);
+  };
+  const server = http.createServer(async (req, res) => {
+    try {
+      const url = new URL(req.url || '/', BB_REDIRECT_URI);
+      const code = url.searchParams.get('code');
+      const gotState = url.searchParams.get('state');
+      const err = url.searchParams.get('error_description') || url.searchParams.get('error');
+      // Handle the OAuth result on ANY path (the consumer callback is a portless http://localhost, so Bitbucket
+      // may land on '/' rather than '/callback'); ignore incidental hits like /favicon.ico that carry no code.
+      if (!code && !err) { res.writeHead(404); res.end('Not found'); return; }
+      if (err) { res.writeHead(200, { 'Content-Type': 'text/html' }); res.end(page('Authorization failed', 'You can close this tab and return to Slayer T.')); finish({ ok: false, error: String(err) }); return; }
+      if (!code || gotState !== state) { res.writeHead(400, { 'Content-Type': 'text/html' }); res.end(page('Invalid response', 'The sign-in could not be verified. Close this tab and try again.')); finish({ ok: false, error: 'Invalid authorization response (state mismatch)' }); return; }
+      // Answer the browser before the (slower) token exchange so the tab shows success promptly.
+      res.writeHead(200, { 'Content-Type': 'text/html' }); res.end(page('Connected to Bitbucket ✓', 'You can close this tab and return to Slayer T.'));
+      finish(await bitbucketExchangeCode(ws, code, BB_REDIRECT_URI));
+    } catch { try { res.writeHead(500); res.end('error'); } catch { /* */ } finish({ ok: false, error: 'Callback handling error' }); }
+  });
+  server.on('error', (e: NodeJS.ErrnoException) => finish({ ok: false, error: e?.code === 'EADDRINUSE' ? `Port ${BB_OAUTH_PORT} is in use — close whatever is using it and try again.` : 'Could not start the local sign-in server' }));
+  const timer = setTimeout(() => finish({ ok: false, error: 'Timed out waiting for authorization' }), 300000); // 5 min
+  server.listen(BB_OAUTH_PORT, '127.0.0.1', async () => { void shell.openExternal(await bitbucketAuthorizeUrl(ws, state)); });
+  });
+});
+
+// OAuth-app config (the provider's client id / secret used to START its login flow). Read returns the public
+// client id + a hasSecret flag, never the secret. Write validates + stores encrypted in the OS keychain.
+ipcMain.handle('provider:oauth-config-get', async (_e, p: { provider: ProviderId; ws: string }) => (await getOAuthApp(p?.ws, p?.provider)) || { clientId: '', hasSecret: false, needsSecret: false, configured: false });
+ipcMain.handle('provider:oauth-config-set', async (_e, p: { provider: ProviderId; ws: string; clientId: string; secret?: string }) => {
+  const a = providerOf(p?.provider); if (!a) return { ok: false, error: 'Unknown provider' };
+  return setOAuthApp(p?.ws, p.provider, typeof p?.clientId === 'string' ? p.clientId : '', typeof p?.secret === 'string' ? p.secret : undefined);
+});
+// One-time migration of the pre-scoping global secrets into the active workspace (renderer guards it with a flag).
+ipcMain.handle('provider:migrate-global', async (_e, { ws }: { ws: string }) => { if (typeof ws === 'string' && ws) await migrateGlobalSecretsToWs(ws); return { ok: true }; });
+
 // --- generic provider handlers (dispatch to the registry in providers.ts) ---
 const badProvider = { ok: false, error: 'Unknown provider' } as const;
 // A native repo id: owner/name (GitHub/Bitbucket) or group[/subgroup…]/project (GitLab) — 2+ segments.
 const validRepo = (repo: unknown): repo is string => typeof repo === 'string' && /^[\w.-]+(\/[\w.-]+)+$/.test(repo);
 
-// Connection state for a provider — { connected, login } (never the token). A network blip stays connected.
-ipcMain.handle('provider:auth-state', async (_e, id: ProviderId) => (await providerOf(id)?.authState()) || { connected: false });
-// Connect GitLab/Bitbucket with a pasted read-token (+ optional host for self-managed GitLab). GitHub
-// connects via the device flow above; connect() here just stores a token if the renderer ever passes one.
-ipcMain.handle('provider:connect', async (_e, p: { provider: ProviderId; token: string; host?: string }) => {
+// Connection state for a provider in workspace `ws` — { connected, login } (never the token). A network blip stays connected.
+ipcMain.handle('provider:auth-state', async (_e, p: { provider: ProviderId; ws: string }) => (await providerOf(p?.provider)?.authState(p?.ws)) || { connected: false });
+// Connect GitLab with a pasted read-token (+ optional host). GitHub/Bitbucket connect via their OAuth flows
+// above; connect() here just stores a token if the renderer ever passes one. Scoped to workspace `ws`.
+ipcMain.handle('provider:connect', async (_e, p: { provider: ProviderId; ws: string; token: string; host?: string }) => {
   const a = providerOf(p?.provider); if (!a) return badProvider;
   if (typeof p?.token !== 'string' || !p.token.trim()) return { ok: false, error: 'Paste a token first' };
-  return a.connect(p.token.trim(), typeof p?.host === 'string' ? p.host.trim() : undefined);
+  return a.connect(p?.ws, p.token.trim(), typeof p?.host === 'string' ? p.host.trim() : undefined);
 });
-ipcMain.handle('provider:disconnect', async (_e, id: ProviderId) => { await providerOf(id)?.disconnect(); return { ok: true }; });
+ipcMain.handle('provider:disconnect', async (_e, p: { provider: ProviderId; ws: string }) => { await providerOf(p?.provider)?.disconnect(p?.ws); return { ok: true }; });
 // Infer { provider, repo } from a folder's git origin remote (null if not a recognized provider remote).
 ipcMain.handle('provider:repo-from-remote', (_e, dir: string) => new Promise<{ provider: ProviderId; repo: string } | null>((resolve) => {
   if (!dir || typeof dir !== 'string') return resolve(null);
@@ -320,16 +413,68 @@ ipcMain.handle('provider:repo-from-remote', (_e, dir: string) => new Promise<{ p
     });
   });
 }));
-ipcMain.handle('provider:issues', async (_e, p: { provider: ProviderId; repo: string }) => {
+ipcMain.handle('provider:issues', async (_e, p: { provider: ProviderId; ws: string; repo: string; state?: 'open' | 'closed'; page?: number }) => {
   const a = providerOf(p?.provider); if (!a) return badProvider;
   if (!validRepo(p?.repo)) return { ok: false, error: 'Invalid repository' };
-  return a.issues(p.repo);
+  return a.issues(p?.ws, p.repo, p?.state === 'closed' ? 'closed' : 'open', Math.max(1, Number(p?.page) || 1));
 });
-ipcMain.handle('provider:repos', async (_e, id: ProviderId) => (await providerOf(id)?.repos()) || badProvider);
-ipcMain.handle('provider:prs', async (_e, p: { provider: ProviderId; repo: string }) => {
+ipcMain.handle('provider:repos', async (_e, p: { provider: ProviderId; ws: string; workspaces?: string[] }) => (await providerOf(p?.provider)?.repos(p?.ws, { workspaces: Array.isArray(p?.workspaces) ? p.workspaces : undefined })) || badProvider);
+ipcMain.handle('provider:prs', async (_e, p: { provider: ProviderId; ws: string; repo: string; state?: 'open' | 'closed'; page?: number }) => {
   const a = providerOf(p?.provider); if (!a) return badProvider;
   if (!validRepo(p?.repo)) return { ok: false, error: 'Invalid repository' };
-  return a.prs(p.repo);
+  return a.prs(p?.ws, p.repo, p?.state === 'closed' ? 'closed' : 'open', Math.max(1, Number(p?.page) || 1));
+});
+ipcMain.handle('provider:pr-detail', async (_e, p: { provider: ProviderId; ws: string; repo: string; number: number }) => {
+  const a = providerOf(p?.provider); if (!a) return badProvider;
+  if (!validRepo(p?.repo) || !Number.isInteger(p?.number) || p.number <= 0) return { ok: false, error: 'Invalid request' };
+  return a.prDetail(p?.ws, p.repo, p.number);
+});
+// Create an issue on the provider (Tasks: file a validated task as a real issue).
+ipcMain.handle('provider:create-issue', async (_e, p: { provider: ProviderId; ws: string; repo: string; title: string; body: string }) => {
+  const a = providerOf(p?.provider); if (!a) return badProvider;
+  if (!validRepo(p?.repo)) return { ok: false, error: 'Invalid repository' };
+  const title = typeof p?.title === 'string' ? p.title.trim() : '';
+  if (!title) return { ok: false, error: 'Title is required' };
+  return a.createIssue(p?.ws, p.repo, title, typeof p?.body === 'string' ? p.body : '');
+});
+// Current open/closed state of a filed issue (Tasks sync their status from it).
+ipcMain.handle('provider:issue-state', async (_e, p: { provider: ProviderId; ws: string; repo: string; number: number }) => {
+  const a = providerOf(p?.provider); if (!a) return badProvider;
+  if (!validRepo(p?.repo) || !Number.isInteger(p?.number) || p.number <= 0) return { ok: false, error: 'Invalid request' };
+  return a.issueState(p?.ws, p.repo, p.number);
+});
+
+// Real-time notifications: a local webhook receiver (see webhooks.ts). The renderer toggles it on/off; parsed
+// issue/PR events are pushed back to the renderer, which routes them into the per-workspace notification bell.
+ipcMain.handle('webhook:control', async (_e, p: { enabled: boolean; port?: number; secret?: string }) => {
+  if (!p?.enabled) { stopWebhookServer(); return { ok: true, running: false }; }
+  const res = await startWebhookServer(Math.max(1, Math.min(65535, Number(p?.port) || 47824)), String(p?.secret || ''), (ev) => { if (win && !win.isDestroyed()) win.webContents.send('webhook:event', ev); });
+  return { ok: res.ok, running: webhookRunning(), error: res.error };
+});
+ipcMain.handle('webhook:status', () => ({ running: webhookRunning() }));
+
+// Diagnostics for the in-app "Report a bug" flow — app/OS versions + a scrubbed tail of the crash log. Tokens
+// never reach the log (they live in the keychain), but scrub defensively before this leaves for the clipboard.
+function scrubSecrets(s: string): string {
+  return s
+    .replace(/\bgh[posru]_[A-Za-z0-9]{20,}\b/g, '[redacted-token]')                 // GitHub tokens
+    .replace(/\bgithub_pat_[A-Za-z0-9_]{20,}\b/g, '[redacted-token]')               // GitHub fine-grained PAT
+    .replace(/\bglpat-[A-Za-z0-9_-]{16,}\b/g, '[redacted-token]')                   // GitLab PAT
+    .replace(/\bATO[A-Z0-9-]{16,}\b/gi, '[redacted-token]')                         // Atlassian / Bitbucket
+    .replace(/\benc:[A-Za-z0-9+/=]{16,}/g, 'enc:[redacted]')                        // safeStorage blobs
+    .replace(/\b(Bearer|token=|access_token=|secret=)\s*[A-Za-z0-9._-]{12,}/gi, '$1 [redacted]')
+    .replace(/([?&]token=)[^\s&"']+/gi, '$1[redacted]');
+}
+ipcMain.handle('diag:collect', async () => {
+  const v = process.versions;
+  let logTail = '';
+  try { const raw = await fsp.readFile(path.join(app.getPath('userData'), 'slayert-error.log'), 'utf8'); logTail = scrubSecrets(raw.slice(-16000)); } catch { /* no log yet */ }
+  return { version: app.getVersion(), os: `${os.type()} ${os.release()}`, arch: process.arch, electron: v.electron, chrome: v.chrome, node: v.node, logTail };
+});
+ipcMain.handle('diag:reveal', () => {
+  const p = path.join(app.getPath('userData'), 'slayert-error.log');
+  if (existsSync(p)) shell.showItemInFolder(p); else void shell.openPath(app.getPath('userData'));
+  return { ok: true };
 });
 
 // Which coding agents are installed on PATH (for the Assign-to picker). Names are hardcoded literals.
@@ -344,6 +489,92 @@ ipcMain.handle('open:external', (_e, url: string) => {
   if (typeof url === 'string' && /^https?:\/\//i.test(url)) shell.openExternal(url);
 });
 
+/* -------------------- worktree helpers (shared by issue + PR worktrees) -------------------- */
+// Resolve a LOCAL clone of the SELECTED repo: prefer the open folder when its remote IS this repo,
+// else use — or create — a managed clone under %APPDATA%\Relay\repos\<provider>__<owner>__<repo>. The
+// provider CLI (gh/glab) carries your login so private/org repos clone without a token in .git/config;
+// Bitbucket (no CLI) falls back to `git clone`, using the OS git credential helper.
+// `preferManaged` (deps only): NEVER use the open folder — always the isolated managed clone. Dep-linking
+// hard-resets the resolved clone to the latest default, which must never touch the user's working directory.
+async function resolveRepoRoot(git: string, provider: ProviderId, repo: string, dir?: string, preferManaged = false): Promise<{ ok: true; repoRoot: string } | { ok: false; error: string }> {
+  const adapter = providerOf(provider);
+  if (!adapter) return { ok: false, error: 'Unknown provider' };
+  let repoRoot = '';
+  if (!preferManaged && typeof dir === 'string' && dir) {
+    const top = await runBin(git, ['-C', dir, 'rev-parse', '--show-toplevel']);
+    if (top.ok) {
+      const root = top.stdout.trim();
+      const rem = await runBin(git, ['-C', root, 'remote', 'get-url', 'origin']);
+      const fromRemote = rem.ok ? providerFromRemote(rem.stdout) : null;
+      if (fromRemote && fromRemote.provider === provider && fromRemote.repo === repo) repoRoot = root;
+    }
+  }
+  if (!repoRoot) {
+    const cacheRoot = path.join(app.getPath('userData'), 'repos', `${provider}__${repo.replace(/\//g, '__')}`);
+    if (existsSync(path.join(cacheRoot, '.git'))) {
+      repoRoot = cacheRoot;
+      await runBin(git, ['-C', cacheRoot, 'fetch', 'origin', '--prune'], { timeout: 120000 }); // freshen (best-effort)
+    } else {
+      await fsp.mkdir(path.dirname(cacheRoot), { recursive: true });
+      const cliBin = adapter.cli ? await resolveBin(adapter.cli) : null;
+      const clone = cliBin && adapter.cliCloneArgs
+        ? await runBin(cliBin, adapter.cliCloneArgs(repo, cacheRoot), { timeout: 300000 })
+        : await runBin(git, ['clone', await adapter.cloneUrl(repo), cacheRoot], { timeout: 300000 });
+      if (!clone.ok || !existsSync(path.join(cacheRoot, '.git'))) {
+        const msg = (clone.stderr || clone.stdout || 'clone failed').trim().split('\n').filter(Boolean).pop() || 'clone failed';
+        return { ok: false, error: `Couldn't clone ${repo}: ${msg}` };
+      }
+      repoRoot = cacheRoot;
+    }
+  }
+  return { ok: true, repoRoot };
+}
+
+// A worktree folder name disambiguated by a short hash of the repo's absolute path, so two different
+// repos that share a basename (…/a/app and …/b/app) never collide onto the same worktree folder.
+function worktreeFolder(repoRoot: string): string {
+  return `${path.basename(repoRoot) || 'repo'}-${createHash('sha1').update(repoRoot.replace(/\\/g, '/').toLowerCase()).digest('hex').slice(0, 8)}`;
+}
+
+// Drop stale worktree registrations, then sweep the empty <folder>/<branch> and <folder> dirs a
+// hand-deleted worktree leaves behind, so the tree doesn't accumulate orphans and a stale-empty path
+// can't make `worktree add` fail with "already exists". Only ever removes genuinely-empty dirs.
+async function pruneAndSweepWorktrees(git: string, repoRoot: string): Promise<void> {
+  await runBin(git, ['-C', repoRoot, 'worktree', 'prune']);
+  try {
+    const wtBase = path.join(app.getPath('userData'), 'worktrees');
+    for (const fld of await fsp.readdir(wtBase).catch(() => [] as string[])) {
+      const fldPath = path.join(wtBase, fld);
+      if (!(await fsp.stat(fldPath).catch(() => null))?.isDirectory()) continue;
+      for (const leaf of await fsp.readdir(fldPath).catch(() => [] as string[])) {
+        const leafPath = path.join(fldPath, leaf);
+        const st = await fsp.stat(leafPath).catch(() => null);
+        if (st?.isDirectory() && (await fsp.readdir(leafPath).catch(() => ['x'])).length === 0) await fsp.rmdir(leafPath).catch(() => {});
+      }
+      if ((await fsp.readdir(fldPath).catch(() => ['x'])).length === 0) await fsp.rmdir(fldPath).catch(() => {});
+    }
+  } catch (err) { logFatal('worktree/sweep', err); } // sweep is best-effort; the worktree still opens
+}
+
+// Drop the (edited) brief inside the worktree's .slayer/ and locally git-exclude .slayer/ so it never
+// shows up / gets committed. Returns the repo-relative brief path (or undefined on any failure).
+async function dropSlayerBrief(git: string, wtPath: string, briefRel: string, brief: string): Promise<string | undefined> {
+  if (!brief) return undefined;
+  try {
+    await fsp.mkdir(path.join(wtPath, '.slayer'), { recursive: true });
+    await fsp.writeFile(path.join(wtPath, briefRel), brief, 'utf8');
+    const gp = await runBin(git, ['-C', wtPath, 'rev-parse', '--git-path', 'info/exclude']);
+    if (gp.ok) {
+      const excl = path.isAbsolute(gp.stdout.trim()) ? gp.stdout.trim() : path.join(wtPath, gp.stdout.trim());
+      const curExcl = await fsp.readFile(excl, 'utf8').catch(() => '');
+      // Strip CR before the presence test — on a CRLF exclude the line is ".slayer/\r", which /$/m
+      // (matching just before \n) would miss, re-appending a duplicate on every re-assign.
+      if (!/^\.slayer\/?$/m.test(curExcl.replace(/\r/g, ''))) await fsp.writeFile(excl, (!curExcl || curExcl.endsWith('\n') ? curExcl : curExcl + '\n') + '.slayer/\n', 'utf8');
+    }
+    return briefRel;
+  } catch (err) { logFatal('worktree/brief', err); return undefined; } // brief is best-effort; the worktree still opens
+}
+
 // Create (or reuse) an ISOLATED git worktree for an issue: a per-issue working dir on branch
 // issue-<n>, so several issues can be worked in parallel without disturbing the main checkout.
 // Also drops the (edited) issue brief as .slayer/issue-<n>.md and locally git-excludes it, so the
@@ -351,77 +582,37 @@ ipcMain.handle('open:external', (_e, url: string) => {
 ipcMain.handle('git:worktree-add', async (_e, p: { provider?: ProviderId; repo: string; dir: string; number: number; brief?: string }) => {
   try {
     const repo = p?.repo, dir = p?.dir, num = p?.number;
-    const adapter = providerOf(p?.provider || 'github');   // default github (back-compat for older callers)
-    if (!adapter || typeof repo !== 'string' || !/^[\w.-]+(\/[\w.-]+)+$/.test(repo) || !Number.isInteger(num) || num <= 0) return { ok: false, error: 'Invalid request' };
+    const provider = (p?.provider || 'github') as ProviderId;   // default github (back-compat for older callers)
+    if (!providerOf(provider) || typeof repo !== 'string' || !/^[\w.-]+(\/[\w.-]+)+$/.test(repo) || !Number.isInteger(num) || num <= 0) return { ok: false, error: 'Invalid request' };
     const git = await resolveBin('git');
     if (!git) return { ok: false, error: 'git not found on PATH' };
-
-    // Resolve a LOCAL clone of the SELECTED repo — NOT the open folder, which may now be a different repo
-    // (the repo selector decouples them). Prefer the open folder when its remote IS this repo; otherwise
-    // use — or create — a managed clone under %APPDATA%\Relay\repos\<provider>__<owner>__<repo>. The
-    // provider CLI (gh/glab) carries your login so private/org repos clone without a token in .git/config;
-    // Bitbucket (no CLI) falls back to `git clone`, which uses the OS git credential helper (e.g. GCM).
-    let repoRoot = '';
-    if (typeof dir === 'string' && dir) {
-      const top = await runBin(git, ['-C', dir, 'rev-parse', '--show-toplevel']);
-      if (top.ok) {
-        const root = top.stdout.trim();
-        const rem = await runBin(git, ['-C', root, 'remote', 'get-url', 'origin']);
-        const fromRemote = rem.ok ? providerFromRemote(rem.stdout) : null;
-        if (fromRemote && fromRemote.provider === (p?.provider || 'github') && fromRemote.repo === repo) repoRoot = root;
-      }
-    }
-    if (!repoRoot) {
-      const cacheRoot = path.join(app.getPath('userData'), 'repos', `${p?.provider || 'github'}__${repo.replace(/\//g, '__')}`);
-      if (existsSync(path.join(cacheRoot, '.git'))) {
-        repoRoot = cacheRoot;
-        await runBin(git, ['-C', cacheRoot, 'fetch', 'origin', '--prune'], { timeout: 120000 }); // freshen (best-effort)
-      } else {
-        await fsp.mkdir(path.dirname(cacheRoot), { recursive: true });
-        const cliBin = adapter.cli ? await resolveBin(adapter.cli) : null;
-        const clone = cliBin && adapter.cliCloneArgs
-          ? await runBin(cliBin, adapter.cliCloneArgs(repo, cacheRoot), { timeout: 300000 })
-          : await runBin(git, ['clone', await adapter.cloneUrl(repo), cacheRoot], { timeout: 300000 });
-        if (!clone.ok || !existsSync(path.join(cacheRoot, '.git'))) {
-          const msg = (clone.stderr || clone.stdout || 'clone failed').trim().split('\n').filter(Boolean).pop() || 'clone failed';
-          return { ok: false, error: `Couldn't clone ${repo}: ${msg}` };
-        }
-        repoRoot = cacheRoot;
-      }
-    }
+    const rr = await resolveRepoRoot(git, provider, repo, dir);
+    if (!rr.ok) return { ok: false, error: rr.error };
+    const repoRoot = rr.repoRoot;
     // An unborn repo (git init, no commits) can't seed a worktree branch — say so plainly.
     if (!(await runBin(git, ['-C', repoRoot, 'rev-parse', '--verify', '--quiet', 'HEAD'])).ok)
       return { ok: false, error: 'This repository has no commits yet — make an initial commit first.' };
-    // Base the fix branch on the repo's default branch (origin/HEAD), falling back to the current branch.
-    let base = '';
-    const dh = await runBin(git, ['-C', repoRoot, 'symbolic-ref', '--short', 'refs/remotes/origin/HEAD']);
-    if (dh.ok) base = dh.stdout.trim().replace(/^origin\//, '');
-    if (!base) { const cur = await runBin(git, ['-C', repoRoot, 'rev-parse', '--abbrev-ref', 'HEAD']); base = (cur.ok && cur.stdout.trim()) || 'HEAD'; }
+    // Always fetch so a NEW branch starts from the LATEST remote default — a stale base is the top cause of
+    // merge conflicts. fetch only advances remote-tracking refs (origin/*); it never touches your local
+    // branches or working tree. Best-effort: an offline/auth failure just falls back to what's already fetched.
+    await runBin(git, ['-C', repoRoot, 'fetch', 'origin', '--prune'], { timeout: 120000 });
+    // The remote default branch name (main / master / whatever origin points at). Prefer origin/HEAD; if it
+    // isn't recorded locally, ask the remote to set it, then re-read; else probe origin/main then origin/master.
+    let dh = await runBin(git, ['-C', repoRoot, 'symbolic-ref', '--short', 'refs/remotes/origin/HEAD']);
+    if (!dh.ok) { await runBin(git, ['-C', repoRoot, 'remote', 'set-head', 'origin', '-a']); dh = await runBin(git, ['-C', repoRoot, 'symbolic-ref', '--short', 'refs/remotes/origin/HEAD']); }
+    let base = dh.ok ? dh.stdout.trim().replace(/^origin\//, '') : '';
+    if (!base) { for (const b of ['main', 'master']) { if ((await runBin(git, ['-C', repoRoot, 'rev-parse', '--verify', '--quiet', `refs/remotes/origin/${b}`])).ok) { base = b; break; } } }
+    // Start point = the COMMIT at the freshly-fetched origin/<base> (NOT the local branch, which fetch never
+    // fast-forwards, so it can lag). Branching from the SHA sets NO upstream — issue-N still pushes to its own
+    // remote branch exactly as before; only the base gets fresher. Fall back to local HEAD if there's no remote default.
+    let startPoint = '';
+    if (base) { const rp = await runBin(git, ['-C', repoRoot, 'rev-parse', '--verify', '--quiet', `refs/remotes/origin/${base}`]); if (rp.ok) startPoint = rp.stdout.trim(); }
+    if (!startPoint) { const cur = await runBin(git, ['-C', repoRoot, 'rev-parse', '--abbrev-ref', 'HEAD']); base = (cur.ok && cur.stdout.trim()) || 'HEAD'; startPoint = base; }
     const branch = `issue-${num}`;
-    // Disambiguate by a short hash of the repo's absolute path, so two different repos that share a
-    // basename (…/a/app and …/b/app) never collide onto the same worktree folder.
-    const folder = `${path.basename(repoRoot) || 'repo'}-${createHash('sha1').update(repoRoot.replace(/\\/g, '/').toLowerCase()).digest('hex').slice(0, 8)}`;
+    const folder = worktreeFolder(repoRoot);
     const wtPath = path.join(app.getPath('userData'), 'worktrees', folder, branch);
     const norm = (s: string) => s.replace(/\\/g, '/').toLowerCase();
-    // Drop registrations for worktrees whose folders were deleted by hand, so a re-assign can recreate them.
-    await runBin(git, ['-C', repoRoot, 'worktree', 'prune']);
-    // House-keeping: after prune, hand-deleted worktrees leave behind empty <folder>/<branch> and (once
-    // its last branch is gone) empty <folder> dirs under …\worktrees. Sweep the empties so the tree
-    // doesn't accumulate orphans and a stale-empty wtPath can't make `worktree add` fail with "already
-    // exists". Only ever removes directories that are genuinely empty — never a live worktree.
-    try {
-      const wtBase = path.join(app.getPath('userData'), 'worktrees');
-      for (const fld of await fsp.readdir(wtBase).catch(() => [] as string[])) {
-        const fldPath = path.join(wtBase, fld);
-        if (!(await fsp.stat(fldPath).catch(() => null))?.isDirectory()) continue;
-        for (const leaf of await fsp.readdir(fldPath).catch(() => [] as string[])) {
-          const leafPath = path.join(fldPath, leaf);
-          const st = await fsp.stat(leafPath).catch(() => null);
-          if (st?.isDirectory() && (await fsp.readdir(leafPath).catch(() => ['x'])).length === 0) await fsp.rmdir(leafPath).catch(() => {});
-        }
-        if ((await fsp.readdir(fldPath).catch(() => ['x'])).length === 0) await fsp.rmdir(fldPath).catch(() => {});
-      }
-    } catch (err) { logFatal('git:worktree-add/sweep', err); } // sweep is best-effort; the worktree still opens
+    await pruneAndSweepWorktrees(git, repoRoot);
     // Already have a worktree for this issue? Reuse it (re-assigning the same issue is idempotent).
     const list = await runBin(git, ['-C', repoRoot, 'worktree', 'list', '--porcelain']);
     const reused = list.ok && norm(list.stdout).split('\n').some((ln) => ln.startsWith('worktree ') && norm(ln.slice(9).trim()) === norm(wtPath));
@@ -430,33 +621,199 @@ ipcMain.handle('git:worktree-add', async (_e, p: { provider?: ProviderId; repo: 
       const hasBranch = (await runBin(git, ['-C', repoRoot, 'rev-parse', '--verify', '--quiet', `refs/heads/${branch}`])).ok;
       const addArgs = hasBranch
         ? ['-C', repoRoot, 'worktree', 'add', wtPath, branch]
-        : ['-C', repoRoot, 'worktree', 'add', wtPath, '-b', branch, base];
+        : ['-C', repoRoot, 'worktree', 'add', wtPath, '-b', branch, startPoint];
       const add = await runBin(git, addArgs, { timeout: 60000 });
       if (!add.ok) {
         const msg = (add.stderr || add.stdout || 'git worktree add failed').trim().split('\n').filter(Boolean).pop() || 'git worktree add failed';
         return { ok: false, error: msg };
       }
     }
-    // Drop the brief inside the worktree and locally exclude .slayer/ so it never shows up / gets committed.
-    let briefRel: string | undefined;
-    const brief = typeof p?.brief === 'string' ? p.brief : '';
-    if (brief) {
-      try {
-        await fsp.mkdir(path.join(wtPath, '.slayer'), { recursive: true });
-        briefRel = `.slayer/issue-${num}.md`;
-        await fsp.writeFile(path.join(wtPath, briefRel), brief, 'utf8');
-        const gp = await runBin(git, ['-C', wtPath, 'rev-parse', '--git-path', 'info/exclude']);
-        if (gp.ok) {
-          const excl = path.isAbsolute(gp.stdout.trim()) ? gp.stdout.trim() : path.join(wtPath, gp.stdout.trim());
-          const curExcl = await fsp.readFile(excl, 'utf8').catch(() => '');
-          // Strip CR before the presence test — on a CRLF exclude the line is ".slayer/\r", which /$/m
-          // (matching just before \n) would miss, re-appending a duplicate on every re-assign.
-          if (!/^\.slayer\/?$/m.test(curExcl.replace(/\r/g, ''))) await fsp.writeFile(excl, (!curExcl || curExcl.endsWith('\n') ? curExcl : curExcl + '\n') + '.slayer/\n', 'utf8');
-        }
-      } catch (err) { logFatal('git:worktree-add/brief', err); briefRel = undefined; } // brief is best-effort; the worktree still opens
-    }
+    const briefRel = await dropSlayerBrief(git, wtPath, `.slayer/issue-${num}.md`, typeof p?.brief === 'string' ? p.brief : '');
     return { ok: true, path: wtPath, branch, base, reused, briefRel };
   } catch (err) { logFatal('git:worktree-add', err); return { ok: false, error: 'Worktree creation failed' }; }
+});
+
+// Create (or reuse) an isolated worktree with a PR/MR's SOURCE branch checked out, so a review pipeline
+// inspects the ACTUAL diff (not a fresh branch). Fetches the PR head — GitHub `refs/pull/<n>/head`, GitLab
+// `refs/merge-requests/<n>/head` (both exposed on origin, so even fork PRs work), Bitbucket the source
+// branch by name (no numbered PR ref → same-repo PRs only). Branch `pr-<n>`; brief at .slayer/pr-<n>.md.
+ipcMain.handle('git:pr-worktree-add', async (_e, p: { provider?: ProviderId; repo: string; dir: string; number: number; branch?: string; brief?: string }) => {
+  try {
+    const repo = p?.repo, dir = p?.dir, num = p?.number;
+    const provider = (p?.provider || 'github') as ProviderId;
+    if (!providerOf(provider) || typeof repo !== 'string' || !/^[\w.-]+(\/[\w.-]+)+$/.test(repo) || !Number.isInteger(num) || num <= 0) return { ok: false, error: 'Invalid request' };
+    const git = await resolveBin('git');
+    if (!git) return { ok: false, error: 'git not found on PATH' };
+    const rr = await resolveRepoRoot(git, provider, repo, dir);
+    if (!rr.ok) return { ok: false, error: rr.error };
+    const repoRoot = rr.repoRoot;
+    if (!(await runBin(git, ['-C', repoRoot, 'rev-parse', '--verify', '--quiet', 'HEAD'])).ok)
+      return { ok: false, error: 'This repository has no commits yet.' };
+    const branch = `pr-${num}`;
+    const folder = worktreeFolder(repoRoot);
+    const wtPath = path.join(app.getPath('userData'), 'worktrees', folder, branch);
+    const norm = (s: string) => s.replace(/\\/g, '/').toLowerCase();
+    await pruneAndSweepWorktrees(git, repoRoot);
+    const list = await runBin(git, ['-C', repoRoot, 'worktree', 'list', '--porcelain']);
+    const reused = list.ok && norm(list.stdout).split('\n').some((ln) => ln.startsWith('worktree ') && norm(ln.slice(9).trim()) === norm(wtPath));
+    if (!reused) {
+      // Fetch the PR head into FETCH_HEAD, then point local branch pr-<n> at it and check it out.
+      const srcBranch = typeof p?.branch === 'string' ? p.branch.trim() : '';
+      const ref = provider === 'github' ? `refs/pull/${num}/head`
+        : provider === 'gitlab' ? `refs/merge-requests/${num}/head`
+        : srcBranch;
+      if (!ref) return { ok: false, error: 'No source branch for this pull request.' };
+      const fetched = await runBin(git, ['-C', repoRoot, 'fetch', 'origin', ref], { timeout: 120000 });
+      if (!fetched.ok) {
+        const msg = (fetched.stderr || fetched.stdout || 'fetch failed').trim().split('\n').filter(Boolean).pop() || 'fetch failed';
+        return { ok: false, error: `Couldn't fetch ${provider === 'gitlab' ? 'MR' : 'PR'} #${num}: ${msg}` };
+      }
+      // -f creates or moves pr-<n> to the fetched head (safe: no live worktree holds it when !reused).
+      const bf = await runBin(git, ['-C', repoRoot, 'branch', '-f', branch, 'FETCH_HEAD']);
+      if (!bf.ok) { const msg = (bf.stderr || bf.stdout || 'branch failed').trim().split('\n').filter(Boolean).pop() || 'branch failed'; return { ok: false, error: msg }; }
+      const add = await runBin(git, ['-C', repoRoot, 'worktree', 'add', wtPath, branch], { timeout: 60000 });
+      if (!add.ok) { const msg = (add.stderr || add.stdout || 'git worktree add failed').trim().split('\n').filter(Boolean).pop() || 'git worktree add failed'; return { ok: false, error: msg }; }
+    }
+    const briefRel = await dropSlayerBrief(git, wtPath, `.slayer/pr-${num}.md`, typeof p?.brief === 'string' ? p.brief : '');
+    return { ok: true, path: wtPath, branch, reused, briefRel };
+  } catch (err) { logFatal('git:pr-worktree-add', err); return { ok: false, error: 'Worktree creation failed' }; }
+});
+
+// Link one or more DEPENDENCY repos into an issue worktree as READ-ONLY reference (e.g. a FE issue that needs
+// to read the BE codebase). Each dep is resolved/cloned like an issue repo, updated to its LATEST default
+// branch, then junction/symlinked into `<wt>/.deps/<name>` (git-excluded, so it never enters the issue's PR).
+// The agent reads `.deps/<name>/…` for context; the "read-only" contract is by instruction (in the brief).
+ipcMain.handle('git:link-deps', async (_e, p: { wt: string; dir?: string; deps: { provider?: ProviderId; repo: string }[] }) => {
+  try {
+    const wt = p?.wt;
+    if (!wt || !existsSync(wt)) return { ok: false, error: 'worktree missing' };
+    const git = await resolveBin('git');
+    if (!git) return { ok: false, error: 'git not found on PATH' };
+    const depsDir = path.join(wt, '.deps');
+    await fsp.mkdir(depsDir, { recursive: true });
+    // Locally git-exclude .deps/ (same as .slayer/) so the linked repos never show up in the issue's diff.
+    try {
+      const gp = await runBin(git, ['-C', wt, 'rev-parse', '--git-path', 'info/exclude']);
+      if (gp.ok) {
+        const excl = path.isAbsolute(gp.stdout.trim()) ? gp.stdout.trim() : path.join(wt, gp.stdout.trim());
+        const cur = await fsp.readFile(excl, 'utf8').catch(() => '');
+        if (!/^\.deps\/?$/m.test(cur.replace(/\r/g, ''))) await fsp.writeFile(excl, (!cur || cur.endsWith('\n') ? cur : cur + '\n') + '.deps/\n', 'utf8');
+      }
+    } catch (err) { logFatal('git:link-deps/exclude', err); }
+    const linked: { name: string; repo: string }[] = [];
+    for (const d of (p?.deps || [])) {
+      const provider = (d?.provider || 'github') as ProviderId;
+      if (!d?.repo || !/^[\w.-]+(\/[\w.-]+)+$/.test(d.repo)) continue;
+      const rr = await resolveRepoRoot(git, provider, d.repo, p?.dir, true); // preferManaged: never reset the open folder
+      if (!rr.ok) continue;                                     // a dep that won't resolve/clone is skipped (best-effort)
+      const clone = rr.repoRoot;
+      // Update the (shared cache) clone to the latest default branch — reset is safe: it's a read-only reference.
+      await runBin(git, ['-C', clone, 'fetch', 'origin', '--prune'], { timeout: 120000 });
+      let dh = await runBin(git, ['-C', clone, 'symbolic-ref', '--short', 'refs/remotes/origin/HEAD']);
+      if (!dh.ok) { await runBin(git, ['-C', clone, 'remote', 'set-head', 'origin', '-a']); dh = await runBin(git, ['-C', clone, 'symbolic-ref', '--short', 'refs/remotes/origin/HEAD']); }
+      let def = dh.ok ? dh.stdout.trim().replace(/^origin\//, '') : '';
+      if (!def) { for (const b of ['main', 'master']) { if ((await runBin(git, ['-C', clone, 'rev-parse', '--verify', '--quiet', `refs/remotes/origin/${b}`])).ok) { def = b; break; } } }
+      if (def && (await runBin(git, ['-C', clone, 'rev-parse', '--verify', '--quiet', `refs/remotes/origin/${def}`])).ok) {
+        await runBin(git, ['-C', clone, 'checkout', '-f', def]);
+        await runBin(git, ['-C', clone, 'reset', '--hard', `origin/${def}`]);
+      }
+      const name = d.repo.split('/').pop() || 'dep';
+      const link = path.join(depsDir, name);
+      // The junction target (the managed clone) is a STABLE path, so an existing link already reflects the
+      // just-refreshed content — only create it when missing. (Never remove-recurse a junction: that could
+      // delete the target.) 'junction' on Windows needs no admin; 'dir' symlink elsewhere.
+      if (!existsSync(link)) {
+        try { await fsp.symlink(clone, link, process.platform === 'win32' ? 'junction' : 'dir'); }
+        catch (err) { logFatal('git:link-deps/symlink', err); continue; }
+      }
+      linked.push({ name, repo: d.repo });
+    }
+    return { ok: true, linked };
+  } catch (err) { logFatal('git:link-deps', err); return { ok: false, error: 'Could not link dependencies' }; }
+});
+
+// Create (or reuse) a worktree for a TASK's validate run — a branch `task-<id>` off the LATEST remote default,
+// so the agent can investigate the repo to validate a proposed issue (read-only; no PR). Brief → .slayer/task-<id>.md.
+ipcMain.handle('git:task-worktree-add', async (_e, p: { provider?: ProviderId; repo: string; dir: string; id: string; brief?: string }) => {
+  try {
+    const repo = p?.repo, dir = p?.dir;
+    const provider = (p?.provider || 'github') as ProviderId;
+    const id = String(p?.id || '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 40);   // sanitize → safe branch/folder name
+    if (!providerOf(provider) || typeof repo !== 'string' || !/^[\w.-]+(\/[\w.-]+)+$/.test(repo) || !id) return { ok: false, error: 'Invalid request' };
+    const git = await resolveBin('git'); if (!git) return { ok: false, error: 'git not found on PATH' };
+    const rr = await resolveRepoRoot(git, provider, repo, dir);
+    if (!rr.ok) return { ok: false, error: rr.error };
+    const repoRoot = rr.repoRoot;
+    if (!(await runBin(git, ['-C', repoRoot, 'rev-parse', '--verify', '--quiet', 'HEAD'])).ok) return { ok: false, error: 'This repository has no commits yet.' };
+    // Start from the freshly-fetched remote default (same logic as issue worktrees).
+    await runBin(git, ['-C', repoRoot, 'fetch', 'origin', '--prune'], { timeout: 120000 });
+    let dh = await runBin(git, ['-C', repoRoot, 'symbolic-ref', '--short', 'refs/remotes/origin/HEAD']);
+    if (!dh.ok) { await runBin(git, ['-C', repoRoot, 'remote', 'set-head', 'origin', '-a']); dh = await runBin(git, ['-C', repoRoot, 'symbolic-ref', '--short', 'refs/remotes/origin/HEAD']); }
+    let base = dh.ok ? dh.stdout.trim().replace(/^origin\//, '') : '';
+    if (!base) { for (const b of ['main', 'master']) { if ((await runBin(git, ['-C', repoRoot, 'rev-parse', '--verify', '--quiet', `refs/remotes/origin/${b}`])).ok) { base = b; break; } } }
+    let startPoint = '';
+    if (base) { const rp = await runBin(git, ['-C', repoRoot, 'rev-parse', '--verify', '--quiet', `refs/remotes/origin/${base}`]); if (rp.ok) startPoint = rp.stdout.trim(); }
+    if (!startPoint) { const cur = await runBin(git, ['-C', repoRoot, 'rev-parse', '--abbrev-ref', 'HEAD']); startPoint = (cur.ok && cur.stdout.trim()) || 'HEAD'; }
+    const branch = `task-${id}`;
+    const folder = worktreeFolder(repoRoot);
+    const wtPath = path.join(app.getPath('userData'), 'worktrees', folder, branch);
+    const norm = (s: string) => s.replace(/\\/g, '/').toLowerCase();
+    await pruneAndSweepWorktrees(git, repoRoot);
+    const list = await runBin(git, ['-C', repoRoot, 'worktree', 'list', '--porcelain']);
+    const reused = list.ok && norm(list.stdout).split('\n').some((ln) => ln.startsWith('worktree ') && norm(ln.slice(9).trim()) === norm(wtPath));
+    if (!reused) {
+      const hasBranch = (await runBin(git, ['-C', repoRoot, 'rev-parse', '--verify', '--quiet', `refs/heads/${branch}`])).ok;
+      const addArgs = hasBranch ? ['-C', repoRoot, 'worktree', 'add', wtPath, branch] : ['-C', repoRoot, 'worktree', 'add', wtPath, '-b', branch, startPoint];
+      const add = await runBin(git, addArgs, { timeout: 60000 });
+      if (!add.ok) { const msg = (add.stderr || add.stdout || 'git worktree add failed').trim().split('\n').filter(Boolean).pop() || 'git worktree add failed'; return { ok: false, error: msg }; }
+    }
+    const briefRel = await dropSlayerBrief(git, wtPath, `.slayer/task-${id}.md`, typeof p?.brief === 'string' ? p.brief : '');
+    return { ok: true, path: wtPath, branch, reused, briefRel };
+  } catch (err) { logFatal('git:task-worktree-add', err); return { ok: false, error: 'Worktree creation failed' }; }
+});
+
+/* -------------------- issue pipelines (staged agent runs, gated by verdict files) -------------------- */
+// Every pipeline artifact lives in the worktree's `.slayer/` dir (already git-excluded by worktree-add):
+// per-stage brief files `stage-<i>.md` and per-gate verdict files `stage-<i>.json`. Both handlers refuse
+// any path that escapes `.slayer/` — the renderer only ever passes those two shapes, but validate anyway.
+function slayerPath(wt: string, rel: string): string | null {
+  if (typeof wt !== 'string' || !wt || typeof rel !== 'string' || !rel) return null;
+  const base = path.resolve(wt, '.slayer');
+  const abs = path.resolve(wt, rel);
+  const within = abs === base || abs.startsWith(base + path.sep);
+  return within ? abs : null; // reject anything outside .slayer/ (path traversal guard)
+}
+// Prep a stage before launch: (optionally) write its brief file, and always clear this stage's stale
+// verdict (so a re-run of a reused worktree can't read the previous run's pass/fail).
+ipcMain.handle('pipeline:prep', async (_e, p: { wt: string; briefRel?: string; brief?: string; stage: number }) => {
+  try {
+    const wt = p?.wt || '';
+    const dir = path.join(wt, '.slayer');
+    await fsp.mkdir(dir, { recursive: true });
+    if (typeof p?.briefRel === 'string' && p.briefRel && typeof p?.brief === 'string') {
+      const bp = slayerPath(wt, p.briefRel); if (!bp) return { ok: false };
+      await fsp.writeFile(bp, p.brief, 'utf8');
+    }
+    if (Number.isInteger(p?.stage)) {
+      const vp = slayerPath(wt, `.slayer/stage-${p.stage}.json`);
+      if (vp) await fsp.rm(vp, { force: true }); // clear stale verdict; force → no throw if absent
+    }
+    return { ok: true };
+  } catch (err) { logFatal('pipeline:prep', err); return { ok: false }; }
+});
+// Read a gate stage's verdict. `found:false` until the agent has written it — the renderer polls this.
+ipcMain.handle('pipeline:verdict', async (_e, p: { wt: string; stage: number }) => {
+  try {
+    if (!Number.isInteger(p?.stage)) return { found: false }; // guard the stage index like pipeline:prep does
+    const vp = slayerPath(p?.wt || '', `.slayer/stage-${p?.stage}.json`);
+    if (!vp || !existsSync(vp)) return { found: false };
+    const raw = await fsp.readFile(vp, 'utf8');
+    let obj: unknown;
+    try { obj = JSON.parse(raw); } catch { return { found: false }; } // half-written file → treat as not-yet-ready; poll again
+    const o = (obj || {}) as { passed?: unknown; summary?: unknown };
+    if (typeof o.passed !== 'boolean') return { found: false }; // no verdict yet (agent wrote a partial object)
+    return { found: true, passed: o.passed, summary: typeof o.summary === 'string' ? o.summary : '' };
+  } catch (err) { logFatal('pipeline:verdict', err); return { found: false }; }
 });
 
 /* -------------------- session export -------------------- */
@@ -490,16 +847,19 @@ function isCodeFile(p: string): boolean {
   if (['dockerfile', 'makefile', '.gitignore', '.gitattributes', '.env', '.bashrc', '.zshrc', '.npmrc', '.editorconfig'].includes(base)) return true;
   return CODE_EXTS.has(path.extname(p).toLowerCase());
 }
-function tryCode(p: string): Promise<boolean> {
+// Open `p` in the given editor launcher. `cmd` is ALWAYS an allowlisted token from shared/editors.ts (never a
+// raw renderer string), so interpolating it into the Windows shell line below can't inject a command.
+function tryEditor(cmd: string, p: string): Promise<boolean> {
   return new Promise((resolve) => {
+    if (!cmd) return resolve(false); // no editor (system default) — caller falls back to shell.openPath
     if (process.platform === 'win32') {
-      // `code` is code.cmd on Windows and needs a shell; reject chars that could break out of the
-      // quoted argument or trigger %VAR% expansion, so a crafted filename can't inject a command.
+      // Editor launchers are often .cmd on Windows and need a shell; reject chars in the PATH that could break
+      // out of the quoted argument or trigger %VAR% expansion, so a crafted filename can't inject a command.
       if (/["%\r\n]/.test(p)) return resolve(false);
-      exec(`code "${p}"`, { windowsHide: true, timeout: 15000 }, (err) => resolve(!err));
+      exec(`${cmd} "${p}"`, { windowsHide: true, timeout: 15000 }, (err) => resolve(!err));
     } else {
       // No shell → the path is a literal argv entry, so $(...)/backticks in a filename can't expand.
-      execFile('code', [p], { timeout: 15000 }, (err) => resolve(!err));
+      execFile(cmd, [p], { timeout: 15000 }, (err) => resolve(!err));
     }
   });
 }
@@ -518,9 +878,26 @@ ipcMain.handle('fs:list', async (_e, dir: string) => {
 });
 ipcMain.handle('fs:open', async (_e, p: string) => {
   const abs = path.resolve(p);
-  if (isCodeFile(abs) && (await tryCode(abs))) return { method: 'vscode' };
-  const err = await shell.openPath(abs); // OS default app for the file type
+  const id = (await store.getSettings()).fileEditor; // which editor the user chose (allowlisted in shared/editors.ts)
+  const cmd = editorCmd(id);
+  if (cmd && isCodeFile(abs) && (await tryEditor(cmd, abs))) return { method: 'editor', editor: editorLabel(id) };
+  const err = await shell.openPath(abs); // OS default app for the file type (non-code files, 'system', or a missing editor)
   return { method: err ? 'error' : 'default', error: err || undefined };
+});
+// Open a path the terminal printed — relative paths resolve against the tab's cwd. Strips a trailing
+// :line[:col] suffix, and SILENTLY no-ops if it doesn't resolve to a real file, so clicking path-like
+// text that isn't actually a file (a false-positive link) does nothing rather than erroring.
+ipcMain.handle('fs:open-rel', async (_e, p: { cwd?: string; target: string }) => {
+  const raw = typeof p?.target === 'string' ? p.target : '';
+  if (!raw) return { ok: false };
+  const bare = raw.replace(/:\d+(?::\d+)?$/, ''); // drop a trailing :line or :line:col
+  const cwd = typeof p?.cwd === 'string' && p.cwd ? p.cwd : app.getPath('home');
+  const abs = path.isAbsolute(bare) ? bare : path.resolve(cwd, bare);
+  if (!existsSync(abs)) return { ok: false };
+  const cmd = editorCmd((await store.getSettings()).fileEditor);
+  if (cmd && isCodeFile(abs) && (await tryEditor(cmd, abs))) return { ok: true, method: 'editor' };
+  const err = await shell.openPath(abs);
+  return { ok: !err, method: err ? 'error' : 'default' };
 });
 
 /* -------------------- workspace (open tabs) -------------------- */

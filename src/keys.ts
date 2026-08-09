@@ -16,17 +16,31 @@ async function readRaw(): Promise<Record<string, string>> {
   }
 }
 
-export async function setKey(provider: Provider, value: string): Promise<void> {
-  const raw = await readRaw();
-  if (!value) {
-    delete raw[provider];
-  } else if (safeStorage.isEncryptionAvailable()) {
-    raw[provider] = 'enc:' + safeStorage.encryptString(value).toString('base64');
-  } else {
-    // Fallback (e.g. Linux without a keyring): store plainly. Documented in README.
-    raw[provider] = 'raw:' + Buffer.from(value, 'utf8').toString('base64');
-  }
-  await fs.writeFile(keyFile(), JSON.stringify(raw), 'utf8');
+// Writes are SERIALIZED and ATOMIC. keys.json is a read-modify-write store, so two concurrent writers (e.g.
+// the boot-time global→workspace migration racing a Bitbucket token refresh) would clobber each other's
+// changes — a lost update. Chain every mutation so its read+write runs to completion before the next starts,
+// and swap the file in via temp-file + rename so a reader never sees a half-written file. (Mirrors store.ts.)
+let writeChain: Promise<unknown> = Promise.resolve();
+function enqueueWrite(mutate: (raw: Record<string, string>) => void): Promise<void> {
+  const run = writeChain.then(async () => {
+    const raw = await readRaw();
+    mutate(raw);
+    const tmp = keyFile() + '.tmp';
+    await fs.writeFile(tmp, JSON.stringify(raw), 'utf8');
+    await fs.rename(tmp, keyFile());
+  });
+  writeChain = run.catch(() => {}); // keep the chain alive even if one write fails
+  return run;
+}
+// Encode a value for storage: OS-keychain-encrypted where available, else base64 (documented fallback).
+function encode(value: string): string {
+  return safeStorage.isEncryptionAvailable()
+    ? 'enc:' + safeStorage.encryptString(value).toString('base64')
+    : 'raw:' + Buffer.from(value, 'utf8').toString('base64');
+}
+
+export function setKey(provider: Provider, value: string): Promise<void> {
+  return enqueueWrite((raw) => { if (!value) delete raw[provider]; else raw[provider] = encode(value); });
 }
 
 export async function getKey(provider: Provider): Promise<string | null> {
@@ -46,12 +60,8 @@ export async function getKey(provider: Provider): Promise<string | null> {
 
 // Generic encrypted secret store (same at-rest encryption as API keys) for tokens like the GitHub
 // OAuth access token — keyed by an arbitrary name, never exposed to the renderer.
-export async function setSecret(name: string, value: string): Promise<void> {
-  const raw = await readRaw();
-  if (!value) delete raw[name];
-  else if (safeStorage.isEncryptionAvailable()) raw[name] = 'enc:' + safeStorage.encryptString(value).toString('base64');
-  else raw[name] = 'raw:' + Buffer.from(value, 'utf8').toString('base64');
-  await fs.writeFile(keyFile(), JSON.stringify(raw), 'utf8');
+export function setSecret(name: string, value: string): Promise<void> {
+  return enqueueWrite((raw) => { if (!value) delete raw[name]; else raw[name] = encode(value); });
 }
 export async function getSecret(name: string): Promise<string | null> {
   const raw = await readRaw();

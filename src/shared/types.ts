@@ -27,6 +27,7 @@ export interface Block {
 export interface SavedSession extends TermColors {
   id: string;                       // library record id
   termId: string;                   // terminal id — reattaches to the live shell if still running
+  wsId?: string;                    // the workspace this session belongs to (its Library is per-workspace)
   name: string;
   cwd: string;
   model: string;
@@ -130,16 +131,33 @@ export interface Settings {
   sidebarWidth: number;             // sidebar width in px
   shellIntegration: boolean;        // inject command-block markers into new shells
   blocksView: boolean;              // Warp-style blocks as the main view (vs classic xterm)
+  fileEditor?: string;              // editor id (see shared/editors.ts) the Files list opens a code file in; default 'code' (VS Code), 'system' = OS default
   notifications: boolean;           // desktop notification when a long command finishes unfocused
   bookmarks: Bookmark[];            // saved command snippets
   bookmarkGroups: BookmarkGroup[];  // groups for organizing bookmarks (display order = array order)
   hasKey: Record<string, boolean>;  // provider -> whether a key is stored (never the key itself)
   issueTags?: Record<string, string[]>; // private local tags, keyed "repo#number" → ["mine","reviewing"] (never touch GitHub)
-  sidebarView?: 'library' | 'files' | 'issues'; // which rail panel is active in the sidebar
-  issueRepos?: string[]; // repos tracked via Sources (owner/name)
-  issueRepo?: string;    // the active repo (owner/name); empty → infer from the open folder's git remote
+  sidebarView?: 'library' | 'files' | 'issues' | 'prs' | 'tasks'; // which rail panel is active in the sidebar
+  issueRepos?: string[]; // LEGACY (pre per-workspace): global tracked repos — migrated into issueReposByWs
+  issueRepo?: string;    // LEGACY (pre per-workspace): global active repo — migrated into issueRepoByWs
+  issueReposByWs?: Record<string, string[]>; // tracked repos per workspace id (Issues are per-workspace)
+  issueRepoByWs?: Record<string, string>;    // active repo per workspace id; empty → infer from the folder's remote
   issueAgent?: string;   // preferred coding agent id for Assign (claude/gemini/codex/aider/antigravity)
   issueConcurrency?: number; // max agents the assign queue runs at once (per repo); default 2
+  issuePipelineByKey?: Record<string, string>; // per-issue pipeline id, keyed "provider:repo#number"; unset → default validate-fix
+  issueDepsByKey?: Record<string, string[]>;   // per-issue dependency repo ids (qualified "provider:repo"), keyed "provider:repo#number" — checked out read-only under .deps/ in the worktree for reference
+  prPipelineByKey?: Record<string, string>;    // per-PR review pipeline id, keyed "provider:repo#number"; unset → default review-pr
+  tasksByWs?: Record<string, Task[]>;          // per-workspace Tasks: draft an issue, validate it against the repo, file it only if valid
+  pipelines?: PipelineDef[]; // user-authored custom pipelines (built-ins live in code); merged into the registry
+  bitbucketWorkspacesByWs?: Record<string, string[]>; // Bitbucket workspace ids to list repos from, per Slayer T workspace id (CHANGE-2770)
+  providersScopedMigrated?: boolean; // one-shot flag: the pre-scoping global provider secrets have been moved into a workspace
+  notificationsByWs?: Record<string, AppNotification[]>; // per-workspace issue/PR notifications (persisted; survives restart)
+  issuePushNotify?: boolean;         // fire native OS notifications for new/closed issues & PRs (default true)
+  notifySound?: boolean;             // play a chime when a new issue/PR notification arrives (default true)
+  notifyReposByWs?: Record<string, string[]>; // qualified repo ids the poller watches, per workspace id. Undefined for a ws → default to that ws's tracked repos; defined (even []) → exactly these.
+  webhookEnabled?: boolean;          // run the local webhook receiver for near-real-time issue/PR notifications
+  webhookPort?: number;              // port the webhook receiver listens on (default 47824)
+  webhookSecret?: string;            // shared secret verifying incoming webhooks (GitHub HMAC / GitLab token / Bitbucket ?token)
 }
 
 // Streaming events emitted by the agent loop to the renderer.
@@ -170,6 +188,39 @@ export interface ChatTurn {
   content: string;
 }
 
+// A per-workspace notification for a provider event (new/closed issue or PR), shown in the header bell and
+// (optionally) fired as a native OS notification. Detected by the background poller diffing each repo over time.
+// A Task = a proposed issue you validate against the repo BEFORE filing it. Run a validate-only pipeline; if
+// the agent judges it valid, an issue is created on the provider with the validation result; if not, no issue
+// is filed and the result is kept on the task. Persisted per-workspace in Settings.tasksByWs.
+export interface Task {
+  id: string;
+  provider: string;                              // github | gitlab | bitbucket
+  repo: string;                                  // native repo id (owner/name)
+  title: string;
+  body: string;                                  // the proposed issue description (what to validate)
+  status: 'draft' | 'validating' | 'invalid' | 'error' | 'open' | 'closed' | 'valid'; // 'valid' = legacy (filed); tracked to 'open'/'closed' from the issue
+  result?: string;                               // the validation summary (set once it runs)
+  issueNumber?: number;                          // if valid → the filed issue
+  issueUrl?: string;
+  agentId?: string;                              // agent used for the validate run
+  deps?: string[];                               // dependency repo ids ("provider:repo") linked read-only under .deps/ for the validate run
+  ts: number;                                    // created (epoch ms)
+  ranAt?: number;                                // last validated (epoch ms)
+}
+export interface AppNotification {
+  id: string;                                    // stable dedupe key: `${kind}:${provider}:${repo}#${number}`
+  kind: 'new-issue' | 'closed-issue' | 'new-pr' | 'closed-pr';
+  provider: string;                              // github | gitlab | bitbucket
+  repo: string;                                  // owner/name (native repo id)
+  number: number;
+  title: string;
+  url: string;
+  actor?: string;                                // the person behind it: issue/PR author (new), or who closed/merged it (webhook)
+  ts: number;                                    // when we detected it (epoch ms)
+  read: boolean;
+}
+
 // --- Issue Agent (Phase 1: read-only) ---
 // A provider issue, normalized by the adapter. Phase 1 pulls GitHub issues via the `gh` CLI.
 export interface IssueLabel { name: string; color?: string; }
@@ -181,5 +232,30 @@ export interface Issue {
   state: string;
   url: string;
   assignees?: string[];             // GitHub logins assigned to the issue (for the "assigned to me" filter)
+  author?: string;                  // the creator's login/username (for the "created by" filter)
   milestone?: string;               // milestone title, if any
+}
+
+// --- Issue Pipelines (serializable, so custom pipelines can be authored + persisted) ---
+// A pipeline is a graph of STAGES wired by conditional EDGES. Briefs are TEMPLATE STRINGS (tokens
+// {issue} {number} {title} {closeStep} {verdictRel}) so a user-authored pipeline round-trips through JSON;
+// edges reference a stage by its stable `id` (not its editable name) or the sentinel 'stop'.
+export type StageKind = 'validate' | 'fix' | 'reproduce' | 'test' | 'review' | 'custom';
+export type EdgeWhen = 'valid' | 'invalid' | 'always';
+export interface PipelineEdge { when: EdgeWhen; to: string; } // to = a stage id, or 'stop' (stop & report)
+export interface StageDef {
+  id: string;            // stable id (edge targets + canvas key); the display `name` can be renamed freely
+  name: string;
+  kind: StageKind;
+  brief: string;         // template with {issue} {number} {title} {closeStep} {verdictRel}
+  edges: PipelineEdge[]; // outgoing transitions; a conditional edge makes this a GATE, no edges = terminal
+  x?: number; y?: number; // builder-canvas layout (ignored by the runner)
+}
+export interface PipelineDef {
+  id: string;
+  name: string;
+  desc: string;
+  builtin?: boolean;     // shipped-in-code pipelines can't be deleted/renamed (they can be duplicated)
+  stages: StageDef[];
+  stopPos?: { x: number; y: number }; // builder-canvas position of the ⛔ Stop node (layout only; runner ignores)
 }
