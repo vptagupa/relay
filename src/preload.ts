@@ -1,6 +1,6 @@
 import { contextBridge, ipcRenderer, clipboard } from 'electron';
 import * as os from 'node:os';
-import type { Settings, SavedSession, AgentEvent, ApprovalRequest, ChatTurn, Workspace, WorkspaceDef, WorkspaceBlueprint, Block, Issue } from './shared/types';
+import type { Settings, SavedSession, AgentEvent, ApprovalRequest, ChatTurn, Workspace, WorkspaceDef, WorkspaceBlueprint, Block, Issue, DbCredMeta } from './shared/types';
 import type { ProviderId } from './providers'; // type-only — erased at build, no main-process code pulled in
 
 // Real identity for the Blocks-view prompt line (user@host + home for ~ shortening).
@@ -11,7 +11,8 @@ type BlockEvt = { type: 'start' | 'update' | 'end'; block: Block } | { type: 'cw
 // The only surface the renderer can touch. No Node, no fs, no API keys here.
 const api = {
   // --- terminals (real PTYs) ---
-  ptyCreate: (id: string, cwd: string, cols: number, rows: number, restore?: string, runCmd?: string): Promise<{ reattached: boolean; alt: boolean }> => ipcRenderer.invoke('pty:create', { id, cwd, cols, rows, restore, runCmd }),
+  // `dbCredId` (optional) references a saved DB credential template — main resolves it into env vars for the run.
+  ptyCreate: (id: string, cwd: string, cols: number, rows: number, restore?: string, runCmd?: string, dbCredId?: string): Promise<{ reattached: boolean; alt: boolean }> => ipcRenderer.invoke('pty:create', { id, cwd, cols, rows, restore, runCmd, dbCredId }),
   ptyWrite: (id: string, data: string) => ipcRenderer.send('pty:write', { id, data }),
   ptyResize: (id: string, cols: number, rows: number) => ipcRenderer.send('pty:resize', { id, cols, rows }),
   ptyDetach: (id: string) => ipcRenderer.send('pty:detach', { id }),
@@ -42,6 +43,13 @@ const api = {
 
   // --- keys (write-only from the UI) ---
   setKey: (provider: string, value: string): Promise<Settings> => ipcRenderer.invoke('keys:set', { provider, value }),
+
+  // --- database credential templates (encrypted in the main process; the renderer only ever sees metadata) ---
+  // The password + any extra-var VALUES stay in the OS keychain and never come back here — save is write-only for
+  // secrets (blank password / blank extra value on edit = keep the stored one). Every call returns the fresh list.
+  dbCredsList: (): Promise<DbCredMeta[]> => ipcRenderer.invoke('dbcreds:list'),
+  dbCredSave: (input: { id?: string; label: string; engine?: string; host?: string; port?: string; database?: string; user?: string; password?: string; extras?: Record<string, string> }): Promise<DbCredMeta[]> => ipcRenderer.invoke('dbcreds:save', input),
+  dbCredDelete: (id: string): Promise<DbCredMeta[]> => ipcRenderer.invoke('dbcreds:delete', { id }),
 
   // --- sessions (the Library) ---
   listSessions: (): Promise<SavedSession[]> => ipcRenderer.invoke('sessions:list'),

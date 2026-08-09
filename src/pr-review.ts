@@ -15,6 +15,7 @@ import { toast } from './ui';
 import { prPipelines, prPipelineById, renderBrief, nextEdge, stageIndexById, STOP, kindSpec, type PipelineDef, type BriefCtx } from './pipelines';
 import { openPipelineBuilder } from './pipeline-editor';
 import { AGENTS } from './agents-list';
+import { dbCredOptions, dbCredNote, loadDbCreds, dbCredMetas } from './dbcreds';
 
 const relay = (window as any).relay;
 
@@ -27,7 +28,7 @@ export interface PrRef { number: number; title?: string; branch: string; url?: s
 export interface PrCtx { provider: ProviderId; repo: string; dir: string; }
 
 export interface PrReviewDeps {
-  openAgentTab: (o: { cwd: string; name: string; runCmd?: string }) => void; // open a terminal tab in the worktree, launching the agent
+  openAgentTab: (o: { cwd: string; name: string; runCmd?: string; dbCredId?: string }) => void; // open a terminal tab in the worktree, launching the agent (dbCredId → inject a DB credential template into its env)
   refresh: () => void;                                                        // re-render the PR rail (a run's status changed)
 }
 let deps: PrReviewDeps;
@@ -51,6 +52,18 @@ function setPrPipeline(prov: ProviderId, repo: string, n: number, id: string): P
     try { state.settings = await relay.patchSettings({ prPipelineByKey: map }); } catch { /* keep the in-memory pick */ }
   });
   return prPipeWriteChain;
+}
+// Per-PR DB credential template id (see dbcreds.ts), keyed like the per-PR pipeline. Injected into each review
+// stage's env so the agent can exercise the change against a real database without being asked for credentials.
+function prDbCredFor(prov: ProviderId, repo: string, n: number): string { return (state.settings.prDbCredByKey || {})[prPipeKey(prov, repo, n)] || ''; }
+let prDbCredWriteChain: Promise<void> = Promise.resolve();
+function setPrDbCred(prov: ProviderId, repo: string, n: number, id: string): Promise<void> {
+  prDbCredWriteChain = prDbCredWriteChain.then(async () => {
+    const map = { ...(state.settings.prDbCredByKey || {}) };
+    if (id) map[prPipeKey(prov, repo, n)] = id; else delete map[prPipeKey(prov, repo, n)];
+    try { state.settings = await relay.patchSettings({ prDbCredByKey: map }); } catch { /* keep the in-memory pick */ }
+  });
+  return prDbCredWriteChain;
 }
 const clonePipeline = (p: PipelineDef): PipelineDef => JSON.parse(JSON.stringify(p));
 
@@ -100,14 +113,17 @@ async function launchPrStage(key: string, idx: number): Promise<void> {
   run.stageIdx = idx; run.awaiting = false; run.reason = undefined; // not awaiting yet — clear the stale verdict FIRST (below)
   prRunStatus.set(key, stageToStatus(stage.kind)); // synchronous, so workingCount() is correct before the async prep
   const briefRel = idx === 0 ? run.brief0Rel : `.slayer/stage-${idx}.md`;
+  // A referenced DB credential template → injected into this stage's env (every stage is its own shell) and its
+  // note appended to LATER-stage briefs too (stage 0 already carries the note from the Assign dialog's textarea).
+  const dbCredId = prDbCredFor(run.provider, run.repo, run.number);
   // Stage 0's brief file is already on disk (pr-worktree-add wrote it); write later stages + clear this stage's
   // stale verdict so a reused worktree can't read a previous run's pass/fail. Then launch the agent on the FILE.
-  const brief = renderBrief(stage.brief, prBriefCtx(run, idx));
+  const brief = renderBrief(stage.brief, prBriefCtx(run, idx)) + dbCredNote(dbCredId);
   await relay.pipelinePrep(run.wt, idx === 0 ? null : briefRel, idx === 0 ? null : brief, idx).catch(() => {});
   if (!prRuns.has(key)) return;                      // freed/cleared while we prepped
   run.awaiting = !!stage.edges?.length;              // only NOW poll for a verdict — after the stale one is gone (no early stale read)
   const agent = AGENTS.find((a) => a.id === run.agentId);
-  deps.openAgentTab({ cwd: run.wt, name: `PR #${run.number} · ${stage.name.toLowerCase()}`, runCmd: agent ? agent.launch(briefRel) : undefined });
+  deps.openAgentTab({ cwd: run.wt, name: `PR #${run.number} · ${stage.name.toLowerCase()}`, runCmd: agent ? agent.launch(briefRel) : undefined, dbCredId: dbCredId || undefined });
   deps.refresh(); ensureStagePoll();
 }
 
@@ -225,6 +241,7 @@ export async function openPrAssign(pr: PrRef, ctx: PrCtx): Promise<void> {
   const repo = pr.repo || ctx.repo;
   const dir = ctx.dir;
   const num = pr.number;
+  await loadDbCreds();   // refresh the saved DB credential templates so the picker is current
   const detected = await relay.agentsDetect().catch(() => ({} as Record<string, boolean>));
   const installed = AGENTS.filter((a) => detected[a.id]);
   const agentOk = installed.length > 0;
@@ -238,6 +255,7 @@ export async function openPrAssign(pr: PrRef, ctx: PrCtx): Promise<void> {
   let head = prHead(num, pr.title || '', '');
   let base = '';
   let briefDirty = false;
+  let selectedDbCred = prDbCredFor(prov, repo, num);   // DB credential template injected into the review run's env
   const running = prStatusOf(prov, repo, num);
   const active = running !== 'idle' && running !== 'ready' && running !== 'changes';
   const primary = agentOk ? '⚡ Run review' : 'Create worktree & open';
@@ -251,8 +269,9 @@ export async function openPrAssign(pr: PrRef, ctx: PrCtx): Promise<void> {
         <div class="iss-agentrow"><label class="iss-lbl" style="margin:0">Pipeline</label><select class="iss-agentsel" id="prPipeSel">${pipeOpts()}</select><button class="iss-pipebuild" id="prPipeBuild" title="Build / edit pipelines">✎ Build</button></div>
         <div class="pipe-preview" id="prGraph">${pipePreview(pipeline)}</div>
         <div class="iss-pipedesc" id="prPipeDesc">${esc(pipeline.desc)}</div>
+        ${dbCredMetas().length ? `<div class="iss-agentrow"><label class="iss-lbl" style="margin:0">Database</label><select class="iss-agentsel" id="prDb">${dbCredOptions(selectedDbCred)}</select></div>` : ''}
         <label class="iss-lbl">Brief · <span id="prBriefStage">${esc(pipeline.stages[0].name)}</span> stage <span class="mut">— edit before launch</span></label>
-        <textarea class="iss-brief" spellcheck="false" rows="10" id="prBrief">${esc(stageBriefText(pipeline, 0, { number: num, title: pr.title || '', headText: head, base }))}</textarea>
+        <textarea class="iss-brief" spellcheck="false" rows="10" id="prBrief">${esc(stageBriefText(pipeline, 0, { number: num, title: pr.title || '', headText: head, base }) + dbCredNote(selectedDbCred))}</textarea>
         <div class="iss-wt">Checks out <code>${esc(pr.branch)}</code> into an isolated worktree on <code>pr-${num}</code> and reviews the real diff. Later stages use their built-in briefs.</div>
       </div>
       <div class="ft"><span class="hint">Saved as <code>.slayer/pr-${num}.md</code> (git-excluded)</span><span class="r"><button class="tpl-btn ghost" data-x>Cancel</button><button class="tpl-btn pri" data-ok>${primary}</button></span></div>
@@ -268,9 +287,11 @@ export async function openPrAssign(pr: PrRef, ctx: PrCtx): Promise<void> {
     const g = root.querySelector('#prGraph'); if (g) g.innerHTML = pipePreview(pipeline);
     const d = root.querySelector('#prPipeDesc'); if (d) d.textContent = pipeline.desc;
     const bs = root.querySelector('#prBriefStage'); if (bs) bs.textContent = pipeline.stages[0]?.name || '';
-    if (!briefDirty) ta.value = stageBriefText(pipeline, 0, { number: num, title: pr.title || '', headText: head, base });
+    if (!briefDirty) ta.value = stageBriefText(pipeline, 0, { number: num, title: pr.title || '', headText: head, base }) + dbCredNote(selectedDbCred);
   };
   if (psel) psel.onchange = () => { pipelineId = psel.value; void setPrPipeline(prov, repo, num, pipelineId); syncPipe(); };
+  const dbSel = root.querySelector('#prDb') as HTMLSelectElement | null;   // pick a DB credential template → persist + re-seed the DB note (unless edited)
+  if (dbSel) dbSel.onchange = () => { selectedDbCred = dbSel.value; void setPrDbCred(prov, repo, num, selectedDbCred); if (!briefDirty) ta.value = stageBriefText(pipeline, 0, { number: num, title: pr.title || '', headText: head, base }) + dbCredNote(selectedDbCred); };
   root.querySelector('#prPipeBuild')?.addEventListener('click', () => {
     openPipelineBuilder(pipeline, (savedId) => {
       if (savedId) { pipelineId = savedId; void setPrPipeline(prov, repo, num, pipelineId); }
@@ -289,7 +310,7 @@ export async function openPrAssign(pr: PrRef, ctx: PrCtx): Promise<void> {
     if (!root.isConnected || !res || !res.ok || !res.detail) return;
     head = prHead(num, res.detail.title || pr.title || '', res.detail.body);
     base = res.detail.baseBranch || '';
-    if (!briefDirty) ta.value = stageBriefText(pipeline, 0, { number: num, title: res.detail.title || pr.title || '', headText: head, base });
+    if (!briefDirty) ta.value = stageBriefText(pipeline, 0, { number: num, title: res.detail.title || pr.title || '', headText: head, base }) + dbCredNote(selectedDbCred);
   }
 
   setTimeout(() => ta.focus(), 30);

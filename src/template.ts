@@ -156,20 +156,44 @@ export function appHtml(panes: string): string {
 
   <div class="modal" id="settings">
     <div class="modal-head">Settings</div>
-    <div class="modal-sub">API keys are encrypted with your OS keychain and stay in the app's main process — never in this window.</div>
+    <div class="set-tabs" id="setTabs">
+      <button type="button" class="set-tab active" data-tab="general">General</button>
+      <button type="button" class="set-tab" data-tab="agents">Agents</button>
+      <button type="button" class="set-tab" data-tab="keys">API Keys</button>
+      <button type="button" class="set-tab" data-tab="terminal">Terminal</button>
+      <button type="button" class="set-tab" data-tab="notif">Notifications</button>
+    </div>
     <div class="modal-body">
-      <div class="field"><label>Theme</label><div class="theme-grid" id="themeGrid"></div><div class="fhint">Recolors the whole app and the terminal. Quick-cycle with the ◐ button in the title bar.</div></div>
-      <div class="field"><label>Project folder</label><div class="row"><input id="setWs" readonly placeholder="none"><button class="set" id="setWsBtn">Choose…</button></div></div>
-      <div class="field"><label>Open files in</label><select id="fileEditorSel"></select><div class="fhint">Which editor a clicked file (in the Files list or a terminal path) opens in. Non-code files always use your OS default, and it falls back to the OS default if the editor isn't installed.</div></div>
-      <div class="field"><label>Anthropic API key (Claude) <span class="opt">optional</span></label><div class="row"><input id="keyAnthropic" type="password" placeholder="blank = use your Claude Code login"><button class="set" data-key="anthropic">Save</button></div><div class="state off" id="stateAnthropic">not set</div><div class="fhint">Leave blank to sign in with your Claude subscription / Claude Code login (or an environment key). Paste a key only to override.</div></div>
-      <div class="field"><label>OpenAI API key (GPT)</label><div class="row"><input id="keyOpenai" type="password" placeholder="sk-…"><button class="set" data-key="openai">Save</button></div><div class="state off" id="stateOpenai">not set</div></div>
-      <div class="field"><label>Google AI API key (Gemini)</label><div class="row"><input id="keyGoogle" type="password" placeholder="AIza…"><button class="set" data-key="google">Save</button></div><div class="state off" id="stateGoogle">not set</div></div>
-      <label class="chk"><input type="checkbox" id="autoApprove"> Auto-approve agent file writes & commands (skip the confirm step)</label>
-      <label class="chk"><input type="checkbox" id="shellIntegration"> Command blocks — capture each command as a block in History (shell integration; applies to new terminals)</label>
-      <label class="chk"><input type="checkbox" id="blocksViewSet"> Blocks view — show commands as blocks in the main terminal (full-screen apps drop to the live terminal automatically)</label>
-      <label class="chk"><input type="checkbox" id="notifySet"> Notify me when a long command finishes while Slayer T isn't focused</label>
-      <label class="chk"><input type="checkbox" id="notifyIssuesSet"> Notify me about new/closed issues &amp; pull requests across my tracked repos</label>
-      <div class="field"><label>Something broke?</label><div class="row"><button class="set" id="btnReportBug">Report a bug…</button><button class="set" id="btnRevealLog">Reveal error log</button></div><div class="fhint">Collects the app version, OS, and the recent error log (secrets scrubbed), copies it to your clipboard, and opens a pre-filled GitHub issue.</div></div>
+      <!-- General -->
+      <div class="set-panel active" data-panel="general">
+        <div class="field"><label>Theme</label><div class="theme-grid" id="themeGrid"></div><div class="fhint">Recolors the whole app and the terminal. Quick-cycle with the ◐ button in the title bar.</div></div>
+        <div class="field"><label>Project folder</label><div class="row"><input id="setWs" readonly placeholder="none"><button class="set" id="setWsBtn">Choose…</button></div></div>
+        <div class="field"><label>Open files in</label><select id="fileEditorSel"></select><div class="fhint">Which editor a clicked file (in the Files list or a terminal path) opens in. Non-code files always use your OS default, and it falls back to the OS default if the editor isn't installed.</div></div>
+        <div class="field"><label>Something broke?</label><div class="row"><button class="set" id="btnReportBug">Report a bug…</button><button class="set" id="btnRevealLog">Reveal error log</button></div><div class="fhint">Collects the app version, OS, and the recent error log (secrets scrubbed), copies it to your clipboard, and opens a pre-filled GitHub issue.</div></div>
+      </div>
+      <!-- Agents & Pipelines -->
+      <div class="set-panel" data-panel="agents">
+        <div class="field"><label>Pipeline stage prompts <span class="mut">— default brief per stage type</span></label><div class="row"><select id="pbriefKind"></select><button class="set" id="pbriefReset">Reset default</button></div><textarea class="pbrief-ta" id="pbriefText" rows="10" spellcheck="false"></textarea><div class="fhint">Edit the default prompt for each pipeline stage type. New stages you add in the pipeline builder — and task validation — start from it. <b>Reset</b> restores the built-in. Existing pipelines keep their own saved briefs.</div></div>
+        <div class="field"><label>Database credentials <span class="mut">— reusable templates for pipeline runs</span></label><div class="db-list" id="dbCredList"></div><button class="set" id="dbAddBtn">+ Add credential</button><div class="fhint">Save a database connection once, then pick it when you assign an issue, PR, or task. It's injected into that run's environment (<code>DB_HOST</code>, <code>DB_USER</code>, <code>DB_PASSWORD</code>, <code>DATABASE_URL</code>, …) so the agent can connect without asking. Encrypted in your OS keychain — the password never reaches this window or gets written to a file.</div></div>
+        <label class="chk"><input type="checkbox" id="autoApprove"> Auto-approve agent file writes & commands (skip the confirm step)</label>
+      </div>
+      <!-- API Keys -->
+      <div class="set-panel" data-panel="keys">
+        <div class="set-note">API keys are encrypted with your OS keychain and stay in the app's main process — never in this window.</div>
+        <div class="field"><label>Anthropic API key (Claude) <span class="opt">optional</span></label><div class="row"><input id="keyAnthropic" type="password" placeholder="blank = use your Claude Code login"><button class="set" data-key="anthropic">Save</button></div><div class="state off" id="stateAnthropic">not set</div><div class="fhint">Leave blank to sign in with your Claude subscription / Claude Code login (or an environment key). Paste a key only to override.</div></div>
+        <div class="field"><label>OpenAI API key (GPT)</label><div class="row"><input id="keyOpenai" type="password" placeholder="sk-…"><button class="set" data-key="openai">Save</button></div><div class="state off" id="stateOpenai">not set</div></div>
+        <div class="field"><label>Google AI API key (Gemini)</label><div class="row"><input id="keyGoogle" type="password" placeholder="AIza…"><button class="set" data-key="google">Save</button></div><div class="state off" id="stateGoogle">not set</div></div>
+      </div>
+      <!-- Terminal -->
+      <div class="set-panel" data-panel="terminal">
+        <label class="chk"><input type="checkbox" id="shellIntegration"> Command blocks — capture each command as a block in History (shell integration; applies to new terminals)</label>
+        <label class="chk"><input type="checkbox" id="blocksViewSet"> Blocks view — show commands as blocks in the main terminal (full-screen apps drop to the live terminal automatically)</label>
+      </div>
+      <!-- Notifications -->
+      <div class="set-panel" data-panel="notif">
+        <label class="chk"><input type="checkbox" id="notifySet"> Notify me when a long command finishes while Slayer T isn't focused</label>
+        <label class="chk"><input type="checkbox" id="notifyIssuesSet"> Notify me about new/closed issues &amp; pull requests across my tracked repos</label>
+      </div>
     </div>
     <div class="modal-foot"><button class="btn primary" id="settingsClose">Done</button></div>
   </div>
