@@ -177,6 +177,7 @@ button{font-family:inherit;color:inherit;cursor:pointer;border:none;background:n
 .nt-t{font:600 11.5px/1.3 var(--sans);color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .nt-s{font:11px/1.3 var(--sans);color:var(--text-dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .nt-m{font:9.5px/1.3 var(--mono);color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.nt-who{color:var(--accent-2)}   /* the actor (issue/PR author, or who closed it) — stands out from repo·time */
 /* notification settings dialog — Sources-style per-provider sections (reuses .src-* styles) */
 .ns-card{width:min(460px,94vw)}
 .ns-card .bd{max-height:64vh;overflow-y:auto}

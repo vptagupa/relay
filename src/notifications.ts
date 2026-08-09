@@ -52,7 +52,7 @@ function modal(html: string, onClose?: () => void): { root: HTMLElement; close: 
 }
 
 // Per-repo open-item snapshot, IN-MEMORY only (re-seeded on boot, so a fresh run never replays past events).
-interface Item { n: number; t: string; u: string; }
+interface Item { n: number; t: string; u: string; a?: string; }   // a = author/owner (issue creator / PR author), captured for the notification actor
 // iSeen/pSeen = whether that side has been fetched successfully at least once. Detection for a side starts only
 // AFTER its first success (its seeding poll), so a fetch that failed on the seeding poll can't later look "all new".
 interface Snap { i: Item[]; p: Item[]; iFull: boolean; pFull: boolean; iSeen: boolean; pSeen: boolean; }
@@ -104,8 +104,8 @@ async function pollRepo(ws: string, repoId: string): Promise<AppNotification[]> 
     relay.providerPrs(ws, provider, repo, 'open', 1).catch(() => ({ ok: false })),
   ]);
   if (!ir.ok && !pr.ok) return [];                            // both not connected / errored — skip, keep last snapshot
-  const curI: Item[] = ir.ok ? (ir.issues || []).map((x: { number: number; title: string; url: string }) => ({ n: x.number, t: x.title, u: x.url })) : [];
-  const curP: Item[] = pr.ok ? (pr.prs || []).map((x: { number: number; title?: string; url: string }) => ({ n: x.number, t: x.title || '', u: x.url })) : [];
+  const curI: Item[] = ir.ok ? (ir.issues || []).map((x: { number: number; title: string; url: string; author?: string }) => ({ n: x.number, t: x.title, u: x.url, a: x.author })) : [];
+  const curP: Item[] = pr.ok ? (pr.prs || []).map((x: { number: number; title?: string; url: string; author?: string }) => ({ n: x.number, t: x.title || '', u: x.url, a: x.author })) : [];
   const prev = snap.get(key);
   // Update only the side we actually refreshed; mark it "seen" on its first success (a failed side is never seeded).
   const next: Snap = {
@@ -115,7 +115,7 @@ async function pollRepo(ws: string, repoId: string): Promise<AppNotification[]> 
   };
   snap.set(key, next);
   const out: AppNotification[] = [];
-  const mk = (kind: AppNotification['kind'], it: Item): AppNotification => ({ id: `${kind}:${provider}:${repo}#${it.n}`, kind, provider, repo, number: it.n, title: it.t, url: it.u, ts: Date.now(), read: false });
+  const mk = (kind: AppNotification['kind'], it: Item): AppNotification => ({ id: `${kind}:${provider}:${repo}#${it.n}`, kind, provider, repo, number: it.n, title: it.t, url: it.u, actor: it.a, ts: Date.now(), read: false });
   // Detect a side ONLY if it had a prior successful snapshot (prev.<side>Seen) — so its seeding poll is silent.
   if (ir.ok && prev?.iSeen) {
     const prevMaxI = prev.i.reduce((m, x) => Math.max(m, x.n), 0);
@@ -172,7 +172,7 @@ function firePush(notes: AppNotification[]): void {
   if (state.settings.issuePushNotify === false) return;      // default on
   try {
     if (notes.length <= PUSH_CAP) {
-      for (const n of notes) new Notification(`${KIND_LABEL[n.kind]} · ${n.repo}`, { body: `#${n.number} ${n.title}`.trim().slice(0, 140) });
+      for (const n of notes) new Notification(`${KIND_LABEL[n.kind]} · ${n.repo}`, { body: `#${n.number} ${n.title}${n.actor ? ` · ${n.actor}` : ''}`.trim().slice(0, 140) });
     } else {
       new Notification('Slayer T · issues & PRs', { body: `${notes.length} new updates across your repos` });
     }
@@ -191,7 +191,7 @@ function renderMenu(): void {
   const list = listFor(wsKey());
   const rows = list.length ? list.map((it) => `<button class="nt-item${it.read ? '' : ' unread'}" data-url="${esc(it.url)}" data-id="${esc(it.id)}">
       <span class="nt-ic">${KIND_ICON[it.kind]}</span>
-      <span class="nt-b"><span class="nt-t">${esc(KIND_LABEL[it.kind])} #${it.number}</span><span class="nt-s">${esc(it.title || it.repo)}</span><span class="nt-m">${esc(it.repo)} · ${esc(relTime(it.ts))}</span></span>
+      <span class="nt-b"><span class="nt-t">${esc(KIND_LABEL[it.kind])} #${it.number}</span><span class="nt-s">${esc(it.title || it.repo)}</span><span class="nt-m">${it.actor ? `<span class="nt-who">${esc(it.actor)}</span> · ` : ''}${esc(it.repo)} · ${esc(relTime(it.ts))}</span></span>
     </button>`).join('') : '<div class="nt-empty">No notifications yet.</div>';
   menu.innerHTML = `<div class="nt-head"><span>Notifications</span><span class="nt-acts">${list.length ? '<button class="nt-a" data-act="read">Mark all read</button><button class="nt-a" data-act="clear">Clear</button>' : ''}<button class="nt-a" data-act="settings" title="Notification settings">⚙</button></span></div><div class="nt-list">${rows}</div>`;
   menu.querySelectorAll<HTMLElement>('.nt-item').forEach((b) => { b.onclick = (e) => { e.stopPropagation(); markRead(b.dataset.id!); const u = b.dataset.url; if (u) relay.openExternal(u); toggleMenu(false); }; });
@@ -235,13 +235,13 @@ function genSecret(): string {
 }
 // A parsed webhook event (main → renderer) → route into the bell for every workspace watching that repo. Dedup
 // against the poller happens in commit() by stable id, so webhooks (instant) and the poll (fallback) can't double.
-function handleWebhookEvent(ev: { kind: string; provider: string; repo: string; number: number; title: string; url: string }): void {
+function handleWebhookEvent(ev: { kind: string; provider: string; repo: string; number: number; title: string; url: string; actor?: string }): void {
   const kind = ev.kind as AppNotification['kind'];
   if (kind !== 'new-issue' && kind !== 'closed-issue' && kind !== 'new-pr' && kind !== 'closed-pr') return;
   const repoId = `${ev.provider}:${ev.repo}`;
   const fresh: { ws: string; note: AppNotification }[] = [];
   for (const ws of watchedWorkspaces()) {
-    if (watchedRepos(ws).includes(repoId)) fresh.push({ ws, note: { id: `${kind}:${ev.provider}:${ev.repo}#${ev.number}`, kind, provider: ev.provider, repo: ev.repo, number: ev.number, title: ev.title || '', url: ev.url || '', ts: Date.now(), read: false } });
+    if (watchedRepos(ws).includes(repoId)) fresh.push({ ws, note: { id: `${kind}:${ev.provider}:${ev.repo}#${ev.number}`, kind, provider: ev.provider, repo: ev.repo, number: ev.number, title: ev.title || '', url: ev.url || '', actor: ev.actor || undefined, ts: Date.now(), read: false } });
   }
   if (fresh.length) commit(fresh);
 }

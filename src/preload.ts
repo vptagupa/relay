@@ -94,7 +94,7 @@ const api = {
   // Real-time notifications via a local webhook receiver: start/stop it, and subscribe to parsed issue/PR events.
   webhookControl: (enabled: boolean, port: number, secret: string): Promise<{ ok: boolean; running: boolean; error?: string }> => ipcRenderer.invoke('webhook:control', { enabled, port, secret }),
   webhookStatus: (): Promise<{ running: boolean }> => ipcRenderer.invoke('webhook:status'),
-  onWebhookEvent: (cb: (ev: { kind: string; provider: string; repo: string; number: number; title: string; url: string }) => void): void => { ipcRenderer.on('webhook:event', (_e, ev) => cb(ev)); },
+  onWebhookEvent: (cb: (ev: { kind: string; provider: string; repo: string; number: number; title: string; url: string; actor?: string }) => void): void => { ipcRenderer.on('webhook:event', (_e, ev) => cb(ev)); },
   // "Report a bug" diagnostics: app/OS versions + a scrubbed tail of the crash log; and reveal the log file.
   collectDiagnostics: (): Promise<{ version: string; os: string; arch: string; electron: string; chrome: string; node: string; logTail: string }> => ipcRenderer.invoke('diag:collect'),
   revealLog: (): Promise<{ ok: boolean }> => ipcRenderer.invoke('diag:reveal'),

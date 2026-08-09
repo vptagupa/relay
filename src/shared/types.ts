@@ -196,6 +196,7 @@ export interface AppNotification {
   number: number;
   title: string;
   url: string;
+  actor?: string;                                // the person behind it: issue/PR author (new), or who closed/merged it (webhook)
   ts: number;                                    // when we detected it (epoch ms)
   read: boolean;
 }

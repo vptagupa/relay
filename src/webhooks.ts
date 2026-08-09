@@ -15,6 +15,7 @@ export interface WebhookEvent {
   number: number;
   title: string;
   url: string;
+  actor?: string;          // who performed it (sender / merged_by / closer) — shown in the notification
 }
 
 const asObj = (x: unknown): Record<string, unknown> => (x && typeof x === 'object' ? x as Record<string, unknown> : {});
@@ -68,14 +69,16 @@ function parse(req: http.IncomingMessage, raw: Buffer, secret: string): { auth: 
     if (!verifyGithub(raw, str(h['x-hub-signature-256']), secret)) return { auth: false, event: null };
     const j = asObj(JSON.parse(raw.toString('utf8')));
     const repo = str(asObj(j.repository).full_name);
+    const actor = str(asObj(j.sender).login);            // who triggered the event
     if (gh === 'issues') {
       const i = asObj(j.issue), a = str(j.action);
-      if (a === 'opened') return { auth: true, event: { kind: 'new-issue', provider: 'github', repo, number: Number(i.number) || 0, title: str(i.title), url: str(i.html_url) } };
-      if (a === 'closed') return { auth: true, event: { kind: 'closed-issue', provider: 'github', repo, number: Number(i.number) || 0, title: str(i.title), url: str(i.html_url) } };
+      if (a === 'opened') return { auth: true, event: { kind: 'new-issue', provider: 'github', repo, number: Number(i.number) || 0, title: str(i.title), url: str(i.html_url), actor } };
+      if (a === 'closed') return { auth: true, event: { kind: 'closed-issue', provider: 'github', repo, number: Number(i.number) || 0, title: str(i.title), url: str(i.html_url), actor } };
     } else if (gh === 'pull_request') {
       const p = asObj(j.pull_request), a = str(j.action);
-      if (a === 'opened') return { auth: true, event: { kind: 'new-pr', provider: 'github', repo, number: Number(p.number) || 0, title: str(p.title), url: str(p.html_url) } };
-      if (a === 'closed') return { auth: true, event: { kind: 'closed-pr', provider: 'github', repo, number: Number(p.number) || 0, title: str(p.title), url: str(p.html_url) } };
+      if (a === 'opened') return { auth: true, event: { kind: 'new-pr', provider: 'github', repo, number: Number(p.number) || 0, title: str(p.title), url: str(p.html_url), actor } };
+      // A merged PR arrives as closed with merged_by set — prefer that (who merged/approved) over the raw sender.
+      if (a === 'closed') return { auth: true, event: { kind: 'closed-pr', provider: 'github', repo, number: Number(p.number) || 0, title: str(p.title), url: str(p.html_url), actor: str(asObj(p.merged_by).login) || actor } };
     }
     return { auth: true, event: null };
   }
@@ -85,13 +88,14 @@ function parse(req: http.IncomingMessage, raw: Buffer, secret: string): { auth: 
     if (str(h['x-gitlab-token']) !== secret) return { auth: false, event: null };
     const j = asObj(JSON.parse(raw.toString('utf8')));
     const repo = str(asObj(j.project).path_with_namespace);
+    const actor = str(asObj(j.user).username) || str(asObj(j.user).name);   // the GitLab user who triggered the hook
     const oa = asObj(j.object_attributes), a = str(oa.action);
     if (gl === 'Issue Hook') {
-      if (a === 'open' || a === 'reopen') return { auth: true, event: { kind: 'new-issue', provider: 'gitlab', repo, number: Number(oa.iid) || 0, title: str(oa.title), url: str(oa.url) } };
-      if (a === 'close') return { auth: true, event: { kind: 'closed-issue', provider: 'gitlab', repo, number: Number(oa.iid) || 0, title: str(oa.title), url: str(oa.url) } };
+      if (a === 'open' || a === 'reopen') return { auth: true, event: { kind: 'new-issue', provider: 'gitlab', repo, number: Number(oa.iid) || 0, title: str(oa.title), url: str(oa.url), actor } };
+      if (a === 'close') return { auth: true, event: { kind: 'closed-issue', provider: 'gitlab', repo, number: Number(oa.iid) || 0, title: str(oa.title), url: str(oa.url), actor } };
     } else if (gl === 'Merge Request Hook') {
-      if (a === 'open' || a === 'reopen') return { auth: true, event: { kind: 'new-pr', provider: 'gitlab', repo, number: Number(oa.iid) || 0, title: str(oa.title), url: str(oa.url) } };
-      if (a === 'close' || a === 'merge') return { auth: true, event: { kind: 'closed-pr', provider: 'gitlab', repo, number: Number(oa.iid) || 0, title: str(oa.title), url: str(oa.url) } };
+      if (a === 'open' || a === 'reopen') return { auth: true, event: { kind: 'new-pr', provider: 'gitlab', repo, number: Number(oa.iid) || 0, title: str(oa.title), url: str(oa.url), actor } };
+      if (a === 'close' || a === 'merge') return { auth: true, event: { kind: 'closed-pr', provider: 'gitlab', repo, number: Number(oa.iid) || 0, title: str(oa.title), url: str(oa.url), actor } };
     }
     return { auth: true, event: null };
   }
@@ -103,10 +107,11 @@ function parse(req: http.IncomingMessage, raw: Buffer, secret: string): { auth: 
     if (tok !== secret) return { auth: false, event: null };
     const j = asObj(JSON.parse(raw.toString('utf8')));
     const repo = str(asObj(j.repository).full_name);
-    if (bb === 'issue:created') { const i = asObj(j.issue); return { auth: true, event: { kind: 'new-issue', provider: 'bitbucket', repo, number: Number(i.id) || 0, title: str(i.title), url: str(asObj(asObj(i.links).html).href) } }; }
-    if (bb === 'issue:updated') { const i = asObj(j.issue), ch = asObj(asObj(j.changes).state); if (ch.new && !OPEN_BB.has(str(ch.new))) return { auth: true, event: { kind: 'closed-issue', provider: 'bitbucket', repo, number: Number(i.id) || 0, title: str(i.title), url: str(asObj(asObj(i.links).html).href) } }; }
-    if (bb === 'pullrequest:created') { const p = asObj(j.pullrequest); return { auth: true, event: { kind: 'new-pr', provider: 'bitbucket', repo, number: Number(p.id) || 0, title: str(p.title), url: str(asObj(asObj(p.links).html).href) } }; }
-    if (bb === 'pullrequest:fulfilled' || bb === 'pullrequest:rejected') { const p = asObj(j.pullrequest); return { auth: true, event: { kind: 'closed-pr', provider: 'bitbucket', repo, number: Number(p.id) || 0, title: str(p.title), url: str(asObj(asObj(p.links).html).href) } }; }
+    const actor = str(asObj(j.actor).nickname) || str(asObj(j.actor).display_name);   // the Bitbucket user who acted
+    if (bb === 'issue:created') { const i = asObj(j.issue); return { auth: true, event: { kind: 'new-issue', provider: 'bitbucket', repo, number: Number(i.id) || 0, title: str(i.title), url: str(asObj(asObj(i.links).html).href), actor } }; }
+    if (bb === 'issue:updated') { const i = asObj(j.issue), ch = asObj(asObj(j.changes).state); if (ch.new && !OPEN_BB.has(str(ch.new))) return { auth: true, event: { kind: 'closed-issue', provider: 'bitbucket', repo, number: Number(i.id) || 0, title: str(i.title), url: str(asObj(asObj(i.links).html).href), actor } }; }
+    if (bb === 'pullrequest:created') { const p = asObj(j.pullrequest); return { auth: true, event: { kind: 'new-pr', provider: 'bitbucket', repo, number: Number(p.id) || 0, title: str(p.title), url: str(asObj(asObj(p.links).html).href), actor } }; }
+    if (bb === 'pullrequest:fulfilled' || bb === 'pullrequest:rejected') { const p = asObj(j.pullrequest); return { auth: true, event: { kind: 'closed-pr', provider: 'bitbucket', repo, number: Number(p.id) || 0, title: str(p.title), url: str(asObj(asObj(p.links).html).href), actor } }; }
     return { auth: true, event: null };
   }
 
