@@ -759,6 +759,10 @@ function pipeMini(p: PipelineDef): string {
 function openDetails(i: Issue): void {
   const st = statusOf(i.number);
   const canAssign = st === 'idle' && issueState === 'open'; // don't offer to assign a closed issue (or one already in progress)
+  // A run can get stranded (e.g. you closed its agent tab), leaving the issue stuck on a live/queued/invalid
+  // status with its slot held — and since the row is non-idle, a click only opens these details. Offer an
+  // explicit stop-and-re-assign so a stranded run never wedges the issue.
+  const canReassign = issueState === 'open' && (st === 'validating' || st === 'fixing' || st === 'working' || st === 'queued' || st === 'invalid');
   const pc = PROVS[provider];
   const prWord = provider === 'gitlab' ? 'MR' : 'PR';
   const pr = prByBranch[`issue-${i.number}`];
@@ -785,12 +789,14 @@ function openDetails(i: Issue): void {
         ${i.milestone ? `<div class="det-meta"><span class="det-k">Milestone</span>${esc(i.milestone)}</div>` : ''}
         <div class="det-body">${body ? esc(body) : '<span class="mut">No description provided.</span>'}</div>
       </div>
-      <div class="ft"><span class="hint">${foot}</span><span class="r">${pr ? `<button class="tpl-btn ghost" data-pr>Open ${prWord} ↗</button>` : ''}<button class="tpl-btn ghost" data-ext>Open on ${esc(pc.name)} ↗</button>${st === 'invalid' && run ? '<button class="tpl-btn pri" data-override>▶ Run Fix anyway</button>' : ''}${canAssign ? '<button class="tpl-btn pri" data-assign>⚡ Assign…</button>' : ''}<button class="tpl-btn ${canAssign || st === 'invalid' ? 'ghost' : 'pri'}" data-x>${canAssign || st === 'invalid' ? 'Close' : 'Done'}</button></span></div>
+      <div class="ft"><span class="hint">${foot}</span><span class="r">${pr ? `<button class="tpl-btn ghost" data-pr>Open ${prWord} ↗</button>` : ''}<button class="tpl-btn ghost" data-ext>Open on ${esc(pc.name)} ↗</button>${st === 'invalid' && run ? '<button class="tpl-btn pri" data-override>▶ Run Fix anyway</button>' : ''}${canReassign ? `<button class="tpl-btn ${st === 'invalid' ? 'ghost' : 'pri'}" data-reassign>${st === 'queued' ? '⟲ Cancel & re-assign' : '⟲ Stop & re-assign'}</button>` : ''}${canAssign ? '<button class="tpl-btn pri" data-assign>⚡ Assign…</button>' : ''}<button class="tpl-btn ${canAssign || canReassign ? 'ghost' : 'pri'}" data-x>${canAssign || canReassign ? 'Close' : 'Done'}</button></span></div>
     </div>`);
   root.querySelector('[data-x]')?.addEventListener('click', close);
   root.querySelector('[data-ext]')?.addEventListener('click', () => relay.openExternal(i.url));
   root.querySelector('[data-pr]')?.addEventListener('click', () => { if (pr) relay.openExternal(pr.url); });
   root.querySelector('[data-assign]')?.addEventListener('click', () => { close(); void openAssign(i); });
+  // Stop the stranded run (free its slot / drop it from the queue), then open a fresh Assign for the issue.
+  root.querySelector('[data-reassign]')?.addEventListener('click', () => { close(); if (st === 'queued') cancelQueued(i.number); else freeSlot(i.number); void openAssign(i); });
   root.querySelector('[data-override]')?.addEventListener('click', () => { close(); overrideInvalid(rk(i.number)); });
 }
 
