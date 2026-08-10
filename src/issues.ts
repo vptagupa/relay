@@ -14,6 +14,7 @@ import { allPipelines, pipelineById, isGate, nextEdge, stageIndexById, STOP, ren
 import { openPipelineBuilder } from './pipeline-editor';
 import { AGENTS } from './agents-list';
 import { dbCredOptions, dbCredNote, loadDbCreds, dbCredMetas } from './dbcreds';
+import { repoDepsFor } from './repo-deps';
 
 const relay = (window as any).relay;
 
@@ -861,7 +862,9 @@ async function openAssign(i: Issue): Promise<void> {
   // Dependency repos = the workspace's OTHER tracked repos (any provider) the agent may READ while fixing this
   // issue (e.g. a FE issue that needs the BE codebase). Persisted per-issue; linked read-only under .deps/.
   const depCandidates = ((state.settings.issueReposByWs || {})[wsKey()] || []).filter((id) => id !== `${asgProvider}:${asgRepo || ''}`);
-  const selectedDeps = new Set(issueDepsFor(asgProvider, asgRepo || '', i.number).filter((id) => depCandidates.includes(id)));
+  const savedDeps = issueDepsFor(asgProvider, asgRepo || '', i.number);
+  const initialDeps = savedDeps.length ? savedDeps : repoDepsFor(`${asgProvider}:${asgRepo || ''}`); // no saved deps → default to this repo's dependency template
+  const selectedDeps = new Set(initialDeps.filter((id) => depCandidates.includes(id)));
   let selectedDbCred = issueDbCredFor(asgProvider, asgRepo || '', i.number); // DB credential template injected into the run's env
   const seedBrief = () => stageBriefText(pipeline, 0, i, asgProvider) + depsNote([...selectedDeps]) + dbCredNote(selectedDbCred); // brief + .deps/ note + DB-creds note
   const { root, close } = modal(`<div class="tpl-card iss-card">

@@ -369,6 +369,14 @@ button{font-family:inherit;color:inherit;cursor:pointer;border:none;background:n
 .list-search{width:100%;box-sizing:border-box;margin:2px 0 7px;background:var(--surface-2);border:1px solid var(--border);border-radius:8px;color:var(--text);font:12px var(--sans);padding:7px 10px}
 .list-search:focus{outline:none;border-color:var(--accent-line)}
 .list-search::placeholder{color:var(--muted)}
+/* Repository-dependency templates (Settings → Agents) */
+.rd-deps{max-height:170px;overflow-y:auto;margin-top:8px}
+.rd-list{margin-top:8px;display:flex;flex-direction:column;gap:4px}
+.rd-row{display:flex;align-items:center;gap:8px;background:var(--surface-2);border:1px solid var(--border);border-radius:7px;padding:6px 10px;font-size:12px}
+.rd-main{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rd-del{flex:none;width:20px;height:20px;border:none;background:none;color:var(--muted);border-radius:5px;cursor:pointer;font-size:15px;line-height:1}
+.rd-del:hover{background:var(--border);color:var(--text)}
+.rd-hint{font-size:11px;color:var(--muted);padding:4px 0}
 .field .set{padding:0 12px;border-radius:8px;background:var(--accent);color:var(--on-accent);font-weight:600;font-size:12.5px}
 .field .state{font-size:11px;margin-top:5px}
 /* theme picker */

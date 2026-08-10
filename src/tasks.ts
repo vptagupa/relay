@@ -10,6 +10,7 @@ import { stageBrief, renderBrief } from './pipelines';
 import { AGENTS } from './agents-list';
 import { dbCredOptions, dbCredNote, loadDbCreds, dbCredMetas } from './dbcreds';
 import { authorBrief, reviewBrief, featureIssueBody, isFeatureTask, FEATURE_TAG } from './feature-spec';
+import { repoDepsFor } from './repo-deps';
 import type { Task } from './shared/types';
 
 const relay = (window as any).relay;
@@ -269,7 +270,9 @@ async function runValidate(t: Task): Promise<void> {
     : `Checks out <code>${esc(t.repo)}</code> at its latest default branch and asks the agent to confirm this is real. <b>If valid → an issue is filed</b> with the result; if not, no issue is created.`;
   // Dependency repos the validate agent may READ (linked read-only under .deps/) — the workspace's OTHER tracked repos.
   const depCandidates = ((state.settings.issueReposByWs || {})[wsKey()] || []).filter((id) => id !== `${t.provider}:${t.repo}`);
-  const selectedDeps = new Set((t.deps || []).filter((id) => depCandidates.includes(id)));
+  const savedDeps = t.deps || [];
+  const initialDeps = savedDeps.length ? savedDeps : repoDepsFor(`${t.provider}:${t.repo}`); // no saved deps → default to this repo's dependency template
+  const selectedDeps = new Set(initialDeps.filter((id) => depCandidates.includes(id)));
   let selectedDbCred = t.dbCredId || '';   // DB credential template injected into the run's env
   const seedBrief = () => (feature ? authorBrief(t, { webResearch: t.webResearch !== false }) : validateBrief(t) + tagNote(t.tags || [])) + depsNote([...selectedDeps]) + dbCredNote(selectedDbCred);
   const { root, close } = modal(`<div class="tpl-card iss-card">
