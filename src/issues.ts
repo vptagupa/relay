@@ -122,6 +122,8 @@ const activeFilters = new Set<string>();        // active local-tag filter chips
 const activeLabels = new Set<string>();         // active provider-label filter chips (AND)
 const activeAuthors = new Set<string>();        // active "created by" filter (OR — an issue has one author)
 let members: string[] = [];                      // the active repo's members — the author-filter list (∪ loaded authors)
+let membersFor = '';                             // the "provider:repo" the loaded members belong to — gate a re-fetch to a repo change
+let authorReloadT: number | null = null;         // debounce: coalesce rapid author toggles into one server-side re-query
 let mineOnly = false;                            // "assigned to me" toggle
 let myLogin = '';                                // the connected provider login (for "assigned to me")
 let issueState: 'open' | 'closed' = 'open';      // which issues to pull (server-side); default open
@@ -216,7 +218,8 @@ function wiredPath(p: PipelineDef): number[] {
   return path;
 }
 let prByBranch: Record<string, { url: string; draft: boolean }> = {}; // "issue-N" branch → its open PR/MR (review → ship)
-let lastKey: string | null = null; // the provider:repo the current filters/search belong to — reset them when it changes
+let lastKey: string | null = null; // the provider:repo:state the label/tag/search filters belong to — reset them when it changes
+let lastRepoKey: string | null = null; // the provider:repo the author filter belongs to — cleared only on a real repo switch (survives state toggles)
 // Assign queue: at most CAP agents run at once (per repo); the rest wait here and auto-launch when a
 // slot frees (a running issue reaches review → its PR/MR appears). Prepared worktrees make launch instant.
 const queue: QueueItem[] = [];
@@ -244,10 +247,18 @@ function authorOptions(): string[] {
   for (const i of issues) if (i.author) set.add(i.author);
   return [...set].sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
 }
-// The active repo's members (collaborators) — non-blocking; superseded by a newer pull. Unioned with loaded authors.
-async function loadMembers(seq: number, p: ProviderId, r: string, ws: string): Promise<void> {
+// The active repo's members (collaborators) — fetched ONCE per repo (keyed by mkey), so author/state toggles
+// don't re-request it; a repo switch (mkey changes) supersedes an in-flight fetch. Unioned with loaded authors.
+async function loadMembers(mkey: string, p: ProviderId, r: string, ws: string): Promise<void> {
   const res = await relay.providerRepoMembers(ws, p, r).catch(() => ({ ok: false } as { ok: boolean; members?: string[] }));
-  if (seq === loadSeq) members = res.ok && res.members ? res.members : [];
+  if (membersFor === mkey) members = res.ok && res.members ? res.members : [];
+}
+// A toggle re-queries the provider server-side, debounced so ticking several authors fires ONE fetch. render()
+// first, for an instant badge + a client-filtered preview of the already-loaded issues while the fetch runs.
+function onAuthorsChanged(): void {
+  render();
+  if (authorReloadT) clearTimeout(authorReloadT);
+  authorReloadT = window.setTimeout(() => { authorReloadT = null; void loadIssues(); }, 300);
 }
 // Per-owner totals over the CURRENTLY LOADED issues: how many each creator filed, and how many are fixed —
 // where "fixed" = the agent opened a PR/MR for it (status 'review') or the issue is closed/merged (closed view).
@@ -353,7 +364,8 @@ function render(): void {
   const searchEl = $('#issSearch'); if (searchEl) (searchEl as HTMLElement).style.display = (phase === 'ready' && issues.length > 0) ? '' : 'none';
   const authorEl = $('#issAuthor'); // author-filter icon — shown once issues load; badge = # of selected authors
   if (authorEl) {
-    (authorEl as HTMLElement).style.display = (phase === 'ready' && issues.length > 0) ? '' : 'none';
+    // Keep it visible while a filter is active (even mid-reload, or when the filter returns 0) so it's always clearable.
+    (authorEl as HTMLElement).style.display = ((phase === 'ready' && issues.length > 0) || activeAuthors.size > 0) ? '' : 'none';
     authorEl.classList.toggle('on', activeAuthors.size > 0);
     authorEl.setAttribute('data-n', activeAuthors.size ? String(activeAuthors.size) : '');
     authorEl.setAttribute('title', activeAuthors.size ? `Filtering by ${activeAuthors.size} author${activeAuthors.size > 1 ? 's' : ''}` : 'Filter by author');
@@ -373,7 +385,9 @@ function render(): void {
   }
   if (phase === 'norepo')  { el.innerHTML = hint('🗂️', 'No repo selected', esc(errMsg) || 'Pick a repo in Sources (⚙), or open a folder with a GitHub / GitLab / Bitbucket remote.'); return; }
   if (phase === 'error')   { el.innerHTML = hint('⚠️', 'Couldn’t pull issues', esc(errMsg)); return; }
-  if (!issues.length)      { el.innerHTML = hint('✓', `No ${issueState} issues`, repo ? esc(repo) : ''); return; }
+  if (!issues.length)      { el.innerHTML = activeAuthors.size
+      ? hint('✍', `No ${issueState} issues by the selected author${activeAuthors.size > 1 ? 's' : ''}`, 'Clear the author filter (✍) to see all.')
+      : hint('✓', `No ${issueState} issues`, repo ? esc(repo) : ''); return; }
 
   const vis = visibleIssues();
   if (!vis.length) { el.innerHTML = hint('🔍', 'No matching issues', 'Clear the search or a filter.'); return; }
@@ -480,11 +494,18 @@ export async function loadIssues(): Promise<void> {
   if (!repo) { phase = 'norepo'; errMsg = dir ? 'This folder’s git remote isn’t on a supported provider.' : 'No project folder is open.'; render(); return; }
   // Repo/provider switched → drop filters/search that belong to the previous one (they'd otherwise hide
   // every issue with no visible chip to clear). Run-status is provider+repo-keyed, no clearing needed.
-  const curKey = `${provider}:${repo}:${issueState}`;
-  if (curKey !== lastKey) { lastKey = curKey; activeFilters.clear(); activeLabels.clear(); activeAuthors.clear(); mineOnly = false; query = ''; const sEl = $('#issSearch') as HTMLInputElement | null; if (sEl) sEl.value = ''; }
+  const mkey = `${provider}:${repo}`;
+  const curKey = `${mkey}:${issueState}`;
+  // The author filter is applied SERVER-SIDE, so it must survive an Open↔Closed toggle (show me alice's CLOSED
+  // issues) — clear it only on a genuine repo/provider switch, unlike the label/tag/search chips.
+  if (mkey !== lastRepoKey) { lastRepoKey = mkey; activeAuthors.clear(); }
+  if (curKey !== lastKey) { lastKey = curKey; activeFilters.clear(); activeLabels.clear(); mineOnly = false; query = ''; const sEl = $('#issSearch') as HTMLInputElement | null; if (sEl) sEl.value = ''; }
   issuesPage = 1; issuesHasMore = false; loadingMore = false;      // reset infinite-scroll paging for the new pull
-  members = []; void loadMembers(seq, provider, repo, ws);         // author-filter list (non-blocking; unioned with loaded authors)
-  const r = await relay.providerIssues(ws, provider, repo, issueState, 1); if (seq !== loadSeq) return;
+  if (membersFor !== mkey) { membersFor = mkey; members = []; void loadMembers(mkey, provider, repo, ws); } // members: once per repo, not per state/author reload
+  // Server-side author filter: when authors are picked, the provider returns only their issues (a bounded set,
+  // no infinite scroll) — finding matches beyond the loaded pages, not just filtering what's already here.
+  const authors = activeAuthors.size ? [...activeAuthors] : undefined;
+  const r = await relay.providerIssues(ws, provider, repo, issueState, 1, authors); if (seq !== loadSeq) return;
   if (!r.ok) { phase = 'error'; errMsg = r.error || 'Could not pull issues'; render(); return; }
   issues = r.issues || []; issuesHasMore = !!r.hasMore; phase = 'ready'; prByBranch = {}; render(); ensurePolling();
   maybeAutoFill();                                                  // first page short/empty (client-side filter) → keep paging
@@ -1404,7 +1425,7 @@ export function initIssues(d: IssuesDeps): void {
   const pull = $('#issSidePull'); if (pull) pull.onclick = () => { void loadIssues().then(() => { if (phase === 'ready') toast(`Pulled ${issues.length} issue${issues.length === 1 ? '' : 's'}`, true); }); };
   const s = $('#issSearch') as HTMLInputElement | null; if (s) s.oninput = () => { query = s.value; render(); };
   const rsel = $('#issSideRepo'); if (rsel) rsel.onclick = (e) => { e.stopPropagation(); openRepoMenu(); };
-  const asel = $('#issAuthor'); if (asel) asel.onclick = (e) => { e.stopPropagation(); openAuthorFilter(asel as HTMLElement, authorOptions(), activeAuthors, () => render(), 'issAuthorMenu'); };
+  const asel = $('#issAuthor'); if (asel) asel.onclick = (e) => { e.stopPropagation(); openAuthorFilter(asel as HTMLElement, authorOptions(), activeAuthors, onAuthorsChanged, 'issAuthorMenu'); };
   const srcBtn = $('#issSources'); if (srcBtn) srcBtn.onclick = () => void openSources();
   const mapBtn = $('#issMap'); if (mapBtn) mapBtn.onclick = () => void openIssueMap();
   const ownBtn = $('#issOwners'); if (ownBtn) ownBtn.onclick = () => openOwnerSummary();

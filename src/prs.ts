@@ -49,7 +49,9 @@ let prsPage = 1;                 // highest provider page loaded
 let prsHasMore = false;          // the last page came back full → more to load on scroll
 let loadingMore = false;         // a load-more fetch is in flight (guards re-entrancy)
 let members: string[] = [];      // the active repo's collaborators (the author-filter list); [] in All-repos scope
-const activeAuthors = new Set<string>(); // filter the list to these authors (OR); empty = all authors
+let membersFor = '';             // the "provider:repo" the loaded members belong to — gate a re-fetch to a repo change
+const activeAuthors = new Set<string>(); // filter to these authors (OR); empty = all. Applied SERVER-SIDE in repo scope.
+let authorReloadT: number | null = null; // debounce: coalesce rapid author toggles into one server-side re-query
 
 // The PR rail's OWN active repo pick (independent of Issues), per workspace.
 const prRepoFor = (): string => (state.settings.prRepoByWs || {})[wsKey()] || '';
@@ -58,10 +60,11 @@ async function setPrRepo(id: string): Promise<void> {
   if (id) map[ws] = id; else delete map[ws];
   try { state.settings = await relay.patchSettings({ prRepoByWs: map }); } catch { /* keep the in-memory pick */ }
 }
-// The active repo's members (collaborators) — the author-filter list. Non-blocking; superseded by a newer load.
-async function loadMembers(seq: number, p: ProviderId, r: string): Promise<void> {
+// The active repo's members (collaborators) — the author-filter list. Fetched ONCE per repo (keyed by mkey), so
+// author/state toggles don't re-request it; a repo switch (mkey changes) supersedes an in-flight fetch.
+async function loadMembers(mkey: string, p: ProviderId, r: string): Promise<void> {
   const res = await relay.providerRepoMembers(wsKey(), p, r).catch(() => ({ ok: false } as { ok: boolean; members?: string[] }));
-  if (seq === loadSeq) members = res.ok && res.members ? res.members : [];
+  if (membersFor === mkey) members = res.ok && res.members ? res.members : [];
 }
 // The list actually shown = loaded PRs filtered to the selected authors (OR; empty selection = all).
 const visiblePrs = (): PrItem[] => activeAuthors.size ? prs.filter((p) => activeAuthors.has(p.author || '')) : prs;
@@ -78,8 +81,7 @@ export async function loadPrs(): Promise<void> {
   const seq = ++loadSeq;
   const ws = wsKey();
   phase = 'loading'; render();
-  members = [];
-  if (prScope === 'all') { await loadAllRepos(seq, ws); return; }
+  if (prScope === 'all') { members = []; membersFor = ''; await loadAllRepos(seq, ws); return; } // no single repo → no member list
   const dir = state.settings.workspace || '';
   const pick = prRepoFor();   // the PR rail's OWN pick — no longer tied to the Issues rail
   if (pick) { const p = parseRepoId(pick); provider = p.provider; repo = p.repo; }
@@ -91,8 +93,12 @@ export async function loadPrs(): Promise<void> {
   if (!auth.connected) { phase = 'noauth'; render(); return; }
   if (!repo) { phase = 'norepo'; render(); return; }
   prsPage = 1; prsHasMore = false; loadingMore = false;
-  void loadMembers(seq, provider, repo);   // author-filter list (non-blocking; unioned with loaded authors)
-  const r = await relay.providerPrs(ws, provider, repo, prState, 1); if (seq !== loadSeq) return;
+  const mkey = `${provider}:${repo}`;   // fetch members once per repo — not on every state/author reload
+  if (membersFor !== mkey) { membersFor = mkey; members = []; void loadMembers(mkey, provider, repo); }
+  // Server-side author filter: when authors are picked, the provider returns only their PRs (a bounded set, no
+  // infinite scroll) — finding matches beyond the loaded pages, not just filtering what's already here.
+  const authors = activeAuthors.size ? [...activeAuthors] : undefined;
+  const r = await relay.providerPrs(ws, provider, repo, prState, 1, authors); if (seq !== loadSeq) return;
   if (!r.ok) { phase = 'error'; errMsg = r.error || `Could not list ${PR_WORD[provider]}s`; render(); return; }
   prs = r.prs || []; prsHasMore = !!r.hasMore; phase = 'ready'; render();
   maybeAutoFill();
@@ -273,10 +279,18 @@ function openPrRepoMenu(): void {
   });
   setTimeout(() => document.addEventListener('click', closePrRepoMenu, { once: true }), 0);
 }
-// The author filter — a multi-select checklist of repo members ∪ loaded PR authors; toggling re-renders the list.
+// The author filter — a multi-select checklist of repo members ∪ loaded PR authors.
 function openPrAuthorMenu(): void {
   const btn = $('#prAuthor'); if (!btn) return;
-  openAuthorFilter(btn as HTMLElement, authorOptions(), activeAuthors, () => render(), 'prAuthorMenu');
+  openAuthorFilter(btn as HTMLElement, authorOptions(), activeAuthors, onAuthorsChanged, 'prAuthorMenu');
+}
+// A toggle re-queries the provider server-side (repo scope), debounced so ticking several authors fires ONE
+// fetch. render() first, for an instant badge + a client-filtered preview of the already-loaded set.
+function onAuthorsChanged(): void {
+  render();
+  if (prScope === 'all') return;                    // All-repos filters client-side over the merged set — no refetch
+  if (authorReloadT) clearTimeout(authorReloadT);
+  authorReloadT = window.setTimeout(() => { authorReloadT = null; void loadPrs(); }, 300);
 }
 
 /* ----------------------------- render ----------------------------- */
@@ -296,7 +310,8 @@ function render(): void {
   }
   const authorEl = $('#prAuthor'); // the author-filter icon — shown once there are PRs to filter; badge = # selected
   if (authorEl) {
-    (authorEl as HTMLElement).style.display = (phase === 'ready' && prs.length > 0) ? '' : 'none';
+    // Keep it visible while a filter is active (even mid-reload, or when the filter returns 0) so it's always clearable.
+    (authorEl as HTMLElement).style.display = ((phase === 'ready' && prs.length > 0) || activeAuthors.size > 0) ? '' : 'none';
     authorEl.classList.toggle('on', activeAuthors.size > 0);
     authorEl.setAttribute('data-n', activeAuthors.size ? String(activeAuthors.size) : '');
     authorEl.setAttribute('title', activeAuthors.size ? `Filtering by ${activeAuthors.size} author${activeAuthors.size > 1 ? 's' : ''}` : 'Filter by author');
@@ -310,9 +325,11 @@ function render(): void {
   if (phase === 'noauth')  { el.innerHTML = hint('🔗', `Not connected to ${esc(name)}`, 'Connect it in the Issues rail → Sources.'); return; }
   if (phase === 'norepo')  { el.innerHTML = hint('🗂️', allMode ? 'No tracked repos' : 'No repo selected', esc(errMsg) || 'Pick a repo in the Issues rail (its repo is shared here).'); return; }
   if (phase === 'error')   { el.innerHTML = hint('⚠️', `Couldn’t list ${word}s`, esc(errMsg)); return; }
-  if (!prs.length)         { el.innerHTML = hint('✓', `No ${prState} ${word}s`, allMode ? 'across your tracked repos' : (repo ? esc(repo) : '')); return; }
+  if (!prs.length)         { el.innerHTML = (activeAuthors.size && !allMode)
+      ? hint('✍', `No ${prState} ${word}s by the selected author${activeAuthors.size > 1 ? 's' : ''}`, 'Clear the author filter (✍) to see all.')
+      : hint('✓', `No ${prState} ${word}s`, allMode ? 'across your tracked repos' : (repo ? esc(repo) : '')); return; }
   const shown = visiblePrs();
-  if (!shown.length)       { el.innerHTML = hint('✍', `No ${prState} ${word}s by the selected author${activeAuthors.size > 1 ? 's' : ''}`, 'Clear the author filter to see all.'); return; }
+  if (!shown.length)       { el.innerHTML = hint('✍', `No ${prState} ${word}s by the selected author${activeAuthors.size > 1 ? 's' : ''}`, 'Clear the author filter (✍) to see all.'); return; }
 
   el.innerHTML = shown.map((p) => {
     const pp = p.provider || provider;
@@ -335,6 +352,7 @@ function render(): void {
   }).join('') + (loadingMore
       ? `<div class="isr-more"><span class="isr-mspin"></span>Loading more…</div>`
       : prsHasMore ? `<div class="isr-more">Scroll to load more…</div>`
+      : (activeAuthors.size && !allMode) ? `<div class="isr-more">recent ${word}s by the selected author${activeAuthors.size > 1 ? 's' : ''}</div>`
       : allMode ? `<div class="isr-more">recent ${word}s per repo</div>` : '');
 
   el.querySelectorAll<HTMLElement>('.pr-row').forEach((row, i) => {

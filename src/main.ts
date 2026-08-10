@@ -460,6 +460,12 @@ ipcMain.handle('sync:relaunch', () => { cloudsync.relaunchAfterPull(); return { 
 const badProvider = { ok: false, error: 'Unknown provider' } as const;
 // A native repo id: owner/name (GitHub/Bitbucket) or group[/subgroup…]/project (GitLab) — 2+ segments.
 const validRepo = (repo: unknown): repo is string => typeof repo === 'string' && /^[\w.-]+(\/[\w.-]+)+$/.test(repo);
+// The server-side author-filter list (issues/PRs): non-empty strings, bounded in count + length. undefined = no filter.
+const sanitizeAuthors = (a: unknown): string[] | undefined => {
+  if (!Array.isArray(a)) return undefined;
+  const out = a.filter((x): x is string => typeof x === 'string' && x.length > 0 && x.length <= 100).slice(0, 50);
+  return out.length ? out : undefined;
+};
 
 // Connection state for a provider in workspace `ws` — { connected, login } (never the token). A network blip stays connected.
 ipcMain.handle('provider:auth-state', async (_e, p: { provider: ProviderId; ws: string }) => (await providerOf(p?.provider)?.authState(p?.ws)) || { connected: false });
@@ -481,16 +487,16 @@ ipcMain.handle('provider:repo-from-remote', (_e, dir: string) => new Promise<{ p
     });
   });
 }));
-ipcMain.handle('provider:issues', async (_e, p: { provider: ProviderId; ws: string; repo: string; state?: 'open' | 'closed'; page?: number }) => {
+ipcMain.handle('provider:issues', async (_e, p: { provider: ProviderId; ws: string; repo: string; state?: 'open' | 'closed'; page?: number; authors?: unknown }) => {
   const a = providerOf(p?.provider); if (!a) return badProvider;
   if (!validRepo(p?.repo)) return { ok: false, error: 'Invalid repository' };
-  return a.issues(p?.ws, p.repo, p?.state === 'closed' ? 'closed' : 'open', Math.max(1, Number(p?.page) || 1));
+  return a.issues(p?.ws, p.repo, p?.state === 'closed' ? 'closed' : 'open', Math.max(1, Number(p?.page) || 1), sanitizeAuthors(p?.authors));
 });
 ipcMain.handle('provider:repos', async (_e, p: { provider: ProviderId; ws: string; workspaces?: string[] }) => (await providerOf(p?.provider)?.repos(p?.ws, { workspaces: Array.isArray(p?.workspaces) ? p.workspaces : undefined })) || badProvider);
-ipcMain.handle('provider:prs', async (_e, p: { provider: ProviderId; ws: string; repo: string; state?: 'open' | 'closed'; page?: number }) => {
+ipcMain.handle('provider:prs', async (_e, p: { provider: ProviderId; ws: string; repo: string; state?: 'open' | 'closed'; page?: number; authors?: unknown }) => {
   const a = providerOf(p?.provider); if (!a) return badProvider;
   if (!validRepo(p?.repo)) return { ok: false, error: 'Invalid repository' };
-  return a.prs(p?.ws, p.repo, p?.state === 'closed' ? 'closed' : 'open', Math.max(1, Number(p?.page) || 1));
+  return a.prs(p?.ws, p.repo, p?.state === 'closed' ? 'closed' : 'open', Math.max(1, Number(p?.page) || 1), sanitizeAuthors(p?.authors));
 });
 ipcMain.handle('provider:pr-detail', async (_e, p: { provider: ProviderId; ws: string; repo: string; number: number }) => {
   const a = providerOf(p?.provider); if (!a) return badProvider;

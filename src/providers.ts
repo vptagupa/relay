@@ -63,6 +63,21 @@ async function apiPost(host: string, pathname: string, headers: Record<string, s
 const asObj = (x: unknown): Record<string, unknown> => (x && typeof x === 'object' ? x as Record<string, unknown> : {});
 const asArr = (x: unknown): Array<Record<string, unknown>> => (Array.isArray(x) ? x as Array<Record<string, unknown>> : []);
 const str = (x: unknown): string => (x == null ? '' : String(x));
+type Raw = Array<Record<string, unknown>>;
+
+// Server-side author filtering. Where the provider's list endpoint takes a native author param (GitHub issues
+// `creator=`, GitLab `author_username=`) we fan out one request per selected author IN PARALLEL and merge — the
+// server does the filtering, so only matches come back. Endpoints with no native author filter (GitHub PRs,
+// Bitbucket) are deep-scanned up to SCAN_PAGES and filtered by author in main. Either way the result is bounded
+// (recent matches, no infinite scroll under a filter) — mirrors the "All repos" scope's bounded fan-out.
+const SCAN_PAGES = 5;
+// Merge fan-out / scan rows: keep the first row per number (they don't overlap across authors), newest first.
+function dedupSort<T extends { number: number }>(rows: T[], recency: (r: T) => number): T[] {
+  const seen = new Set<number>(); const out: T[] = [];
+  for (const r of rows) if (r.number && !seen.has(r.number)) { seen.add(r.number); out.push(r); }
+  out.sort((a, b) => recency(b) - recency(a));
+  return out;
+}
 
 /* ============================== GitHub ============================== */
 // Connections + OAuth-app creds are scoped PER SLAYER T WORKSPACE — every secret is keyed `${ws}:<name>`
@@ -99,8 +114,23 @@ const github = {
   },
   // One page (100) of issues, for infinite scroll. hasMore = the raw page was full (issues + PRs, before the
   // PR filter), so another page likely exists.
-  async issues(ws: string, repo: string, state: IssueState = 'open', page = 1): Promise<{ ok: boolean; issues?: Issue[]; hasMore?: boolean; error?: string }> {
-    const r = await ghApi(ws, `/repos/${repo}/issues?state=${state === 'closed' ? 'closed' : 'open'}&per_page=100&page=${page}`);
+  async issues(ws: string, repo: string, state: IssueState = 'open', page = 1, authors?: string[]): Promise<{ ok: boolean; issues?: Issue[]; hasMore?: boolean; error?: string }> {
+    const st = state === 'closed' ? 'closed' : 'open';
+    const norm = (raw: Raw): Issue[] => raw.filter((i) => !i.pull_request).map((i) => ({
+      number: Number(i.number) || 0, title: str(i.title), body: str(i.body), state: str(i.state) || 'open', url: str(i.html_url),
+      labels: asArr(i.labels).map((l) => ({ name: str(l.name), color: l.color ? str(l.color) : undefined })),
+      assignees: asArr(i.assignees).map((a) => str(a.login)).filter(Boolean),
+      author: str(asObj(i.user).login) || undefined,
+      milestone: i.milestone ? str(asObj(i.milestone).title) || undefined : undefined,
+    }));
+    if (authors && authors.length) {
+      // Native server-side author filter: /issues?creator= takes one login, so fan out per selected author.
+      const results = await Promise.all(authors.map((a) => ghApi(ws, `/repos/${repo}/issues?state=${st}&creator=${encodeURIComponent(a)}&per_page=100`)));
+      const oks = results.filter((r) => r.ok && Array.isArray(r.json));
+      if (!oks.length) { const s = results[0]?.status || 0; return { ok: false, error: s === 401 ? 'Not connected — reconnect GitHub in Sources.' : `Could not pull issues (HTTP ${s})` }; }
+      return { ok: true, issues: dedupSort(oks.flatMap((r) => norm(asArr(r.json))), (i) => i.number), hasMore: false };
+    }
+    const r = await ghApi(ws, `/repos/${repo}/issues?state=${st}&per_page=100&page=${page}`);
     if (!r.ok || !Array.isArray(r.json)) {
       const msg = str(asObj(r.json).message);
       if (r.status === 401) return { ok: false, error: 'Not connected — reconnect GitHub in Sources.' };
@@ -108,14 +138,7 @@ const github = {
       return { ok: false, error: `${msg || 'Could not pull issues'} (HTTP ${r.status})` };
     }
     const raw = asArr(r.json);
-    const issues: Issue[] = raw.filter((i) => !i.pull_request).map((i) => ({
-      number: Number(i.number) || 0, title: str(i.title), body: str(i.body), state: str(i.state) || 'open', url: str(i.html_url),
-      labels: asArr(i.labels).map((l) => ({ name: str(l.name), color: l.color ? str(l.color) : undefined })),
-      assignees: asArr(i.assignees).map((a) => str(a.login)).filter(Boolean),
-      author: str(asObj(i.user).login) || undefined,
-      milestone: i.milestone ? str(asObj(i.milestone).title) || undefined : undefined,
-    }));
-    return { ok: true, issues, hasMore: raw.length === 100 };
+    return { ok: true, issues: norm(raw), hasMore: raw.length === 100 };
   },
   async repos(ws: string): Promise<{ ok: boolean; repos?: RepoRow[]; error?: string }> {
     const r = await ghApi(ws, '/user/repos?per_page=100&sort=updated&affiliation=owner,collaborator,organization_member');
@@ -125,16 +148,28 @@ const github = {
   },
   // One page of PRs for the given state. Enriched (title/author/state) for the PR rail; issues.ts's review
   // detection just reads branch/url/draft on the default open+page-1 call, so its behaviour is unchanged.
-  async prs(ws: string, repo: string, state: IssueState = 'open', page = 1): Promise<{ ok: boolean; prs?: PrRow[]; hasMore?: boolean; error?: string }> {
-    const r = await ghApi(ws, `/repos/${repo}/pulls?state=${state === 'closed' ? 'closed' : 'open'}&per_page=100&page=${page}&sort=updated&direction=desc`);
+  async prs(ws: string, repo: string, state: IssueState = 'open', page = 1, authors?: string[]): Promise<{ ok: boolean; prs?: PrRow[]; hasMore?: boolean; error?: string }> {
+    const st = state === 'closed' ? 'closed' : 'open';
+    const norm = (raw: Raw): PrRow[] => raw.map((p) => ({ number: Number(p.number) || 0, branch: str(asObj(p.head).ref), url: str(p.html_url), draft: !!p.draft, title: str(p.title), author: str(asObj(p.user).login) || undefined, state: p.merged_at ? 'merged' : (str(p.state) || undefined), updatedAt: Date.parse(str(p.updated_at)) || 0 })).filter((p) => p.branch);
+    if (authors && authors.length) {
+      // /pulls has no author param, so deep-scan (bounded) and keep the selected authors' PRs. Branch/state stay intact.
+      const want = new Set(authors); const out: PrRow[] = [];
+      for (let pg = 1; pg <= SCAN_PAGES; pg++) {
+        const r = await ghApi(ws, `/repos/${repo}/pulls?state=${st}&per_page=100&page=${pg}&sort=updated&direction=desc`);
+        if (!r.ok || !Array.isArray(r.json)) { if (pg === 1) return { ok: false, error: r.status === 401 ? 'Not connected — reconnect GitHub in Sources.' : `Could not list PRs (HTTP ${r.status})` }; break; }
+        const raw = asArr(r.json); out.push(...norm(raw).filter((p) => want.has(p.author || '')));
+        if (raw.length < 100) break;   // exhausted the list
+      }
+      return { ok: true, prs: dedupSort(out, (p) => p.updatedAt || 0), hasMore: false };
+    }
+    const r = await ghApi(ws, `/repos/${repo}/pulls?state=${st}&per_page=100&page=${page}&sort=updated&direction=desc`);
     if (!r.ok || !Array.isArray(r.json)) {
       const msg = str(asObj(r.json).message);
       if (r.status === 401) return { ok: false, error: 'Not connected — reconnect GitHub in Sources.' };
       return { ok: false, error: `${msg || 'Could not list PRs'} (HTTP ${r.status})` };
     }
     const raw = asArr(r.json);
-    const prs = raw.map((p) => ({ number: Number(p.number) || 0, branch: str(asObj(p.head).ref), url: str(p.html_url), draft: !!p.draft, title: str(p.title), author: str(asObj(p.user).login) || undefined, state: p.merged_at ? 'merged' : (str(p.state) || undefined), updatedAt: Date.parse(str(p.updated_at)) || 0 })).filter((p) => p.branch);
-    return { ok: true, prs, hasMore: raw.length === 100 };
+    return { ok: true, prs: norm(raw), hasMore: raw.length === 100 };
   },
   // Repo collaborators (for the PR author filter). Needs push access; a read-only token 403s, and the caller
   // then falls back to the authors already in the loaded PRs. `login` matches the PR author's login.
@@ -202,23 +237,31 @@ const gitlab = {
     return { ok: true, state: str(asObj(r.json).state) === 'closed' ? 'closed' : 'open' };   // GitLab: 'opened' | 'closed'
   },
   // One page (100) of issues, for infinite scroll. hasMore = the page came back full.
-  async issues(ws: string, repo: string, state: IssueState = 'open', page = 1): Promise<{ ok: boolean; issues?: Issue[]; hasMore?: boolean; error?: string }> {
-    const r = await glApi(ws, `/projects/${enc(repo)}/issues?state=${state === 'closed' ? 'closed' : 'opened'}&per_page=100&page=${page}`);
-    if (!r.ok || !Array.isArray(r.json)) {
-      const msg = str(asObj(r.json).message || asObj(r.json).error);
-      if (r.status === 401) return { ok: false, error: 'Not connected — reconnect GitLab in Sources.' };
-      return { ok: false, error: `${msg || 'Could not pull issues'} (HTTP ${r.status})` };
-    }
-    const raw = asArr(r.json);
+  async issues(ws: string, repo: string, state: IssueState = 'open', page = 1, authors?: string[]): Promise<{ ok: boolean; issues?: Issue[]; hasMore?: boolean; error?: string }> {
+    const glState = state === 'closed' ? 'closed' : 'opened';
     // GitLab numbers issues by project-internal iid (that's what URLs and "Closes #iid" use, not id).
-    const issues: Issue[] = raw.map((i) => ({
+    const norm = (raw: Raw): Issue[] => raw.map((i) => ({
       number: Number(i.iid) || 0, title: str(i.title), body: str(i.description), state: str(i.state) || 'opened', url: str(i.web_url),
       labels: (Array.isArray(i.labels) ? i.labels as unknown[] : []).map((l) => ({ name: str(l), color: undefined })),
       assignees: asArr(i.assignees).map((a) => str(a.username)).filter(Boolean),
       author: str(asObj(i.author).username) || undefined,
       milestone: i.milestone ? str(asObj(i.milestone).title) || undefined : undefined,
     }));
-    return { ok: true, issues, hasMore: raw.length === 100 };
+    if (authors && authors.length) {
+      // Native server-side author filter: ?author_username= takes one username, so fan out per selected author.
+      const results = await Promise.all(authors.map((a) => glApi(ws, `/projects/${enc(repo)}/issues?state=${glState}&author_username=${encodeURIComponent(a)}&per_page=100`)));
+      const oks = results.filter((r) => r.ok && Array.isArray(r.json));
+      if (!oks.length) { const s = results[0]?.status || 0; return { ok: false, error: s === 401 ? 'Not connected — reconnect GitLab in Sources.' : `Could not pull issues (HTTP ${s})` }; }
+      return { ok: true, issues: dedupSort(oks.flatMap((r) => norm(asArr(r.json))), (i) => i.number), hasMore: false };
+    }
+    const r = await glApi(ws, `/projects/${enc(repo)}/issues?state=${glState}&per_page=100&page=${page}`);
+    if (!r.ok || !Array.isArray(r.json)) {
+      const msg = str(asObj(r.json).message || asObj(r.json).error);
+      if (r.status === 401) return { ok: false, error: 'Not connected — reconnect GitLab in Sources.' };
+      return { ok: false, error: `${msg || 'Could not pull issues'} (HTTP ${r.status})` };
+    }
+    const raw = asArr(r.json);
+    return { ok: true, issues: norm(raw), hasMore: raw.length === 100 };
   },
   async repos(ws: string): Promise<{ ok: boolean; repos?: RepoRow[]; error?: string }> {
     const r = await glApi(ws, '/projects?membership=true&simple=true&per_page=100&order_by=last_activity_at&archived=false');
@@ -228,18 +271,25 @@ const gitlab = {
   },
   // GitLab MRs. The rail's "Closed" means everything not open (GitLab splits that into closed + merged), so we
   // ask for state=all and drop the open ones client-side; "Open" maps to state=opened.
-  async prs(ws: string, repo: string, state: IssueState = 'open', page = 1): Promise<{ ok: boolean; prs?: PrRow[]; hasMore?: boolean; error?: string }> {
+  async prs(ws: string, repo: string, state: IssueState = 'open', page = 1, authors?: string[]): Promise<{ ok: boolean; prs?: PrRow[]; hasMore?: boolean; error?: string }> {
     const glState = state === 'closed' ? 'all' : 'opened';
+    // "Closed" asks GitLab for state=all (it splits closed + merged) then drops the still-open ones here.
+    const norm = (raw: Raw): PrRow[] => raw.filter((m) => state === 'closed' ? str(m.state) !== 'opened' : true)
+      .map((m) => ({ number: Number(m.iid) || 0, branch: str(m.source_branch), url: str(m.web_url), draft: !!m.draft || !!m.work_in_progress, title: str(m.title), author: str(asObj(m.author).username) || undefined, state: str(m.state) || undefined, updatedAt: Date.parse(str(m.updated_at)) || 0 })).filter((p) => p.branch);
+    if (authors && authors.length) {
+      // Native server-side author filter: ?author_username= takes one username, so fan out per selected author.
+      const results = await Promise.all(authors.map((a) => glApi(ws, `/projects/${enc(repo)}/merge_requests?state=${glState}&author_username=${encodeURIComponent(a)}&per_page=100&order_by=updated_at&sort=desc`)));
+      const oks = results.filter((r) => r.ok && Array.isArray(r.json));
+      if (!oks.length) { const s = results[0]?.status || 0; return { ok: false, error: s === 401 ? 'Not connected — reconnect GitLab in Sources.' : `Could not list merge requests (HTTP ${s})` }; }
+      return { ok: true, prs: dedupSort(oks.flatMap((r) => norm(asArr(r.json))), (p) => p.updatedAt || 0), hasMore: false };
+    }
     const r = await glApi(ws, `/projects/${enc(repo)}/merge_requests?state=${glState}&per_page=100&page=${page}&order_by=updated_at&sort=desc`);
     if (!r.ok || !Array.isArray(r.json)) {
       const msg = str(asObj(r.json).message || asObj(r.json).error);
       if (r.status === 401) return { ok: false, error: 'Not connected — reconnect GitLab in Sources.' };
       return { ok: false, error: `${msg || 'Could not list merge requests'} (HTTP ${r.status})` };
     }
-    const raw = asArr(r.json);
-    const prs = raw.filter((m) => state === 'closed' ? str(m.state) !== 'opened' : true)
-      .map((m) => ({ number: Number(m.iid) || 0, branch: str(m.source_branch), url: str(m.web_url), draft: !!m.draft || !!m.work_in_progress, title: str(m.title), author: str(asObj(m.author).username) || undefined, state: str(m.state) || undefined, updatedAt: Date.parse(str(m.updated_at)) || 0 })).filter((p) => p.branch);
-    return { ok: true, prs, hasMore: raw.length === 100 };
+    return { ok: true, prs: norm(asArr(r.json)), hasMore: asArr(r.json).length === 100 };
   },
   // Project members (for the PR author filter) — `username` matches the MR author's username.
   async repoMembers(ws: string, repo: string): Promise<{ ok: boolean; members?: string[]; error?: string }> {
@@ -389,17 +439,9 @@ const bitbucket = {
   },
   // One page (50) of issues, for infinite scroll. Bitbucket has no state= filter, so we page raw and filter
   // client-side; hasMore uses the response's `next` link (more raw pages to scan).
-  async issues(ws: string, repo: string, state: IssueState = 'open', page = 1): Promise<{ ok: boolean; issues?: Issue[]; hasMore?: boolean; error?: string }> {
-    const r = await bbApi(ws, `/2.0/repositories/${repo}/issues?pagelen=50&page=${page}&sort=-updated_on`);
-    if (!r.ok || !Array.isArray(asObj(r.json).values)) {
-      const msg = str(asObj(r.json).error && asObj(asObj(r.json).error).message);
-      if (r.status === 401 || r.status === 403) return { ok: false, error: 'Not connected — reconnect Bitbucket in Sources.' };
-      if (r.status === 404) return { ok: false, error: 'No issue tracker on this repo (Bitbucket repos ship with it disabled — enable it in repo Settings, or the project uses Jira).' };
-      return { ok: false, error: `${msg || 'Could not pull issues'} (HTTP ${r.status})` };
-    }
-    const raw = asArr(asObj(r.json).values);
+  async issues(ws: string, repo: string, state: IssueState = 'open', page = 1, authors?: string[]): Promise<{ ok: boolean; issues?: Issue[]; hasMore?: boolean; error?: string }> {
     // Bitbucket has no state= query param, so filter the fetched page client-side: open = new/open, closed = the rest.
-    const issues: Issue[] = raw.filter((i) => (state === 'closed') !== OPEN_BB.has(str(i.state))).map((i) => {
+    const norm = (raw: Raw): Issue[] => raw.filter((i) => (state === 'closed') !== OPEN_BB.has(str(i.state))).map((i) => {
       const links = asObj(asObj(i.links).html);
       const assignee = asObj(i.assignee);
       const reporter = asObj(i.reporter);
@@ -412,7 +454,27 @@ const bitbucket = {
         milestone: i.milestone ? str(asObj(i.milestone).name) || undefined : undefined,
       };
     });
-    return { ok: true, issues, hasMore: !!asObj(r.json).next };
+    const errOf = (r: ApiResult): string => {
+      const msg = str(asObj(r.json).error && asObj(asObj(r.json).error).message);
+      if (r.status === 401 || r.status === 403) return 'Not connected — reconnect Bitbucket in Sources.';
+      if (r.status === 404) return 'No issue tracker on this repo (Bitbucket repos ship with it disabled — enable it in repo Settings, or the project uses Jira).';
+      return `${msg || 'Could not pull issues'} (HTTP ${r.status})`;
+    };
+    if (authors && authors.length) {
+      // Atlassian deprecated usernames, so BBQL author filtering is unreliable — deep-scan (bounded) and match
+      // on the same nickname||display_name the member list returns.
+      const want = new Set(authors); const out: Issue[] = [];
+      for (let pg = 1; pg <= SCAN_PAGES; pg++) {
+        const r = await bbApi(ws, `/2.0/repositories/${repo}/issues?pagelen=50&page=${pg}&sort=-updated_on`);
+        if (!r.ok || !Array.isArray(asObj(r.json).values)) { if (pg === 1) return { ok: false, error: errOf(r) }; break; }
+        out.push(...norm(asArr(asObj(r.json).values)).filter((i) => want.has(i.author || '')));
+        if (!asObj(r.json).next) break;
+      }
+      return { ok: true, issues: dedupSort(out, (i) => i.number), hasMore: false };
+    }
+    const r = await bbApi(ws, `/2.0/repositories/${repo}/issues?pagelen=50&page=${page}&sort=-updated_on`);
+    if (!r.ok || !Array.isArray(asObj(r.json).values)) return { ok: false, error: errOf(r) };
+    return { ok: true, issues: norm(asArr(asObj(r.json).values)), hasMore: !!asObj(r.json).next };
   },
   // CHANGE-2770 (2026-04-14): Atlassian PERMANENTLY REMOVED every cross-workspace listing —
   // GET /2.0/repositories, GET /2.0/workspaces, and GET /2.0/user/permissions/workspaces all return HTTP 410
@@ -448,19 +510,31 @@ const bitbucket = {
   },
   // Bitbucket PR states are OPEN / MERGED / DECLINED / SUPERSEDED; the rail's "Closed" folds the last three
   // (the `state` param can repeat). Bitbucket has no draft PRs, so draft is always false.
-  async prs(ws: string, repo: string, state: IssueState = 'open', page = 1): Promise<{ ok: boolean; prs?: PrRow[]; hasMore?: boolean; error?: string }> {
+  async prs(ws: string, repo: string, state: IssueState = 'open', page = 1, authors?: string[]): Promise<{ ok: boolean; prs?: PrRow[]; hasMore?: boolean; error?: string }> {
     const stateQ = state === 'closed' ? 'state=MERGED&state=DECLINED&state=SUPERSEDED' : 'state=OPEN';
-    const r = await bbApi(ws, `/2.0/repositories/${repo}/pullrequests?${stateQ}&pagelen=50&page=${page}&sort=-updated_on`);
-    if (!r.ok || !Array.isArray(asObj(r.json).values)) {
-      const msg = str(asObj(asObj(r.json).error).message);
-      if (r.status === 401 || r.status === 403) return { ok: false, error: 'Not connected — reconnect Bitbucket in Sources.' };
-      return { ok: false, error: `${msg || 'Could not list pull requests'} (HTTP ${r.status})` };
-    }
-    const prs = asArr(asObj(r.json).values).map((p) => {
+    const norm = (raw: Raw): PrRow[] => raw.map((p) => {
       const author = asObj(p.author);
       return { number: Number(p.id) || 0, branch: str(asObj(asObj(p.source).branch).name), url: str(asObj(asObj(p.links).html).href), draft: false, title: str(p.title), author: str(author.nickname || author.display_name) || undefined, state: str(p.state) || undefined, updatedAt: Date.parse(str(p.updated_on)) || 0 };
     }).filter((p) => p.branch);
-    return { ok: true, prs, hasMore: !!asObj(r.json).next };
+    const errOf = (r: ApiResult): string => {
+      const msg = str(asObj(asObj(r.json).error).message);
+      if (r.status === 401 || r.status === 403) return 'Not connected — reconnect Bitbucket in Sources.';
+      return `${msg || 'Could not list pull requests'} (HTTP ${r.status})`;
+    };
+    if (authors && authors.length) {
+      // No reliable native author filter (username deprecation) — deep-scan (bounded) and match on nickname||display_name.
+      const want = new Set(authors); const out: PrRow[] = [];
+      for (let pg = 1; pg <= SCAN_PAGES; pg++) {
+        const r = await bbApi(ws, `/2.0/repositories/${repo}/pullrequests?${stateQ}&pagelen=50&page=${pg}&sort=-updated_on`);
+        if (!r.ok || !Array.isArray(asObj(r.json).values)) { if (pg === 1) return { ok: false, error: errOf(r) }; break; }
+        out.push(...norm(asArr(asObj(r.json).values)).filter((p) => want.has(p.author || '')));
+        if (!asObj(r.json).next) break;
+      }
+      return { ok: true, prs: dedupSort(out, (p) => p.updatedAt || 0), hasMore: false };
+    }
+    const r = await bbApi(ws, `/2.0/repositories/${repo}/pullrequests?${stateQ}&pagelen=50&page=${page}&sort=-updated_on`);
+    if (!r.ok || !Array.isArray(asObj(r.json).values)) return { ok: false, error: errOf(r) };
+    return { ok: true, prs: norm(asArr(asObj(r.json).values)), hasMore: !!asObj(r.json).next };
   },
   // Workspace members (Bitbucket has no repo-level member list; the workspace owns access). `nickname ||
   // display_name` matches the PR author format above.
@@ -506,9 +580,9 @@ const bitbucket = {
 // keyed per workspace so nothing is shared between them. Stateless helpers (repoFromRemote, cloneUrl) don't.
 export interface Adapter {
   authState(ws: string): Promise<{ connected: boolean; login?: string }>;
-  issues(ws: string, repo: string, state?: IssueState, page?: number): Promise<{ ok: boolean; issues?: Issue[]; hasMore?: boolean; error?: string }>;
+  issues(ws: string, repo: string, state?: IssueState, page?: number, authors?: string[]): Promise<{ ok: boolean; issues?: Issue[]; hasMore?: boolean; error?: string }>;
   repos(ws: string, opts?: RepoListOpts): Promise<{ ok: boolean; repos?: RepoRow[]; error?: string }>;
-  prs(ws: string, repo: string, state?: IssueState, page?: number): Promise<{ ok: boolean; prs?: PrRow[]; hasMore?: boolean; error?: string }>;
+  prs(ws: string, repo: string, state?: IssueState, page?: number, authors?: string[]): Promise<{ ok: boolean; prs?: PrRow[]; hasMore?: boolean; error?: string }>;
   repoMembers(ws: string, repo: string): Promise<{ ok: boolean; members?: string[]; error?: string }>;
   prDetail(ws: string, repo: string, number: number): Promise<{ ok: boolean; detail?: PrDetail; error?: string }>;
   createIssue(ws: string, repo: string, title: string, body: string): Promise<{ ok: boolean; number?: number; url?: string; error?: string }>;
