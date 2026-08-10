@@ -202,12 +202,14 @@ export interface Task {
   repo: string;                                  // native repo id (owner/name)
   title: string;
   body: string;                                  // the proposed issue description (what to validate)
-  status: 'draft' | 'validating' | 'invalid' | 'error' | 'open' | 'closed' | 'valid'; // 'valid' = legacy (filed); tracked to 'open'/'closed' from the issue
-  result?: string;                               // the validation summary (set once it runs)
+  // validate flow: draft→validating→invalid|open|closed. New Feature flow: draft→authoring→reviewing→open|revise.
+  status: 'draft' | 'validating' | 'invalid' | 'error' | 'open' | 'closed' | 'valid' | 'authoring' | 'reviewing' | 'revise'; // 'valid' = legacy (filed)
+  result?: string;                               // the validation / review summary (set once it runs)
   issueNumber?: number;                          // if valid → the filed issue
   issueUrl?: string;
   agentId?: string;                              // agent used for the validate run
-  tags?: string[];                               // 'bug' | 'enhancement' — inject type-appropriate validation guidance into the brief
+  tags?: string[];                               // 'bug' | 'enhancement' | 'newfeature' — inject type-appropriate guidance into the brief
+  webResearch?: boolean;                         // New Feature only: include the web-research (global brands) step in the author brief
   deps?: string[];                               // dependency repo ids ("provider:repo") linked read-only under .deps/ for the validate run
   dbCredId?: string;                             // DB credential template id (see DbCredMeta) injected into the validate run's env
   ts: number;                                    // created (epoch ms)

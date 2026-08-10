@@ -9,12 +9,13 @@ import { toast } from './ui';
 import { stageBrief, renderBrief } from './pipelines';
 import { AGENTS } from './agents-list';
 import { dbCredOptions, dbCredNote, loadDbCreds, dbCredMetas } from './dbcreds';
+import { authorBrief, reviewBrief, featureIssueBody, isFeatureTask, FEATURE_TAG } from './feature-spec';
 import type { Task } from './shared/types';
 
 const relay = (window as any).relay;
 type ProviderId = 'github' | 'gitlab' | 'bitbucket';
 const PROV_DOT: Record<ProviderId, string> = { github: 'gh', gitlab: 'gl', bitbucket: 'bb' };
-const STATUS_LABEL: Record<Task['status'], string> = { draft: 'draft', validating: 'validating…', valid: 'issue open', open: 'issue open', closed: 'issue closed', invalid: 'not valid', error: 'error' };
+const STATUS_LABEL: Record<Task['status'], string> = { draft: 'draft', validating: 'validating…', valid: 'issue open', open: 'issue open', closed: 'issue closed', invalid: 'not valid', error: 'error', authoring: 'authoring spec…', reviewing: 'reviewing spec…', revise: 'needs revision' };
 // A task that filed an issue (for DISPLAY: show the issue link + open/closed chip).
 const isFiled = (t: Task): boolean => !!t.issueNumber && (t.status === 'open' || t.status === 'closed' || t.status === 'valid');
 // A filed task still worth POLLING: only OPEN (and legacy 'valid'). A 'closed' task is terminal, so we stop
@@ -65,13 +66,15 @@ function deleteTask(id: string): void {
 }
 
 /* ----------------------------- validate run + verdict poll ----------------------------- */
-interface Running { wt: string; ws: string; provider: ProviderId; repo: string; }
-const running = new Map<string, Running>();   // taskId → its live validate run (in-memory; a restart drops it, re-validate to resume)
+// A live run. `validate` = single stage 0 (bug/enhancement). `feature` = New Feature: stage 0 author → stage 1
+// review; `stage` tracks which one is being polled. agentId/dbCredId are needed to launch the review stage.
+interface Running { wt: string; ws: string; provider: ProviderId; repo: string; kind: 'validate' | 'feature'; stage: number; agentId: string; dbCredId?: string; }
+const running = new Map<string, Running>();   // taskId → its live run (in-memory; a restart drops it, re-run to resume)
 const taskHead = (t: Task): string => `# ${t.title}\n\n${(t.body || '').trim() || '_(no description provided)_'}`;
 // The validate brief for a task: {issue} = the proposed issue head; the agent writes its verdict to stage-0.json.
 const validateBrief = (t: Task): string => renderBrief(stageBrief('validate', state.settings.stageBriefs), { issue: taskHead(t), number: 0, title: t.title, closeStep: '', verdictRel: '.slayer/stage-0.json' });
 // Task type tags — ticking one injects type-appropriate validation guidance into the brief.
-const TAG_DEFS: { id: string; label: string }[] = [{ id: 'bug', label: '🐛 Bug' }, { id: 'enhancement', label: '✨ Enhancement' }];
+const TAG_DEFS: { id: string; label: string }[] = [{ id: 'bug', label: '🐛 Bug' }, { id: 'enhancement', label: '✨ Enhancement' }, { id: FEATURE_TAG, label: '🚀 New Feature' }];
 const TAG_NOTE: Record<string, string> = {
   bug: `\n\n## Type: BUG\nTreat this as a bug report — confirm it's a REAL, REPRODUCIBLE defect in this repository: locate the code and reproduce it (run the path, or write a throwaway repro). passed=false if it's already fixed, not reproducible, or works as intended.`,
   enhancement: `\n\n## Type: ENHANCEMENT\nTreat this as an enhancement request — confirm it's a sensible improvement that ISN'T already implemented and fits this codebase: check it doesn't already exist, is feasible, and is concrete/actionable. passed=false if it already exists, is out of scope, or is too vague.`,
@@ -90,26 +93,53 @@ function ensurePoll(): void {
   if (running.size && pollTimer == null) pollTimer = window.setInterval(() => void poll(), 4000);
   else if (!running.size && pollTimer != null) { clearInterval(pollTimer); pollTimer = null; }
 }
+// File an issue for a passed task and reflect the outcome (shared by validate + feature). Deletes-before-await
+// happened in the caller; here we only createIssue + upsert.
+async function fileIssueFor(t: Task, r: Running, body: string, resultSummary: string): Promise<void> {
+  const res = await relay.providerCreateIssue(r.ws, r.provider, r.repo, t.title, body).catch(() => ({ ok: false, error: 'request failed' }));
+  if (res.ok) { upsertTask({ ...t, status: 'open', result: resultSummary, issueNumber: res.number, issueUrl: res.url, ranAt: Date.now() }, r.ws, false); toast(`Filed issue #${res.number} (open)`, true); ensureTracking(); }
+  else { upsertTask({ ...t, status: 'error', result: `Approved ✓ but filing the issue failed: ${res.error || 'unknown'}\n\n${resultSummary}`, ranAt: Date.now() }, r.ws, false); toast(`Couldn't file the issue: ${res.error || ''}`); }
+}
+
 let polling = false;
 async function poll(): Promise<void> {
   if (polling) return; polling = true;
   try {
     for (const [id, r] of [...running.entries()]) {
-      const v = await relay.pipelineVerdict(r.wt, 0).catch(() => null);
+      const v = await relay.pipelineVerdict(r.wt, r.stage).catch(() => null);
       if (!running.has(id) || !v || !v.found) continue;          // verdict not written yet — keep polling
-      running.delete(id);
-      const t = tasksFor(r.ws).find((x) => x.id === id); if (!t) continue;
-      const summary = (v.summary || '').trim() || (v.passed ? 'Validated as real.' : 'Judged not valid.');
-      if (v.passed) {
-        // Valid → file a real issue on the provider, with the validation result appended to the description.
-        const body = `${(t.body || '').trim()}\n\n---\n**Validated by Slayer T** — confirmed against the codebase before filing:\n\n${summary}`;
-        const res = await relay.providerCreateIssue(r.ws, r.provider, r.repo, t.title, body).catch(() => ({ ok: false, error: 'request failed' }));
-        if (res.ok) { upsertTask({ ...t, status: 'open', result: summary, issueNumber: res.number, issueUrl: res.url, ranAt: Date.now() }, r.ws, false); toast(`Task valid → filed issue #${res.number} (open)`, true); ensureTracking(); }
-        else { upsertTask({ ...t, status: 'error', result: `Validated ✓ but filing the issue failed: ${res.error || 'unknown'}\n\n${summary}`, ranAt: Date.now() }, r.ws, false); toast(`Validated, but couldn't file the issue: ${res.error || ''}`); }
-      } else {
-        // Not valid → NO issue is filed; keep the reason on the task.
-        upsertTask({ ...t, status: 'invalid', result: summary, ranAt: Date.now() }, r.ws, false); toast('Task not valid — no issue filed');
+      const t = tasksFor(r.ws).find((x) => x.id === id);
+      const summary = (v.summary || '').trim();
+
+      // --- New Feature: stage 0 author → stage 1 review → file issue ---
+      if (r.kind === 'feature') {
+        if (r.stage === 0) {
+          // Author stage finished. On success advance to the REVIEW stage (keep the run alive at stage 1).
+          if (!t) { running.delete(id); continue; }
+          if (!v.passed) { running.delete(id); upsertTask({ ...t, status: 'error', result: summary || 'Could not author the spec.', ranAt: Date.now() }, r.ws, false); toast('Spec authoring failed'); continue; }
+          const reviewRel = '.slayer/stage-1.md';
+          await relay.pipelinePrep(r.wt, reviewRel, reviewBrief(t), 1).catch(() => {}); // write the review brief + clear its stale verdict
+          r.stage = 1; running.set(id, r);
+          upsertTask({ ...t, status: 'reviewing', result: summary || 'Spec authored.', ranAt: Date.now() }, r.ws, false);
+          const agent = AGENTS.find((a) => a.id === r.agentId);
+          deps.openAgentTab({ cwd: r.wt, name: `review: ${t.title.slice(0, 20)}`, runCmd: agent ? agent.launch(reviewRel) : undefined, dbCredId: r.dbCredId });
+          toast('Spec authored → reviewing…', true);
+          continue;
+        }
+        // Review stage finished.
+        running.delete(id);
+        if (!t) continue;
+        if (v.passed) await fileIssueFor(t, r, featureIssueBody(t, summary || 'Reviewed and approved.'), summary || 'Spec reviewed ✓ — correct, complete, concrete, consistent, aligned.');
+        else { upsertTask({ ...t, status: 'revise', result: summary || 'Review found gaps — revise the spec and re-run.', ranAt: Date.now() }, r.ws, false); toast('Spec needs revision'); }
+        continue;
       }
+
+      // --- validate (bug / enhancement / untagged): single stage ---
+      running.delete(id);
+      if (!t) continue;
+      const vsum = summary || (v.passed ? 'Validated as real.' : 'Judged not valid.');
+      if (v.passed) await fileIssueFor(t, r, `${(t.body || '').trim()}\n\n---\n**Validated by Slayer T** — confirmed against the codebase before filing:\n\n${vsum}`, vsum);
+      else { upsertTask({ ...t, status: 'invalid', result: vsum, ranAt: Date.now() }, r.ws, false); toast('Task not valid — no issue filed'); }
     }
   } finally { polling = false; ensurePoll(); }
 }
@@ -164,11 +194,15 @@ function openTaskForm(existing?: Task): void {
   const optionIds = (curId && !tracked.includes(curId)) ? [curId, ...tracked] : tracked;
   const repoOpts = optionIds.map((id) => { const { provider, repo } = parseRepoId(id); return `<option value="${esc(id)}"${id === curId ? ' selected' : ''}>${esc(repo)} · ${provider}${!tracked.includes(id) ? ' (untracked)' : ''}</option>`; }).join('');
   const selectedTags = new Set(existing?.tags || []);
+  let webResearch = existing?.webResearch ?? true;   // New Feature: research global brands (default on)
   const { root, close } = modal(`<div class="tpl-card iss-card">
       <div class="hd"><span class="dot" style="background:var(--accent)"></span><span class="t">${existing ? 'Edit task' : 'New task'}</span></div>
       <div class="bd">
         <div class="iss-agentrow"><label class="iss-lbl" style="margin:0">Repository</label><select class="iss-agentsel" id="tkRepo">${repoOpts}</select></div>
         <div class="iss-agentrow"><label class="iss-lbl" style="margin:0">Type</label><div class="tk-tags" id="tkTags">${tagChecks(selectedTags)}</div></div>
+        <div class="tk-featopts" id="tkFeatOpts" style="display:${selectedTags.has(FEATURE_TAG) ? 'block' : 'none'}">
+          <label class="tk-tag"><input type="checkbox" id="tkWebResearch"${webResearch ? ' checked' : ''}> 🔎 Do a web research <span class="mut">— study how global brands solve it</span></label>
+        </div>
         <label class="iss-lbl">Title</label>
         <input class="tk-input" id="tkTitle" placeholder="Short summary of the proposed issue" spellcheck="false">
         <label class="iss-lbl">Description <span class="mut">— what to validate</span></label>
@@ -180,7 +214,11 @@ function openTaskForm(existing?: Task): void {
   const titleEl = root.querySelector('#tkTitle') as HTMLInputElement;
   const bodyEl = root.querySelector('#tkBody') as HTMLTextAreaElement;
   if (existing) { titleEl.value = existing.title; bodyEl.value = existing.body || ''; }   // set via JS (no attribute-escaping pitfalls)
-  root.querySelector('#tkTags')?.addEventListener('change', () => { selectedTags.clear(); root.querySelectorAll<HTMLInputElement>('#tkTags input:checked').forEach((cb) => selectedTags.add(cb.dataset.tag!)); });
+  root.querySelector('#tkTags')?.addEventListener('change', () => {
+    selectedTags.clear(); root.querySelectorAll<HTMLInputElement>('#tkTags input:checked').forEach((cb) => selectedTags.add(cb.dataset.tag!));
+    const opts = root.querySelector('#tkFeatOpts') as HTMLElement | null; if (opts) opts.style.display = selectedTags.has(FEATURE_TAG) ? 'block' : 'none'; // reveal New Feature options
+  });
+  root.querySelector('#tkWebResearch')?.addEventListener('change', (e) => { webResearch = (e.target as HTMLInputElement).checked; });
   root.querySelector('[data-x]')?.addEventListener('click', close);
   setTimeout(() => titleEl.focus(), 30);
   // exec=true (create only, "Create & execute") → create the draft, then jump straight into the validate/run dialog.
@@ -194,14 +232,15 @@ function openTaskForm(existing?: Task): void {
       // Changing the repo invalidates a prior validation / filed issue (they belonged to the old repo) → reset to draft.
       const repoChanged = provider !== existing.provider || repo !== existing.repo;
       const tags = [...selectedTags];
+      const wr = selectedTags.has(FEATURE_TAG) ? webResearch : undefined;
       upsertTask(repoChanged
-        ? { ...existing, provider, repo, title, body, tags, status: 'draft', result: undefined, issueNumber: undefined, issueUrl: undefined }
-        : { ...existing, provider, repo, title, body, tags });
+        ? { ...existing, provider, repo, title, body, tags, webResearch: wr, status: 'draft', result: undefined, issueNumber: undefined, issueUrl: undefined }
+        : { ...existing, provider, repo, title, body, tags, webResearch: wr });
       close(); toast('Task updated', true);
       return;
     }
     const id = `t${Date.now().toString(36)}${Math.floor(Math.random() * 1e7).toString(36)}`;
-    const t: Task = { id, provider, repo, title, body, tags: [...selectedTags], status: 'draft', ts: Date.now() };
+    const t: Task = { id, provider, repo, title, body, tags: [...selectedTags], webResearch: selectedTags.has(FEATURE_TAG) ? webResearch : undefined, status: 'draft', ts: Date.now() };
     upsertTask(t); close();
     if (exec) void runValidate(t); else toast('Task created', true);
   };
@@ -218,25 +257,33 @@ async function runValidate(t: Task): Promise<void> {
   const agentOk = installed.length > 0;
   let agentId = (state.settings.issueAgent && detected[state.settings.issueAgent]) ? state.settings.issueAgent! : (installed[0]?.id || '');
   const agentOpts = AGENTS.map((a) => `<option value="${a.id}"${a.id === agentId ? ' selected' : ''}${detected[a.id] ? '' : ' disabled'}>${esc(a.name)}${detected[a.id] ? '' : ' — not installed'}</option>`).join('');
-  const primary = agentOk ? '⚡ Run validate' : 'Create worktree & open';
+  const feature = isFeatureTask(t);   // New Feature → author-spec brief + a review stage; otherwise validate-only
+  const primary = agentOk ? (feature ? '🚀 Author spec' : '⚡ Run validate') : 'Create worktree & open';
+  const dlgTitle = feature ? 'Author feature spec' : 'Validate task';
+  const agentOkNote = feature ? '✓ authors a spec + styled artifact under docs/features/ in an isolated worktree, then reviews it' : '✓ validates against the repo in an isolated worktree — no code changes, no PR';
+  const briefLabel = feature ? 'Author brief' : 'Validate brief';
+  const footHint = feature ? 'Author → review → files an issue on a passing review' : 'Validate-only — files an issue only on a valid verdict';
+  const wtNote = feature
+    ? `Checks out <code>${esc(t.repo)}</code>, writes the spec + artifact under <code>docs/features/</code>, then a review stage gates it against the 5 C's. <b>On a passing review → an issue is filed</b>.`
+    : `Checks out <code>${esc(t.repo)}</code> at its latest default branch and asks the agent to confirm this is real. <b>If valid → an issue is filed</b> with the result; if not, no issue is created.`;
   // Dependency repos the validate agent may READ (linked read-only under .deps/) — the workspace's OTHER tracked repos.
   const depCandidates = ((state.settings.issueReposByWs || {})[wsKey()] || []).filter((id) => id !== `${t.provider}:${t.repo}`);
   const selectedDeps = new Set((t.deps || []).filter((id) => depCandidates.includes(id)));
-  let selectedDbCred = t.dbCredId || '';   // DB credential template injected into the validate run's env
-  const seedBrief = () => validateBrief(t) + tagNote(t.tags || []) + depsNote([...selectedDeps]) + dbCredNote(selectedDbCred);   // brief + type guidance + .deps/ note + DB-creds note
+  let selectedDbCred = t.dbCredId || '';   // DB credential template injected into the run's env
+  const seedBrief = () => (feature ? authorBrief(t, { webResearch: t.webResearch !== false }) : validateBrief(t) + tagNote(t.tags || [])) + depsNote([...selectedDeps]) + dbCredNote(selectedDbCred);
   const { root, close } = modal(`<div class="tpl-card iss-card">
-      <div class="hd"><span class="dot" style="background:var(--accent)"></span><span class="t">Validate task<small>${esc(t.title)}</small></span></div>
+      <div class="hd"><span class="dot" style="background:var(--accent)"></span><span class="t">${dlgTitle}<small>${esc(t.title)}</small></span></div>
       <div class="bd">
         <div class="iss-agentrow"><label class="iss-lbl" style="margin:0">Assign to</label><select class="iss-agentsel" id="tkAgent"${agentOk ? '' : ' disabled'}>${agentOpts}</select></div>
-        <div class="iss-agent ${agentOk ? 'ok' : 'no'}">${agentOk ? '✓ validates against the repo in an isolated worktree — no code changes, no PR' : '⚠ No coding agent on PATH — the worktree opens; install Claude Code (or Gemini / Codex / Aider) to auto-run.'}</div>
+        <div class="iss-agent ${agentOk ? 'ok' : 'no'}">${agentOk ? agentOkNote : '⚠ No coding agent on PATH — the worktree opens; install Claude Code (or Gemini / Codex / Aider) to auto-run.'}</div>
         ${depCandidates.length ? `<label class="iss-lbl">Dependencies <span class="mut">— read-only repos the agent can view under <code>.deps/</code></span></label>
         <div class="iss-deps" id="tkDeps">${depCandidates.map((id) => { const { repo: r } = parseRepoId(id); return `<label class="iss-dep"><input type="checkbox" value="${esc(id)}"${selectedDeps.has(id) ? ' checked' : ''}><b>${esc(r.split('/').pop() || r)}</b><span class="mut">${esc(id)}</span></label>`; }).join('')}</div>` : ''}
         ${dbCredMetas().length ? `<div class="iss-agentrow"><label class="iss-lbl" style="margin:0">Database</label><select class="iss-agentsel" id="tkDb">${dbCredOptions(selectedDbCred)}</select></div>` : ''}
-        <label class="iss-lbl">Validate brief <span class="mut">— edit before launch</span></label>
+        <label class="iss-lbl">${briefLabel} <span class="mut">— edit before launch</span></label>
         <textarea class="iss-brief" spellcheck="false" rows="12" id="tkBrief">${esc(seedBrief())}</textarea>
-        <div class="iss-wt">Checks out <code>${esc(t.repo)}</code> at its latest default branch and asks the agent to confirm this is real. <b>If valid → an issue is filed</b> with the result; if not, no issue is created.</div>
+        <div class="iss-wt">${wtNote}</div>
       </div>
-      <div class="ft"><span class="hint">Validate-only — files an issue only on a valid verdict</span><span class="r"><button class="tpl-btn ghost" data-x>Cancel</button><button class="tpl-btn pri" data-ok>${primary}</button></span></div>
+      <div class="ft"><span class="hint">${footHint}</span><span class="r"><button class="tpl-btn ghost" data-x>Cancel</button><button class="tpl-btn pri" data-ok>${primary}</button></span></div>
     </div>`);
   const ta = root.querySelector('#tkBrief') as HTMLTextAreaElement;
   const okBtn = root.querySelector('[data-ok]') as HTMLButtonElement;
@@ -266,24 +313,32 @@ async function runValidate(t: Task): Promise<void> {
     const briefRel = res.briefRel || '';
     await relay.pipelinePrep(res.path!, null, null, 0).catch(() => {});   // clear a stale verdict so a re-validate starts clean
     const agent = AGENTS.find((a) => a.id === agentId);
-    upsertTask({ ...t, status: (agentOk && agent) ? 'validating' : t.status, agentId, deps: depIds, dbCredId: selectedDbCred || undefined });
-    if (agentOk && agent) { running.set(t.id, { wt: res.path!, ws: wsKey(), provider: t.provider as ProviderId, repo: t.repo }); ensurePoll(); }
-    deps.openAgentTab({ cwd: res.path!, name: `task: ${t.title.slice(0, 22)}`, runCmd: agent ? agent.launch(briefRel) : undefined, dbCredId: selectedDbCred || undefined });
+    const runningStatus: Task['status'] = feature ? 'authoring' : 'validating';
+    upsertTask({ ...t, status: (agentOk && agent) ? runningStatus : t.status, agentId, deps: depIds, dbCredId: selectedDbCred || undefined });
+    if (agentOk && agent) { running.set(t.id, { wt: res.path!, ws: wsKey(), provider: t.provider as ProviderId, repo: t.repo, kind: feature ? 'feature' : 'validate', stage: 0, agentId, dbCredId: selectedDbCred || undefined }); ensurePoll(); }
+    deps.openAgentTab({ cwd: res.path!, name: `${feature ? 'spec' : 'task'}: ${t.title.slice(0, 20)}`, runCmd: agent ? agent.launch(briefRel) : undefined, dbCredId: selectedDbCred || undefined });
     close();
-    toast((agentOk && agent) ? 'Validating task…' : 'Worktree ready for the task', true);
+    toast((agentOk && agent) ? (feature ? 'Authoring feature spec…' : 'Validating task…') : 'Worktree ready', true);
   });
 }
 
 function openTaskDetails(t: Task): void {
-  const filed = isFiled(t);   // already has a filed issue → don't offer Re-validate (would file a DUPLICATE); offer "Open issue" instead
+  const filed = isFiled(t);   // already has a filed issue → don't offer a re-run (would file a DUPLICATE); offer "Open issue" instead
+  const feature = isFeatureTask(t);
+  const inProgress = t.status === 'validating' || t.status === 'authoring' || t.status === 'reviewing'; // a stage is live — don't offer to re-run
+  const runLabel = feature ? (t.status === 'draft' ? '🚀 Author spec' : '⟲ Re-author') : (t.status === 'draft' ? '⚡ Validate' : '⟲ Re-validate');
+  const resultLabel = feature ? 'Spec / review result' : 'Validation result';
+  const action = filed ? `<button class="tpl-btn pri" data-open>Open issue #${t.issueNumber} ↗</button>`
+    : inProgress ? `<span class="mut" style="align-self:center;font-size:12px">${esc(STATUS_LABEL[t.status])}</span>`
+    : `<button class="tpl-btn pri" data-run>${runLabel}</button>`;
   const { root, close } = modal(`<div class="tpl-card iss-card">
       <div class="hd"><span class="dot" style="background:var(--accent)"></span><span class="t">${esc(t.title)}<small>${esc(t.repo)} · ${esc(STATUS_LABEL[t.status])}</small></span></div>
       <div class="bd">
         <div class="det-body">${t.body ? esc(t.body) : '<span class="mut">No description.</span>'}</div>
-        ${t.result ? `<label class="iss-lbl">Validation result</label><div class="tk-result">${esc(t.result)}</div>` : ''}
+        ${t.result ? `<label class="iss-lbl">${resultLabel}</label><div class="tk-result">${esc(t.result)}</div>` : ''}
         ${t.issueUrl ? `<div class="iss-wt">Filed as issue <a href="#" data-issue>#${t.issueNumber} ↗</a> — status: <b>${t.status === 'closed' ? 'closed' : 'open'}</b> (synced from the issue)</div>` : ''}
       </div>
-      <div class="ft"><span class="hint"></span><span class="r"><button class="tpl-btn ghost" data-del>Delete</button><button class="tpl-btn ghost" data-edit>Edit</button>${filed ? `<button class="tpl-btn pri" data-open>Open issue #${t.issueNumber} ↗</button>` : `<button class="tpl-btn pri" data-run>${t.status === 'draft' ? '⚡ Validate' : '⟲ Re-validate'}</button>`}<button class="tpl-btn ghost" data-x>Close</button></span></div>
+      <div class="ft"><span class="hint"></span><span class="r"><button class="tpl-btn ghost" data-del>Delete</button><button class="tpl-btn ghost" data-edit>Edit</button>${action}<button class="tpl-btn ghost" data-x>Close</button></span></div>
     </div>`);
   root.querySelector('[data-x]')?.addEventListener('click', close);
   root.querySelector('[data-issue]')?.addEventListener('click', (e) => { e.preventDefault(); if (t.issueUrl) relay.openExternal(t.issueUrl); });
@@ -301,7 +356,7 @@ function render(): void {
   el.innerHTML = list.map((t) => `<div class="tk-row" data-id="${esc(t.id)}">
       <div class="tk-body">
         <div class="tk-title">${esc(t.title)}</div>
-        <div class="tk-meta"><span class="pr-repo-lbl"><span class="src-dot ${PROV_DOT[(t.provider as ProviderId)] || 'gh'}"></span>${esc(t.repo)}</span>${(t.tags || []).map((tg) => `<span class="tk-tagchip ${esc(tg)}">${esc(tg)}</span>`).join('')}${t.issueUrl ? `<span class="tk-issue" data-url="${esc(t.issueUrl)}" title="Open the filed issue">issue #${t.issueNumber} ↗</span>` : ''}</div>
+        <div class="tk-meta"><span class="pr-repo-lbl"><span class="src-dot ${PROV_DOT[(t.provider as ProviderId)] || 'gh'}"></span>${esc(t.repo)}</span>${(t.tags || []).map((tg) => `<span class="tk-tagchip ${esc(tg)}">${esc(tg === FEATURE_TAG ? 'feature' : tg)}</span>`).join('')}${t.issueUrl ? `<span class="tk-issue" data-url="${esc(t.issueUrl)}" title="Open the filed issue">issue #${t.issueNumber} ↗</span>` : ''}</div>
         ${t.result ? `<div class="tk-result trunc">${esc(t.result)}</div>` : ''}
       </div>
       <div class="tk-side"><span class="tk-st ${t.status}">${esc(STATUS_LABEL[t.status])}</span></div>

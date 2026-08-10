@@ -967,6 +967,10 @@ body.tabdrag .dz{display:block;pointer-events:auto}
 .tk-tagchip{font:8.5px/1.4 var(--mono);border:1px solid var(--border-strong);border-radius:999px;padding:1px 6px;color:var(--muted);text-transform:lowercase;flex:none}
 .tk-tagchip.bug{border-color:#da363366;color:#f85149}
 .tk-tagchip.enhancement{border-color:#a78bfa66;color:#a78bfa}
+.tk-tagchip.newfeature{border-color:var(--accent-line);color:var(--accent)}
+.tk-featopts{margin:-2px 0 2px;padding:8px 10px;background:var(--surface-2);border:1px solid var(--border);border-radius:8px}
+.tk-st.authoring,.tk-st.reviewing{color:var(--accent)}
+.tk-st.revise{color:#e0a44a}
 /* PR hover detail card — hoverable + scrollable so a long description can be read */
 .pr-hover{position:fixed;z-index:95;width:460px;max-width:calc(100vw - 16px);max-height:min(66vh,460px);overflow-y:auto;overscroll-behavior:contain;background:var(--surface);border:1px solid var(--border-strong);border-radius:10px;box-shadow:var(--shadow);padding:10px 12px 0;display:none}
 .prh-top{display:flex;align-items:center;gap:6px;margin-bottom:6px}
