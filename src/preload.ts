@@ -27,6 +27,12 @@ const api = {
     ipcRenderer.on('pty:exit', h);
     return () => ipcRenderer.off('pty:exit', h);
   },
+  // Alt-screen entered/left — the Blocks view uses this to drop to the live terminal for a full-screen TUI.
+  onPtyAlt: (cb: (id: string, alt: boolean) => void) => {
+    const h = (_: unknown, m: { id: string; alt: boolean }) => cb(m.id, m.alt);
+    ipcRenderer.on('pty:alt', h);
+    return () => ipcRenderer.off('pty:alt', h);
+  },
   // Structured command blocks parsed from shell-integration markers.
   onPtyBlock: (cb: (id: string, ev: BlockEvt) => void) => {
     const h = (_: unknown, m: { id: string; event: BlockEvt }) => cb(m.id, m.event);

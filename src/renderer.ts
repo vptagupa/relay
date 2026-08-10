@@ -1873,6 +1873,14 @@ function writeToTab(id: string, data: string): void {
   else t.replayQ = ((t.replayQ ?? '') + data).slice(-512 * 1024);
 }
 relay.onPtyData((id: string, data: string) => { writeToTab(id, data); markTabActive(id); persistWorkspace(); });
+// A shell entered/left the alternate screen (a full-screen TUI). Drive liveInteractive from this terminal-level
+// signal — it's authoritative and, unlike the block-level `interactive` flag, doesn't need a tracked command
+// block, so an agent-launched `claude` (trust prompt and all) drops to the live terminal in Blocks view.
+relay.onPtyAlt((id: string, alt: boolean) => {
+  const t = state.tabs.find((x) => x.id === id); if (!t || t.liveInteractive === alt) return;
+  t.liveInteractive = alt;
+  if (leaves(state.layout).some((g) => state.gv[g] === t.id)) updateMainView();
+});
 // Final flush on close — synchronous so the latest scrollback reaches disk before teardown.
 // Wrapped so a failed flush can never throw mid-unload (which would abort a clean close).
 window.addEventListener('beforeunload', () => {
