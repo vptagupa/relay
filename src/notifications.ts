@@ -5,7 +5,7 @@
 
 import { state } from './state';
 import { $, esc } from './dom';
-import { toast } from './ui';
+import { toast, addSearch } from './ui';
 import type { AppNotification } from './shared/types';
 
 const relay = (window as any).relay;
@@ -310,6 +310,7 @@ function openNotifSettings(): void {
     box.querySelectorAll<HTMLInputElement>('input[data-repo]').forEach((cb) => {
       cb.onchange = () => { const id = cb.dataset.repo!; if (cb.checked) watched.add(id); else watched.delete(id); void persistWatched(ws, [...watched]); };
     });
+    addSearch(box.querySelector('.src-list'), 'Search repositories…'); // filter the watch list
   };
   for (const p of PROVS_ALL) renderList(p);
 

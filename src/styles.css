@@ -365,6 +365,10 @@ button{font-family:inherit;color:inherit;cursor:pointer;border:none;background:n
 .sync-dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:5px;vertical-align:middle}
 .sync-dot.on{background:var(--ok,#5fbf80)}
 .sync-dot.off{background:var(--muted)}
+/* Inline list filter (repo pickers: Sources, notification watch-list, dependency selectors) */
+.list-search{width:100%;box-sizing:border-box;margin:2px 0 7px;background:var(--surface-2);border:1px solid var(--border);border-radius:8px;color:var(--text);font:12px var(--sans);padding:7px 10px}
+.list-search:focus{outline:none;border-color:var(--accent-line)}
+.list-search::placeholder{color:var(--muted)}
 .field .set{padding:0 12px;border-radius:8px;background:var(--accent);color:var(--on-accent);font-weight:600;font-size:12.5px}
 .field .state{font-size:11px;margin-top:5px}
 /* theme picker */

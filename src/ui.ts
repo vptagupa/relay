@@ -14,6 +14,23 @@ export function toast(msg: string, ok = false): void {
   toastT = setTimeout(() => { w.innerHTML = ''; toastT = null; }, 2600);
 }
 
+/** Insert a search box just above `listEl` that filters its direct children by text (case-insensitive
+ *  substring). A no-op for short lists (≤ `min`) where a filter would only be clutter. Used by the repo
+ *  pickers (Sources, notification watch-list, dependency selectors) so long repo lists are searchable. */
+export function addSearch(listEl: HTMLElement | null, placeholder = 'Search…', min = 6): void {
+  if (!listEl) return;
+  const items = Array.from(listEl.children) as HTMLElement[];
+  if (items.length <= min) return;
+  const search = document.createElement('input');
+  search.type = 'text'; search.className = 'list-search'; search.placeholder = placeholder;
+  search.spellcheck = false; search.autocomplete = 'off';
+  listEl.parentElement?.insertBefore(search, listEl);
+  search.oninput = () => {
+    const q = search.value.trim().toLowerCase();
+    for (const it of items) it.style.display = !q || (it.textContent || '').toLowerCase().includes(q) ? '' : 'none';
+  };
+}
+
 /** Turn `el` into an inline editor: select its text, commit on Enter/blur, insert a newline on Shift+Enter,
  *  cancel (restore) on Escape. `onDone` always runs afterward (commit OR cancel). A draggable ancestor is
  *  un-draggabled while editing. (Multiline shows for fields whose CSS is white-space:pre-wrap, e.g. bookmarks.) */

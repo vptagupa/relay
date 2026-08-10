@@ -8,7 +8,7 @@
 
 import { state } from './state';
 import { $, esc } from './dom';
-import { toast } from './ui';
+import { toast, addSearch } from './ui';
 import type { Issue } from './shared/types';
 import { allPipelines, pipelineById, isGate, nextEdge, stageIndexById, STOP, renderBrief, stageStatus, type PipelineDef, type BriefCtx } from './pipelines';
 import { openPipelineBuilder } from './pipeline-editor';
@@ -902,6 +902,7 @@ async function openAssign(i: Issue): Promise<void> {
     void setIssueDeps(asgProvider, asgRepo || '', i.number, [...selectedDeps]);
     if (!briefDirty) ta.value = seedBrief();
   });
+  addSearch(root.querySelector('#issDeps'), 'Search dependency repos…'); // filter a long dependency-repo list
   // Pick a DB credential template → persist it for this issue and re-seed the brief's DB note (unless edited).
   const dbSel = root.querySelector('#issDbSel') as HTMLSelectElement | null;
   if (dbSel) dbSel.onchange = () => { selectedDbCred = dbSel.value; void setIssueDbCred(asgProvider, asgRepo || '', i.number, selectedDbCred); if (!briefDirty) ta.value = seedBrief(); };
@@ -1359,6 +1360,7 @@ async function openSources(): Promise<void> {
         const qid = repoId(id, rp.repo);
         return `<label class="src-item"><input type="checkbox" data-repo="${esc(qid)}"${tracked.has(qid) ? ' checked' : ''}><span class="src-r">${esc(rp.repo)}</span>${rp.priv ? '<span class="src-priv">private</span>' : ''}</label>`;
       }).join('')}</div>`;
+      addSearch(box.querySelector('.src-list'), 'Search repositories…'); // filter the loaded repo list
       box.querySelectorAll<HTMLInputElement>('input[type=checkbox]').forEach((cb) => {
         cb.onchange = async () => {
           const qid = cb.dataset.repo!;

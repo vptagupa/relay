@@ -5,7 +5,7 @@
 
 import { state } from './state';
 import { $, esc } from './dom';
-import { toast } from './ui';
+import { toast, addSearch } from './ui';
 import { stageBrief, renderBrief } from './pipelines';
 import { AGENTS } from './agents-list';
 import { dbCredOptions, dbCredNote, loadDbCreds, dbCredMetas } from './dbcreds';
@@ -297,6 +297,7 @@ async function runValidate(t: Task): Promise<void> {
     root.querySelectorAll<HTMLInputElement>('#tkDeps input:checked').forEach((cb) => selectedDeps.add(cb.value));
     if (!briefDirty) ta.value = seedBrief();
   });
+  addSearch(root.querySelector('#tkDeps'), 'Search dependency repos…'); // filter a long dependency-repo list
   const dbSel = root.querySelector('#tkDb') as HTMLSelectElement | null;   // pick a DB credential template → re-seed the DB note (unless edited)
   if (dbSel) dbSel.onchange = () => { selectedDbCred = dbSel.value; if (!briefDirty) ta.value = seedBrief(); };
   root.querySelector('[data-x]')?.addEventListener('click', close);
