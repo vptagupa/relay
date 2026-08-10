@@ -1341,6 +1341,30 @@ function selectSettingsTab(id: string): void {
   if (id === 'sync') refreshSync(); // pull fresh Google/passphrase/backup status when the Sync tab is shown
   if (id === 'agents') { refreshRepoDeps(); refreshBriefNotes(); } // repopulate the repo-deps dropdown + brief-notes list
 }
+// Build-time facts baked by vite.renderer.config.ts (define) — the distributed app has no repo to query.
+declare const __APP_VERSION__: string;
+declare const __RECENT_COMMITS__: readonly string[];
+// The About dialog — a brief description, the current version, and the 3 most recent commit subjects (as of
+// this build). Self-contained modal (Close button / Escape; no backdrop-click close, like the other dialogs).
+function openAbout(): void {
+  const version = typeof __APP_VERSION__ === 'string' ? __APP_VERSION__ : '';
+  const commits = Array.isArray(__RECENT_COMMITS__) ? __RECENT_COMMITS__ : [];
+  const root = document.createElement('div'); root.className = 'tpl-modal';
+  root.innerHTML = `<div class="tpl-sc"></div><div class="tpl-card about-card">
+      <div class="hd"><span class="dot" style="background:var(--accent)"></span><span class="t">About Slayer T</span></div>
+      <div class="bd">
+        <div class="about-desc">A cross-platform terminal with a Warp-style command-blocks view, nested split panes with per-pane tabs, a session Library &amp; Files browser, a multi-provider Issue / PR agent with staged pipelines, and end-to-end-encrypted cloud sync.</div>
+        <div class="about-ver">Version <b>${esc(version || '—')}</b></div>
+        <label class="iss-lbl">Recent changes</label>
+        <ul class="about-commits">${commits.length ? commits.map((c) => `<li>${esc(c)}</li>`).join('') : '<li class="mut">—</li>'}</ul>
+      </div>
+      <div class="ft"><span class="hint"></span><span class="r"><button class="tpl-btn pri" data-x>Close</button></span></div>
+    </div>`;
+  const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') { e.preventDefault(); close(); } };
+  const close = () => { root.remove(); document.removeEventListener('keydown', onKey); };
+  document.body.appendChild(root); document.addEventListener('keydown', onKey);
+  root.querySelector('[data-x]')?.addEventListener('click', close);
+}
 function openSettings() { reflectSettings(); selectSettingsTab('general'); $('#settings').classList.add('show'); $('#scrim').classList.add('show'); }
 function closeSettings() { $('#settings').classList.remove('show'); if (!$('#palette').classList.contains('show')) $('#scrim').classList.remove('show'); }
 
@@ -1827,6 +1851,7 @@ $('#palList').addEventListener('click', (e) => { const it = (e.target as HTMLEle
 // settings
 $('#btnSettings').onclick = openSettings;
 $('#winSettings').onclick = openSettings;
+$('#winAbout').onclick = openAbout;
 $('#settingsClose').onclick = closeSettings;
 // Settings tab bar — delegate clicks to switch the visible panel.
 $('#setTabs').addEventListener('click', (e) => { const t = (e.target as HTMLElement).closest('.set-tab') as HTMLElement | null; if (t?.dataset.tab) selectSettingsTab(t.dataset.tab); });

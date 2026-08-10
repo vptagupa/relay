@@ -13,7 +13,8 @@
    (renderer applyThemeVars). Nothing here defines a theme; components below just read the vars.
    Corners follow each theme's --r. */
 .bvb,.hb,.lib-item,.file-item,.ctx-menu,.bkm-pop,.model-menu,.pal{border-radius:var(--r)}
-.modal,.agent,.history{border-radius:var(--r-lg)}
+.modal,.agent{border-radius:var(--r-lg)}
+.history{border-radius:0} /* History + Bookmarks drawers are square */
 .tb-btn,.bv-input,.set,.btn{border-radius:var(--r-sm)}
 
 /* ============================ THEME TRAITS ============================ */
@@ -387,6 +388,12 @@ button{font-family:inherit;color:inherit;cursor:pointer;border:none;background:n
 .bn-checks{display:flex;flex-direction:column;gap:6px;margin:2px 0 4px}
 .bn-check{display:flex;align-items:flex-start;gap:7px;font-size:12px;color:var(--text);cursor:pointer;line-height:1.4}
 .bn-check input{margin:2px 0 0;flex:none}
+/* About dialog */
+.about-card{width:min(440px,92vw)}
+.about-desc{font-size:12.5px;line-height:1.55;color:var(--text-dim)}
+.about-ver{font-size:12.5px;color:var(--text);margin-top:12px}
+.about-commits{margin:6px 0 0;padding-left:18px;display:flex;flex-direction:column;gap:4px}
+.about-commits li{font-size:12px;color:var(--text-dim);line-height:1.4}
 .field .set{padding:0 12px;border-radius:8px;background:var(--accent);color:var(--on-accent);font-weight:600;font-size:12.5px}
 .field .state{font-size:11px;margin-top:5px}
 /* theme picker */
