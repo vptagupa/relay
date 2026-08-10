@@ -37,7 +37,7 @@ export function addSearch(listEl: HTMLElement | null, placeholder = 'Search…',
 export function makeEditable(el: HTMLElement, commit: (v: string) => void, onDone?: () => void): void {
   const dragAnc = el.closest('[draggable="true"]') as HTMLElement | null; // don't drag while renaming
   if (dragAnc) dragAnc.draggable = false;
-  const original = el.textContent || '';
+  const original = el.innerText;   // innerText = the RENDERED text, so multiline line breaks read back as \n
   el.setAttribute('contenteditable', 'true');
   el.focus();
   const sel = window.getSelection(); const r = document.createRange();
@@ -48,14 +48,16 @@ export function makeEditable(el: HTMLElement, commit: (v: string) => void, onDon
     el.onblur = null; el.onkeydown = null; // detach BEFORE blur so cancel can't re-commit via onblur
     el.removeAttribute('contenteditable');
     if (dragAnc) dragAnc.draggable = true;
-    if (save) commit(el.textContent?.trim() || ''); else el.textContent = original; // Escape restores the old text
+    // Read innerText, NOT textContent: Shift+Enter inserts a block break (<div>/<br>) that textContent flattens
+    // (dropping the newlines), whereas innerText renders it back as \n — so the saved text keeps its line breaks.
+    if (save) commit(el.innerText.trim()); else el.textContent = original; // Escape restores the old text
     el.blur();
     onDone?.(); // always runs, on commit OR cancel
   };
   el.onkeydown = (e) => {
     if (e.key === 'Enter') {
       e.preventDefault();
-      if (e.shiftKey) document.execCommand('insertText', false, '\n'); // Shift+Enter → a literal newline (multiline bookmarks); pre-wrap renders it, textContent keeps it
+      if (e.shiftKey) document.execCommand('insertText', false, '\n'); // Shift+Enter → newline (multiline bookmarks); read back via innerText so the break survives on save
       else done(true);                                                  // plain Enter commits
     } else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); done(false); } // don't let Escape also close the panel
   };
