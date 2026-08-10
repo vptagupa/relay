@@ -89,6 +89,32 @@ export async function hasKeys(): Promise<Record<string, boolean>> {
   };
 }
 
+/* ----------------------------- cloud-sync secret transfer (MAIN ONLY) ----------------------------- */
+// Export EVERY stored secret as PLAINTEXT for the encrypted cloud-sync bundle — API keys, provider tokens,
+// DB credentials, everything — so they become portable across machines. EXCLUDES the sync feature's own
+// secrets (`sync:*`: this device's Google token + passphrase), which are device-local and must never be
+// synced. The caller MUST re-encrypt this map under the user's passphrase before it leaves the process; it is
+// never written to disk or sent to the renderer in the clear.
+export async function exportSecrets(): Promise<Record<string, string>> {
+  const raw = await readRaw();
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(raw)) {
+    if (k.startsWith('sync:')) continue;
+    const plain = decode(v);
+    if (plain != null) out[k] = plain;
+  }
+  return out;
+}
+// Restore secrets on a PULL: replace all NON-sync secrets with `plain`, re-encrypting each under THIS machine's
+// keychain (so at-rest encryption stays DPAPI-bound locally). The device-local `sync:*` secrets are preserved,
+// so restoring a bundle can never overwrite/disconnect this machine's own Google connection or passphrase.
+export async function importSecrets(plain: Record<string, string>): Promise<void> {
+  await enqueueWrite((raw) => {
+    for (const k of Object.keys(raw)) if (!k.startsWith('sync:')) delete raw[k];
+    for (const [k, val] of Object.entries(plain || {})) if (k && typeof val === 'string') raw[k] = encode(val);
+  });
+}
+
 /* ----------------------------- database credential templates ----------------------------- */
 // Saved DB connection templates the user can reference from a pipeline run. The WHOLE record — including the
 // password and every extra-var value — is stored encrypted at rest (one JSON blob per template, under the key

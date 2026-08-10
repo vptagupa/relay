@@ -25,6 +25,7 @@ import { initPrs, loadPrs } from './prs';
 import { initTasks, renderTasks } from './tasks';
 import { initNotifications, renderBell } from './notifications';
 import { initDbCreds } from './dbcreds';
+import { initSync, refreshSync } from './sync';
 import type { Settings, SavedSession, AgentEvent, ApprovalRequest, ChatTurn, OpenTab, Workspace, WorkspaceDef, Block, Bookmark, BookmarkGroup } from './shared/types';
 import { EDITORS, DEFAULT_EDITOR } from './shared/editors';
 import { STAGE_KINDS, kindSpec, type StageKind } from './pipelines';
@@ -1335,6 +1336,7 @@ function selectSettingsTab(id: string): void {
   document.querySelectorAll<HTMLElement>('#setTabs .set-tab').forEach((t) => t.classList.toggle('active', t.dataset.tab === id));
   document.querySelectorAll<HTMLElement>('#settings .set-panel').forEach((p) => p.classList.toggle('active', p.dataset.panel === id));
   const body = document.querySelector('#settings .modal-body') as HTMLElement | null; if (body) body.scrollTop = 0;
+  if (id === 'sync') refreshSync(); // pull fresh Google/passphrase/backup status when the Sync tab is shown
 }
 function openSettings() { reflectSettings(); selectSettingsTab('general'); $('#settings').classList.add('show'); $('#scrim').classList.add('show'); }
 function closeSettings() { $('#settings').classList.remove('show'); if (!$('#palette').classList.contains('show')) $('#scrim').classList.remove('show'); }
@@ -1904,6 +1906,12 @@ new ResizeObserver(() => { clearTimeout(_roT); _roT = setTimeout(() => { fitPane
   initNotifications({ activeWsId: getActiveWsId });
   // Database credential templates (Settings panel) — the encrypted list the assign dialogs reference.
   initDbCreds();
+  // Cloud Sync (Settings → Sync) — Google Drive, end-to-end encrypted. Destructive restore uses the app confirm;
+  // push first flushes the live tab snapshot so the backup isn't a debounce-stale copy.
+  initSync({
+    confirm: confirmDialog,
+    flushWorkspace: async () => { await relay.syncFlushWorkspace({ active: state.active, tabs: snapshotTabs(), gv: state.gv, focus: state.focus, layout: state.layout }); },
+  });
   await loadWorkspaceMeta(); // load workspace defs + blueprints, mirror the active workspace's folder + theme into settings before first paint
   // Per-workspace Library migration: sessions saved before Libraries were per-workspace have no wsId.
   // Assign them to the (now-known) active workspace so they land in one Library instead of vanishing from

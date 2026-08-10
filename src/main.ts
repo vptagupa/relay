@@ -10,6 +10,8 @@ import { createTerm, writeTerm, resizeTerm, detachTerm, killTerm, killAll, isAlt
 import { startWebhookServer, stopWebhookServer, webhookRunning } from './webhooks';
 import * as store from './store';
 import * as keys from './keys';
+import * as gdrive from './gdrive';
+import * as cloudsync from './cloudsync';
 import { runAgent } from './agent/agent';
 import squirrelStartup from 'electron-squirrel-startup';
 import type { ApprovalRequest, ChatTurn } from './shared/types';
@@ -397,6 +399,62 @@ ipcMain.handle('provider:oauth-config-set', async (_e, p: { provider: ProviderId
 });
 // One-time migration of the pre-scoping global secrets into the active workspace (renderer guards it with a flag).
 ipcMain.handle('provider:migrate-global', async (_e, { ws }: { ws: string }) => { if (typeof ws === 'string' && ws) await migrateGlobalSecretsToWs(ws); return { ok: true }; });
+
+// --- Cloud sync (Google Drive, end-to-end encrypted) ----------------------------------------------
+// Google connects via OAuth 2.0 authorization-code + LOOPBACK redirect (same shape as Bitbucket): one IPC runs
+// the whole round trip, catches the ?code on a one-shot localhost server, and hands it to gdrive.exchangeCode
+// (which owns the client secret + token storage). The renderer only ever sees { ok, email } — never a token.
+// Set while a Drive sign-in is in flight, so the renderer can ABORT one the user backed out of (closing the
+// browser tab yields no callback, so the flow would otherwise hang until the 5-min timeout).
+let cancelGdriveOAuth: (() => void) | null = null;
+ipcMain.handle('gdrive:oauth', async () => {
+  if (!(await gdrive.isConfigured())) return { ok: false, error: 'Google OAuth client is not configured' };
+  cancelGdriveOAuth?.(); // abort any prior in-flight attempt so we never leak a second loopback server
+  return new Promise<{ ok: boolean; email?: string; error?: string; cancelled?: boolean }>((resolve) => {
+    let settled = false;
+    const state = randomBytes(16).toString('hex');
+    const page = (title: string, sub: string) => `<!doctype html><meta charset="utf-8"><title>Slayer T</title>` +
+      `<body style="font:15px/1.5 system-ui,Segoe UI,sans-serif;background:#0f1115;color:#e6e6e6;display:grid;place-items:center;height:100vh;margin:0">` +
+      `<div style="text-align:center;max-width:380px"><div style="font-size:34px">☁️</div><h2 style="margin:.4em 0 .2em">${title}</h2><p style="opacity:.7;margin:0">${sub}</p></div>`;
+    const finish = (v: { ok: boolean; email?: string; error?: string; cancelled?: boolean }) => {
+      if (settled) return; settled = true;
+      cancelGdriveOAuth = null;
+      clearTimeout(timer); try { server.close(); } catch { /* already closed */ }
+      resolve(v);
+    };
+    cancelGdriveOAuth = () => finish({ ok: false, cancelled: true, error: 'Sign-in cancelled' }); // closes the loopback server + frees the port
+    const server = http.createServer(async (req, res) => {
+      try {
+        const url = new URL(req.url || '/', gdrive.GD_REDIRECT_URI);
+        const code = url.searchParams.get('code');
+        const gotState = url.searchParams.get('state');
+        const err = url.searchParams.get('error_description') || url.searchParams.get('error');
+        if (!code && !err) { res.writeHead(404); res.end('Not found'); return; } // ignore /favicon.ico etc.
+        if (err) { res.writeHead(200, { 'Content-Type': 'text/html' }); res.end(page('Authorization failed', 'You can close this tab and return to Slayer T.')); finish({ ok: false, error: String(err) }); return; }
+        if (!code || gotState !== state) { res.writeHead(400, { 'Content-Type': 'text/html' }); res.end(page('Invalid response', 'The sign-in could not be verified. Close this tab and try again.')); finish({ ok: false, error: 'Invalid authorization response (state mismatch)' }); return; }
+        res.writeHead(200, { 'Content-Type': 'text/html' }); res.end(page('Connected to Google Drive ✓', 'You can close this tab and return to Slayer T.'));
+        finish(await gdrive.exchangeCode(code, gdrive.GD_REDIRECT_URI));
+      } catch { try { res.writeHead(500); res.end('error'); } catch { /* */ } finish({ ok: false, error: 'Callback handling error' }); }
+    });
+    server.on('error', (e: NodeJS.ErrnoException) => finish({ ok: false, error: e?.code === 'EADDRINUSE' ? `Port ${gdrive.GD_OAUTH_PORT} is in use — close whatever is using it and try again.` : 'Could not start the local sign-in server' }));
+    const timer = setTimeout(() => finish({ ok: false, error: 'Timed out waiting for authorization' }), 300000); // 5 min
+    server.listen(gdrive.GD_OAUTH_PORT, '127.0.0.1', async () => { void shell.openExternal(await gdrive.authorizeUrl(state)); });
+  });
+});
+// Abort an in-flight sign-in (user closed the browser tab / clicked cancel in-app).
+ipcMain.handle('gdrive:oauth-cancel', () => { cancelGdriveOAuth?.(); return { ok: true }; });
+ipcMain.handle('gdrive:auth-state', async () => { try { return await gdrive.authState(); } catch (err) { logFatal('gdrive:auth-state', err); return { connected: false }; } });
+ipcMain.handle('gdrive:disconnect', async () => { try { await gdrive.disconnect(); } catch (err) { logFatal('gdrive:disconnect', err); } return { ok: true }; });
+ipcMain.handle('gdrive:config-get', async () => { try { return await gdrive.getConfig(); } catch (err) { logFatal('gdrive:config-get', err); return { clientId: '', hasSecret: false, configured: false }; } });
+ipcMain.handle('gdrive:config-set', async (_e, p: { clientId: string; secret?: string }) => { try { return await gdrive.setConfig(typeof p?.clientId === 'string' ? p.clientId : '', typeof p?.secret === 'string' ? p.secret : undefined); } catch (err) { logFatal('gdrive:config-set', err); return { ok: false, error: 'Could not save the OAuth client' }; } });
+
+ipcMain.handle('sync:status', async () => { try { return await cloudsync.status(); } catch (err) { logFatal('sync:status', err); return { configured: false, connected: false, email: '', hasPassphrase: false, lastPush: 0, lastPull: 0, remoteExists: false, remoteModified: '' }; } });
+ipcMain.handle('sync:has-passphrase', async () => { try { return { has: await cloudsync.hasPassphrase() }; } catch { return { has: false }; } });
+ipcMain.handle('sync:set-passphrase', async (_e, p: { passphrase: string }) => { try { return await cloudsync.setPassphrase(typeof p?.passphrase === 'string' ? p.passphrase : ''); } catch (err) { logFatal('sync:set-passphrase', err); return { ok: false, error: 'Could not save the passphrase' }; } });
+ipcMain.handle('sync:push', async () => { try { return await cloudsync.push(); } catch (err) { logFatal('sync:push', err); return { ok: false, error: 'Sync push failed' }; } });
+ipcMain.handle('sync:pull', async () => { try { return await cloudsync.pull(); } catch (err) { logFatal('sync:pull', err); return { ok: false, error: 'Sync pull failed' }; } });
+// Relaunch to load restored state — only meaningful right after a successful pull (renderer confirms first).
+ipcMain.handle('sync:relaunch', () => { cloudsync.relaunchAfterPull(); return { ok: true }; });
 
 // --- generic provider handlers (dispatch to the registry in providers.ts) ---
 const badProvider = { ok: false, error: 'Unknown provider' } as const;
@@ -913,6 +971,10 @@ ipcMain.handle('fs:open-rel', async (_e, p: { cwd?: string; target: string }) =>
 /* -------------------- workspace (open tabs) -------------------- */
 ipcMain.handle('workspace:get', () => store.getWorkspace());
 ipcMain.on('workspace:set', (_e, ws) => { void store.setWorkspace(ws); });
+// Awaitable flush (unlike the fire-and-forget 'workspace:set') — cloud-sync push calls this first so the backup
+// captures the CURRENT tab snapshot rather than one up to ~1.5s stale from the autosave debounce. Does NOT
+// finalize (unlike set-sync), so autosave keeps working afterward.
+ipcMain.handle('workspace:flush', async (_e, ws) => { try { await store.setWorkspace(ws); } catch (err) { logFatal('workspace:flush', err); } return { ok: true }; });
 // Synchronous variant for the renderer's final flush on close — write completes before we
 // reply. Best-effort: a failed final flush must never throw here (that would surface as a
 // main-process error dialog while the user is just closing the app).

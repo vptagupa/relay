@@ -51,6 +51,24 @@ const api = {
   dbCredSave: (input: { id?: string; label: string; engine?: string; host?: string; port?: string; database?: string; user?: string; password?: string; extras?: Record<string, string> }): Promise<DbCredMeta[]> => ipcRenderer.invoke('dbcreds:save', input),
   dbCredDelete: (id: string): Promise<DbCredMeta[]> => ipcRenderer.invoke('dbcreds:delete', { id }),
 
+  // --- cloud sync (Google Drive, end-to-end encrypted) ---
+  // Google tokens + the sync passphrase live encrypted in the main process; the renderer only ever sees status
+  // ({ connected, email, … }) and the OAuth client id — never a token, the client secret, or the passphrase.
+  gdriveOAuth: (): Promise<{ ok: boolean; email?: string; error?: string; cancelled?: boolean }> => ipcRenderer.invoke('gdrive:oauth'),
+  gdriveOAuthCancel: (): Promise<{ ok: boolean }> => ipcRenderer.invoke('gdrive:oauth-cancel'),
+  gdriveAuthState: (): Promise<{ connected: boolean; email?: string }> => ipcRenderer.invoke('gdrive:auth-state'),
+  gdriveDisconnect: (): Promise<{ ok: boolean }> => ipcRenderer.invoke('gdrive:disconnect'),
+  gdriveConfigGet: (): Promise<{ clientId: string; hasSecret: boolean; configured: boolean }> => ipcRenderer.invoke('gdrive:config-get'),
+  gdriveConfigSet: (clientId: string, secret?: string): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke('gdrive:config-set', { clientId, secret }),
+  syncStatus: (): Promise<{ configured: boolean; connected: boolean; email: string; hasPassphrase: boolean; lastPush: number; lastPull: number; remoteExists: boolean; remoteModified: string }> => ipcRenderer.invoke('sync:status'),
+  syncHasPassphrase: (): Promise<{ has: boolean }> => ipcRenderer.invoke('sync:has-passphrase'),
+  syncSetPassphrase: (passphrase: string): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke('sync:set-passphrase', { passphrase }),
+  syncPush: (): Promise<{ ok: boolean; error?: string; ts?: number }> => ipcRenderer.invoke('sync:push'),
+  syncPull: (): Promise<{ ok: boolean; error?: string; applied?: boolean; ts?: number; missing?: boolean }> => ipcRenderer.invoke('sync:pull'),
+  syncRelaunch: (): Promise<{ ok: boolean }> => ipcRenderer.invoke('sync:relaunch'),
+  // Awaitable workspace flush — the renderer calls this before a sync push so the backup captures the live tabs.
+  syncFlushWorkspace: (ws: Workspace): Promise<{ ok: boolean }> => ipcRenderer.invoke('workspace:flush', ws),
+
   // --- sessions (the Library) ---
   listSessions: (): Promise<SavedSession[]> => ipcRenderer.invoke('sessions:list'),
   upsertSession: (s: SavedSession): Promise<SavedSession[]> => ipcRenderer.invoke('sessions:upsert', s),

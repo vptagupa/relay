@@ -39,6 +39,11 @@ let writeChain: Promise<void> = Promise.resolve(); // serialize writes so overla
 let lastMain: string | null = null;        // last relay.json content written (skip redundant writes)
 let lastWs: string | null = null;          // last workspace.json content written
 let wsFinalized = false;                    // the sync shutdown flush wrote the final workspace — no async write may overwrite it
+let suspended = false;                       // cloud-sync PULL froze persistence: files were just restored on disk and the app is about to relaunch — no in-memory (stale) flush may overwrite them
+
+// Cloud sync applied a restored bundle directly to the JSON files; block every further write (async flushes AND
+// the shutdown sync flush) so the stale in-memory cache can't clobber the restored data before the relaunch.
+export function suspendPersistence(): void { suspended = true; }
 
 function normWs(w: unknown): Workspace {
   const wsp = (w && typeof w === 'object' ? w : {}) as Record<string, unknown>;
@@ -112,7 +117,7 @@ async function atomicWrite(f: string, data: string): Promise<void> {
 
 // slayert.json — sessions + settings + workspace definitions (the tab snapshots live in their own file).
 async function flushMain(): Promise<void> {
-  if (!cache || readFailed) return;
+  if (!cache || readFailed || suspended) return;
   const data = JSON.stringify({ sessions: cache.sessions, settings: cache.settings, workspaces: cache.workspaces, activeWorkspaceId: cache.activeWorkspaceId, blueprints: cache.blueprints });
   if (data === lastMain) return;
   lastMain = data;
@@ -123,7 +128,7 @@ async function flushMain(): Promise<void> {
 // workspace.json — the frequently-changing open-tab snapshot, so a workspace save no longer
 // re-serializes the whole Library.
 async function flushWorkspace(): Promise<void> {
-  if (!cache || wsFinalized) return; // once the shutdown sync flush ran, its snapshot is final
+  if (!cache || wsFinalized || suspended) return; // once the shutdown sync flush ran, its snapshot is final; a sync pull also freezes writes
   const data = JSON.stringify({ version: 1, byId: cache.wsById });
   if (data === lastWs) return;
   lastWs = data;
@@ -196,7 +201,7 @@ export async function setWorkspace(ws: Workspace): Promise<void> {
 // Synchronous write for shutdown, when there's no time to await async fs. Writes only the small
 // workspace file (the cache is always populated by boot; if not, there's nothing to persist).
 export function setWorkspaceSync(ws: Workspace): void {
-  if (!cache) return;
+  if (!cache || suspended) return; // a sync pull restored files on disk + is relaunching — don't overwrite with stale cache
   cache.wsById[cache.activeWorkspaceId] = ws;
   wsFinalized = true; // set BEFORE writing: this is the last word on close, so any queued/in-flight async flush skips its rename
   try {

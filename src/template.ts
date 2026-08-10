@@ -160,6 +160,7 @@ export function appHtml(panes: string): string {
       <button type="button" class="set-tab active" data-tab="general">General</button>
       <button type="button" class="set-tab" data-tab="agents">Agents</button>
       <button type="button" class="set-tab" data-tab="keys">API Keys</button>
+      <button type="button" class="set-tab" data-tab="sync">Sync</button>
       <button type="button" class="set-tab" data-tab="terminal">Terminal</button>
       <button type="button" class="set-tab" data-tab="notif">Notifications</button>
     </div>
@@ -183,6 +184,19 @@ export function appHtml(panes: string): string {
         <div class="field"><label>Anthropic API key (Claude) <span class="opt">optional</span></label><div class="row"><input id="keyAnthropic" type="password" placeholder="blank = use your Claude Code login"><button class="set" data-key="anthropic">Save</button></div><div class="state off" id="stateAnthropic">not set</div><div class="fhint">Leave blank to sign in with your Claude subscription / Claude Code login (or an environment key). Paste a key only to override.</div></div>
         <div class="field"><label>OpenAI API key (GPT)</label><div class="row"><input id="keyOpenai" type="password" placeholder="sk-…"><button class="set" data-key="openai">Save</button></div><div class="state off" id="stateOpenai">not set</div></div>
         <div class="field"><label>Google AI API key (Gemini)</label><div class="row"><input id="keyGoogle" type="password" placeholder="AIza…"><button class="set" data-key="google">Save</button></div><div class="state off" id="stateGoogle">not set</div></div>
+      </div>
+      <!-- Cloud Sync -->
+      <div class="set-panel" data-panel="sync">
+        <div class="set-note">Back up everything — settings, Library, workspaces, and <b>all credentials</b> — to your Google Drive, <b>end-to-end encrypted</b>, and restore it on another PC. It's encrypted with your passphrase before upload, so Google can't read it.</div>
+        <div class="sync-status" id="syncStatus"></div>
+        <div class="field"><label>1 · Google OAuth client <span class="mut">— one-time setup</span></label>
+          <input class="tk-input" id="gdClientId" placeholder="Client ID — …apps.googleusercontent.com" spellcheck="false">
+          <div class="row" style="margin-top:6px"><input id="gdClientSecret" type="password" placeholder="Client secret"><button class="set" id="gdConfigSave">Save</button></div>
+          <div class="fhint">In Google Cloud → APIs &amp; Services: enable the <b>Google Drive API</b>, create an OAuth <b>Desktop app</b> client, and paste its ID + secret here. <a href="#" id="gdHelp">Open Google Cloud Console ↗</a></div>
+        </div>
+        <div class="field"><label>2 · Google account</label><div class="row"><button class="set" id="gdConnect">Connect Google Drive</button><button class="set" id="gdDisconnect" style="display:none">Disconnect</button></div></div>
+        <div class="field"><label>3 · Encryption passphrase</label><div class="row"><input id="syncPass" type="password" placeholder="a strong passphrase you'll remember"><button class="set" id="syncPassSave">Set</button></div><div class="fhint"><b>Only you know it.</b> It's never uploaded — if you forget it, the cloud backup can't be recovered. Enter the <b>same</b> passphrase on each PC.</div></div>
+        <div class="field"><label>Back up &amp; restore</label><div class="row"><button class="set" id="syncPush" disabled>⬆ Back up to Drive</button><button class="set" id="syncPull" disabled>⬇ Restore from Drive</button></div><div class="fhint" id="syncTimes"></div><div class="fhint">Restore replaces this PC's data with the cloud copy and restarts the app.</div></div>
       </div>
       <!-- Terminal -->
       <div class="set-panel" data-panel="terminal">
