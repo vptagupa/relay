@@ -11,6 +11,7 @@ import { AGENTS } from './agents-list';
 import { dbCredOptions, dbCredNote, loadDbCreds, dbCredMetas } from './dbcreds';
 import { authorBrief, reviewBrief, featureIssueBody, isFeatureTask, FEATURE_TAG } from './feature-spec';
 import { repoDepsFor } from './repo-deps';
+import { noteChecks, notesNote, defaultNoteIds } from './brief-notes';
 import type { Task } from './shared/types';
 
 const relay = (window as any).relay;
@@ -274,7 +275,8 @@ async function runValidate(t: Task): Promise<void> {
   const initialDeps = savedDeps.length ? savedDeps : repoDepsFor(`${t.provider}:${t.repo}`); // no saved deps → default to this repo's dependency template
   const selectedDeps = new Set(initialDeps.filter((id) => depCandidates.includes(id)));
   let selectedDbCred = t.dbCredId || '';   // DB credential template injected into the run's env
-  const seedBrief = () => (feature ? authorBrief(t, { webResearch: t.webResearch !== false }) : validateBrief(t) + tagNote(t.tags || [])) + depsNote([...selectedDeps]) + dbCredNote(selectedDbCred);
+  const selectedNotes = new Set(defaultNoteIds());   // configurable brief notes (Settings) — default-on ones pre-checked
+  const seedBrief = () => (feature ? authorBrief(t, { webResearch: t.webResearch !== false }) : validateBrief(t) + tagNote(t.tags || [])) + depsNote([...selectedDeps]) + dbCredNote(selectedDbCred) + notesNote([...selectedNotes]);
   const { root, close } = modal(`<div class="tpl-card iss-card">
       <div class="hd"><span class="dot" style="background:var(--accent)"></span><span class="t">${dlgTitle}<small>${esc(t.title)}</small></span></div>
       <div class="bd">
@@ -283,6 +285,7 @@ async function runValidate(t: Task): Promise<void> {
         ${depCandidates.length ? `<label class="iss-lbl">Dependencies <span class="mut">— read-only repos the agent can view under <code>.deps/</code></span></label>
         <div class="iss-deps" id="tkDeps">${depCandidates.map((id) => { const { repo: r } = parseRepoId(id); return `<label class="iss-dep"><input type="checkbox" value="${esc(id)}"${selectedDeps.has(id) ? ' checked' : ''}><b>${esc(r.split('/').pop() || r)}</b><span class="mut">${esc(id)}</span></label>`; }).join('')}</div>` : ''}
         ${dbCredMetas().length ? `<div class="iss-agentrow"><label class="iss-lbl" style="margin:0">Database</label><select class="iss-agentsel" id="tkDb">${dbCredOptions(selectedDbCred)}</select></div>` : ''}
+        ${noteChecks(selectedNotes)}
         <label class="iss-lbl">${briefLabel} <span class="mut">— edit before launch</span></label>
         <textarea class="iss-brief" spellcheck="false" rows="12" id="tkBrief">${esc(seedBrief())}</textarea>
         <div class="iss-wt">${wtNote}</div>
@@ -303,6 +306,11 @@ async function runValidate(t: Task): Promise<void> {
   addSearch(root.querySelector('#tkDeps'), 'Search dependency repos…'); // filter a long dependency-repo list
   const dbSel = root.querySelector('#tkDb') as HTMLSelectElement | null;   // pick a DB credential template → re-seed the DB note (unless edited)
   if (dbSel) dbSel.onchange = () => { selectedDbCred = dbSel.value; if (!briefDirty) ta.value = seedBrief(); };
+  root.querySelector('#bnChecks')?.addEventListener('change', () => {   // toggle a brief note → re-seed (unless the brief was edited)
+    selectedNotes.clear();
+    root.querySelectorAll<HTMLInputElement>('#bnChecks input:checked').forEach((cb) => selectedNotes.add(cb.dataset.note!));
+    if (!briefDirty) ta.value = seedBrief();
+  });
   root.querySelector('[data-x]')?.addEventListener('click', close);
   setTimeout(() => ta.focus(), 30);
   okBtn.addEventListener('click', async () => {

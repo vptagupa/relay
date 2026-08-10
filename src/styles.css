@@ -377,6 +377,16 @@ button{font-family:inherit;color:inherit;cursor:pointer;border:none;background:n
 .rd-del{flex:none;width:20px;height:20px;border:none;background:none;color:var(--muted);border-radius:5px;cursor:pointer;font-size:15px;line-height:1}
 .rd-del:hover{background:var(--border);color:var(--text)}
 .rd-hint{font-size:11px;color:var(--muted);padding:4px 0}
+/* Configurable brief notes (Settings → Agents) + the toggles in Assign/Validate */
+.bn-list{display:flex;flex-direction:column;gap:4px;margin-bottom:8px}
+.bn-row{display:flex;align-items:flex-start;gap:8px;background:var(--surface-2);border:1px solid var(--border);border-radius:7px;padding:7px 10px;font-size:12px}
+.bn-on{flex:none;display:inline-flex;align-items:center;gap:4px;color:var(--muted);font-size:10.5px;white-space:nowrap;cursor:pointer}
+.bn-on input{margin:0}
+.bn-text{flex:1;min-width:0;line-height:1.4;word-break:break-word}
+.bn-input{min-height:44px}
+.bn-checks{display:flex;flex-direction:column;gap:6px;margin:2px 0 4px}
+.bn-check{display:flex;align-items:flex-start;gap:7px;font-size:12px;color:var(--text);cursor:pointer;line-height:1.4}
+.bn-check input{margin:2px 0 0;flex:none}
 .field .set{padding:0 12px;border-radius:8px;background:var(--accent);color:var(--on-accent);font-weight:600;font-size:12.5px}
 .field .state{font-size:11px;margin-top:5px}
 /* theme picker */

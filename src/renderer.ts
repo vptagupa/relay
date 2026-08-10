@@ -27,6 +27,7 @@ import { initNotifications, renderBell } from './notifications';
 import { initDbCreds } from './dbcreds';
 import { initSync, refreshSync } from './sync';
 import { initRepoDeps, refreshRepoDeps } from './repo-deps';
+import { initBriefNotes, refreshBriefNotes } from './brief-notes';
 import type { Settings, SavedSession, AgentEvent, ApprovalRequest, ChatTurn, OpenTab, Workspace, WorkspaceDef, Block, Bookmark, BookmarkGroup } from './shared/types';
 import { EDITORS, DEFAULT_EDITOR } from './shared/editors';
 import { STAGE_KINDS, kindSpec, type StageKind } from './pipelines';
@@ -1338,7 +1339,7 @@ function selectSettingsTab(id: string): void {
   document.querySelectorAll<HTMLElement>('#settings .set-panel').forEach((p) => p.classList.toggle('active', p.dataset.panel === id));
   const body = document.querySelector('#settings .modal-body') as HTMLElement | null; if (body) body.scrollTop = 0;
   if (id === 'sync') refreshSync(); // pull fresh Google/passphrase/backup status when the Sync tab is shown
-  if (id === 'agents') refreshRepoDeps(); // repopulate the repo-deps dropdown from the current tracked repos
+  if (id === 'agents') { refreshRepoDeps(); refreshBriefNotes(); } // repopulate the repo-deps dropdown + brief-notes list
 }
 function openSettings() { reflectSettings(); selectSettingsTab('general'); $('#settings').classList.add('show'); $('#scrim').classList.add('show'); }
 function closeSettings() { $('#settings').classList.remove('show'); if (!$('#palette').classList.contains('show')) $('#scrim').classList.remove('show'); }
@@ -1940,6 +1941,8 @@ new ResizeObserver(() => { clearTimeout(_roT); _roT = setTimeout(() => { fitPane
   initDbCreds();
   // Repository-dependency templates (Settings → Agents) — auto-select deps by main repo in Assign/Validate.
   initRepoDeps();
+  // Configurable brief notes (Settings → Agents) — toggled into the Assign/Validate briefs.
+  initBriefNotes();
   // Cloud Sync (Settings → Sync) — Google Drive, end-to-end encrypted. Destructive restore uses the app confirm;
   // push first flushes the live tab snapshot so the backup isn't a debounce-stale copy.
   initSync({

@@ -15,6 +15,7 @@ import { openPipelineBuilder } from './pipeline-editor';
 import { AGENTS } from './agents-list';
 import { dbCredOptions, dbCredNote, loadDbCreds, dbCredMetas } from './dbcreds';
 import { repoDepsFor } from './repo-deps';
+import { noteChecks, notesNote, defaultNoteIds } from './brief-notes';
 
 const relay = (window as any).relay;
 
@@ -866,7 +867,8 @@ async function openAssign(i: Issue): Promise<void> {
   const initialDeps = savedDeps.length ? savedDeps : repoDepsFor(`${asgProvider}:${asgRepo || ''}`); // no saved deps → default to this repo's dependency template
   const selectedDeps = new Set(initialDeps.filter((id) => depCandidates.includes(id)));
   let selectedDbCred = issueDbCredFor(asgProvider, asgRepo || '', i.number); // DB credential template injected into the run's env
-  const seedBrief = () => stageBriefText(pipeline, 0, i, asgProvider) + depsNote([...selectedDeps]) + dbCredNote(selectedDbCred); // brief + .deps/ note + DB-creds note
+  const selectedNotes = new Set(defaultNoteIds());   // configurable brief notes (Settings) — default-on ones pre-checked
+  const seedBrief = () => stageBriefText(pipeline, 0, i, asgProvider) + depsNote([...selectedDeps]) + dbCredNote(selectedDbCred) + notesNote([...selectedNotes]); // brief + .deps/ + DB-creds + notes
   const { root, close } = modal(`<div class="tpl-card iss-card">
       <div class="hd"><span class="dot" style="background:var(--accent)"></span><span class="t">Assign #${i.number}<small>${esc(i.title)}</small></span></div>
       <div class="bd">
@@ -878,6 +880,7 @@ async function openAssign(i: Issue): Promise<void> {
         ${depCandidates.length ? `<label class="iss-lbl">Dependencies <span class="mut">— read-only repos the agent can view under <code>.deps/</code></span></label>
         <div class="iss-deps" id="issDeps">${depCandidates.map((id) => { const { repo: r } = parseRepoId(id); return `<label class="iss-dep"><input type="checkbox" value="${esc(id)}"${selectedDeps.has(id) ? ' checked' : ''}><b>${esc(r.split('/').pop() || r)}</b><span class="mut">${esc(id)}</span></label>`; }).join('')}</div>` : ''}
         ${dbCredMetas().length ? `<div class="iss-agentrow"><label class="iss-lbl" style="margin:0">Database</label><select class="iss-agentsel" id="issDbSel">${dbCredOptions(selectedDbCred)}</select></div>` : ''}
+        ${noteChecks(selectedNotes)}
         <label class="iss-lbl">Brief · <span id="issBriefStage">${esc(pipeline.stages[0].name)}</span> stage <span class="mut">— edit before launch</span></label>
         <textarea class="iss-brief" spellcheck="false" rows="10">${esc(seedBrief())}</textarea>
         <div class="iss-wt">Creates an isolated worktree on branch <code>issue-${i.number}</code> and runs the pipeline there. Later stages use their built-in briefs.</div>
@@ -909,6 +912,11 @@ async function openAssign(i: Issue): Promise<void> {
   // Pick a DB credential template → persist it for this issue and re-seed the brief's DB note (unless edited).
   const dbSel = root.querySelector('#issDbSel') as HTMLSelectElement | null;
   if (dbSel) dbSel.onchange = () => { selectedDbCred = dbSel.value; void setIssueDbCred(asgProvider, asgRepo || '', i.number, selectedDbCred); if (!briefDirty) ta.value = seedBrief(); };
+  root.querySelector('#bnChecks')?.addEventListener('change', () => {   // toggle a brief note → re-seed (unless the brief was edited)
+    selectedNotes.clear();
+    root.querySelectorAll<HTMLInputElement>('#bnChecks input:checked').forEach((cb) => selectedNotes.add(cb.dataset.note!));
+    if (!briefDirty) ta.value = seedBrief();
+  });
   if (psel) psel.onchange = () => {
     pipelineId = psel.value;
     void setIssuePipeline(asgProvider, asgRepo || '', i.number, pipelineId); // remember THIS issue's pipeline

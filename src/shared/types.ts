@@ -153,6 +153,7 @@ export interface Settings {
   tasksByWs?: Record<string, Task[]>;          // per-workspace Tasks: draft an issue, validate it against the repo, file it only if valid
   pipelines?: PipelineDef[]; // user-authored custom pipelines (built-ins live in code); merged into the registry
   stageBriefs?: Record<string, string>; // per stage-kind (validate/fix/reproduce/test/review/custom) default-brief override; seeds new stages in the builder + task validation
+  briefNotes?: BriefNote[]; // reusable prompt snippets shown as toggles in the Assign/Validate dialogs; checked ones are appended to the agent's brief
   bitbucketWorkspacesByWs?: Record<string, string[]>; // Bitbucket workspace ids to list repos from, per Slayer T workspace id (CHANGE-2770)
   providersScopedMigrated?: boolean; // one-shot flag: the pre-scoping global provider secrets have been moved into a workspace
   notificationsByWs?: Record<string, AppNotification[]>; // per-workspace issue/PR notifications (persisted; survives restart)
@@ -162,6 +163,14 @@ export interface Settings {
   webhookEnabled?: boolean;          // run the local webhook receiver for near-real-time issue/PR notifications
   webhookPort?: number;              // port the webhook receiver listens on (default 47824)
   webhookSecret?: string;            // shared secret verifying incoming webhooks (GitHub HMAC / GitLab token / Bitbucket ?token)
+}
+
+// A reusable "brief note" — an extra prompt snippet the user configures once (Settings) and toggles per run in
+// the Assign / Validate dialogs; checked notes are appended to the agent's brief. `on` = checked by default.
+export interface BriefNote {
+  id: string;
+  text: string;
+  on: boolean;
 }
 
 // Streaming events emitted by the agent loop to the renderer.
