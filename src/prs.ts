@@ -8,6 +8,7 @@
 import { state } from './state';
 import { $, esc } from './dom';
 import { toast } from './ui';
+import { openAuthorFilter } from './author-filter';
 import { initPrReview, openPrAssign, openPrMap, prStatusOf, onPrChip, PR_STATUS_LABEL, type PrRef, type PrCtx } from './pr-review';
 
 const relay = (window as any).relay;
@@ -47,6 +48,29 @@ let loadSeq = 0;                 // supersedes an in-flight load when a newer on
 let prsPage = 1;                 // highest provider page loaded
 let prsHasMore = false;          // the last page came back full → more to load on scroll
 let loadingMore = false;         // a load-more fetch is in flight (guards re-entrancy)
+let members: string[] = [];      // the active repo's collaborators (the author-filter list); [] in All-repos scope
+const activeAuthors = new Set<string>(); // filter the list to these authors (OR); empty = all authors
+
+// The PR rail's OWN active repo pick (independent of Issues), per workspace.
+const prRepoFor = (): string => (state.settings.prRepoByWs || {})[wsKey()] || '';
+async function setPrRepo(id: string): Promise<void> {
+  const ws = wsKey(); const map = { ...(state.settings.prRepoByWs || {}) };
+  if (id) map[ws] = id; else delete map[ws];
+  try { state.settings = await relay.patchSettings({ prRepoByWs: map }); } catch { /* keep the in-memory pick */ }
+}
+// The active repo's members (collaborators) — the author-filter list. Non-blocking; superseded by a newer load.
+async function loadMembers(seq: number, p: ProviderId, r: string): Promise<void> {
+  const res = await relay.providerRepoMembers(wsKey(), p, r).catch(() => ({ ok: false } as { ok: boolean; members?: string[] }));
+  if (seq === loadSeq) members = res.ok && res.members ? res.members : [];
+}
+// The list actually shown = loaded PRs filtered to the selected authors (OR; empty selection = all).
+const visiblePrs = (): PrItem[] => activeAuthors.size ? prs.filter((p) => activeAuthors.has(p.author || '')) : prs;
+// Author options = repo members ∪ the authors already in the loaded PRs (so external / not-yet-member authors show too).
+function authorOptions(): string[] {
+  const set = new Set<string>(members);
+  for (const p of prs) if (p.author) set.add(p.author);
+  return [...set].sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
+}
 
 /* ----------------------------- load ----------------------------- */
 // Load PRs for the current scope: the single shared active repo, or every tracked repo merged.
@@ -54,9 +78,10 @@ export async function loadPrs(): Promise<void> {
   const seq = ++loadSeq;
   const ws = wsKey();
   phase = 'loading'; render();
+  members = [];
   if (prScope === 'all') { await loadAllRepos(seq, ws); return; }
   const dir = state.settings.workspace || '';
-  const pick = (state.settings.issueRepoByWs || {})[ws] || '';
+  const pick = prRepoFor();   // the PR rail's OWN pick — no longer tied to the Issues rail
   if (pick) { const p = parseRepoId(pick); provider = p.provider; repo = p.repo; }
   else {
     const inf = dir ? await relay.providerRepoFromRemote(dir).catch(() => null) : null; if (seq !== loadSeq) return;
@@ -66,6 +91,7 @@ export async function loadPrs(): Promise<void> {
   if (!auth.connected) { phase = 'noauth'; render(); return; }
   if (!repo) { phase = 'norepo'; render(); return; }
   prsPage = 1; prsHasMore = false; loadingMore = false;
+  void loadMembers(seq, provider, repo);   // author-filter list (non-blocking; unioned with loaded authors)
   const r = await relay.providerPrs(ws, provider, repo, prState, 1); if (seq !== loadSeq) return;
   if (!r.ok) { phase = 'error'; errMsg = r.error || `Could not list ${PR_WORD[provider]}s`; render(); return; }
   prs = r.prs || []; prsHasMore = !!r.hasMore; phase = 'ready'; render();
@@ -221,6 +247,38 @@ const prRepo = (p: PrItem): string => p.repo || repo || '';
 const prRefOf = (p: PrItem): PrRef => ({ number: p.number, title: p.title, branch: p.branch, url: p.url, provider: prProvider(p), repo: prRepo(p) });
 const prCtxOf = (p: PrItem): PrCtx => ({ provider: prProvider(p), repo: prRepo(p), dir: state.settings.workspace || '' });
 
+/* ----------------------------- repo + author pickers ----------------------------- */
+// The PR rail's OWN repo picker (mirrors the Issues rail menu) — picks from the tracked repos, sets prRepoByWs.
+function closePrRepoMenu(): void { document.getElementById('prRepoMenu')?.remove(); }
+function openPrRepoMenu(): void {
+  const btn = $('#prSideRepo'); if (!btn) return;
+  if (document.getElementById('prRepoMenu')) { closePrRepoMenu(); return; }
+  const active = prRepoFor();
+  const tracked = (state.settings.issueReposByWs || {})[wsKey()] || [];
+  const folderRow = `<button class="iss-mi ${!active ? 'on' : ''}" data-repo=""><span class="d">⌂</span> This folder’s repo</button>`;
+  const repoRows = tracked.map((id) => { const { provider: p, repo: r } = parseRepoId(id); return `<button class="iss-mi ${active === id ? 'on' : ''}" data-repo="${esc(id)}"><span class="d src-dot ${PROV_DOT[p]}"></span> ${esc(r)}</button>`; }).join('');
+  const menu = document.createElement('div'); menu.className = 'iss-menu'; menu.id = 'prRepoMenu';
+  menu.innerHTML = folderRow + (repoRows ? `<div class="iss-menu-list">${repoRows}</div>` : '') + '<div class="iss-msep"></div><button class="iss-mi" data-sources="1"><span class="d">⚙</span> Manage repos in Sources…</button>';
+  document.body.appendChild(menu);
+  const r = btn.getBoundingClientRect(); menu.style.left = Math.round(r.left) + 'px'; menu.style.top = Math.round(r.bottom + 4) + 'px';
+  menu.querySelectorAll<HTMLElement>('.iss-mi').forEach((mi) => {
+    mi.onclick = async (e) => {
+      e.stopPropagation();
+      if (mi.dataset.sources) { closePrRepoMenu(); deps.focusIssues(); return; } // Sources (connect/track) lives in the Issues rail
+      closePrRepoMenu();
+      activeAuthors.clear();                    // a different repo has different authors → clear the filter
+      await setPrRepo(mi.dataset.repo || '');   // persist FIRST so loadPrs reads the new pick
+      void loadPrs();
+    };
+  });
+  setTimeout(() => document.addEventListener('click', closePrRepoMenu, { once: true }), 0);
+}
+// The author filter — a multi-select checklist of repo members ∪ loaded PR authors; toggling re-renders the list.
+function openPrAuthorMenu(): void {
+  const btn = $('#prAuthor'); if (!btn) return;
+  openAuthorFilter(btn as HTMLElement, authorOptions(), activeAuthors, () => render(), 'prAuthorMenu');
+}
+
 /* ----------------------------- render ----------------------------- */
 function render(): void {
   hidePrHover();  // a re-render recreates the rows, so drop any stale hover card
@@ -236,6 +294,13 @@ function render(): void {
     (stateEl as HTMLElement).style.display = ((allMode || repo) && phase !== 'noauth' && phase !== 'norepo') ? '' : 'none';
     stateEl.querySelectorAll<HTMLElement>('.iss-seg').forEach((b) => b.classList.toggle('on', b.dataset.st === prState));
   }
+  const authorEl = $('#prAuthor'); // the author-filter icon — shown once there are PRs to filter; badge = # selected
+  if (authorEl) {
+    (authorEl as HTMLElement).style.display = (phase === 'ready' && prs.length > 0) ? '' : 'none';
+    authorEl.classList.toggle('on', activeAuthors.size > 0);
+    authorEl.setAttribute('data-n', activeAuthors.size ? String(activeAuthors.size) : '');
+    authorEl.setAttribute('title', activeAuthors.size ? `Filtering by ${activeAuthors.size} author${activeAuthors.size > 1 ? 's' : ''}` : 'Filter by author');
+  }
   const el = $('#prList'); if (!el) return;
   const hint = (icon: string, msg: string, sub = '') =>
     `<div class="isr-empty"><div class="isr-ei">${icon}</div><div>${msg}</div>${sub ? `<div class="isr-es">${sub}</div>` : ''}</div>`;
@@ -246,8 +311,10 @@ function render(): void {
   if (phase === 'norepo')  { el.innerHTML = hint('🗂️', allMode ? 'No tracked repos' : 'No repo selected', esc(errMsg) || 'Pick a repo in the Issues rail (its repo is shared here).'); return; }
   if (phase === 'error')   { el.innerHTML = hint('⚠️', `Couldn’t list ${word}s`, esc(errMsg)); return; }
   if (!prs.length)         { el.innerHTML = hint('✓', `No ${prState} ${word}s`, allMode ? 'across your tracked repos' : (repo ? esc(repo) : '')); return; }
+  const shown = visiblePrs();
+  if (!shown.length)       { el.innerHTML = hint('✍', `No ${prState} ${word}s by the selected author${activeAuthors.size > 1 ? 's' : ''}`, 'Clear the author filter to see all.'); return; }
 
-  el.innerHTML = prs.map((p) => {
+  el.innerHTML = shown.map((p) => {
     const pp = p.provider || provider;
     const st = (p.state || prState).toLowerCase();
     const runSt = prStatusOf(pp, p.repo || repo || '', p.number);   // review-pipeline status for this PR
@@ -271,7 +338,7 @@ function render(): void {
       : allMode ? `<div class="isr-more">recent ${word}s per repo</div>` : '');
 
   el.querySelectorAll<HTMLElement>('.pr-row').forEach((row, i) => {
-    const p = prs[i];                                              // querySelectorAll order matches the prs map order
+    const p = shown[i];                                           // querySelectorAll order matches the shown map order
     row.onclick = () => { const u = row.dataset.url; if (u) relay.openExternal(u); };
     row.onmouseenter = () => { if (p) showPrHover(p, row); };
     row.onmouseleave = scheduleHidePrHover;   // delayed so moving into the (scrollable) card keeps it open
@@ -287,14 +354,15 @@ function render(): void {
 export function initPrs(d: PrsDeps): void {
   deps = d;
   initPrReview({ activeWsId: d.activeWsId, openAgentTab: d.openAgentTab, refresh: () => render() });
-  const rsel = $('#prSideRepo'); if (rsel) rsel.onclick = (e) => { e.stopPropagation(); deps.focusIssues(); }; // repo is picked in the Issues rail
+  const rsel = $('#prSideRepo'); if (rsel) rsel.onclick = (e) => { e.stopPropagation(); openPrRepoMenu(); }; // the PR rail's OWN repo picker (no longer jumps to Issues)
+  const asel = $('#prAuthor'); if (asel) asel.onclick = (e) => { e.stopPropagation(); openPrAuthorMenu(); };
   const pull = $('#prPull'); if (pull) pull.onclick = () => void loadPrs();
   const map = $('#prMap'); if (map) map.onclick = () => {
     if (phase !== 'ready' || !prs.length) { toast('Pull some pull requests first'); return; }
     void openPrMap(prs.map(prRefOf), { provider, repo: repo || '', dir: state.settings.workspace || '' });
   };
   $('#prScope')?.querySelectorAll<HTMLElement>('.iss-seg').forEach((b) => {
-    b.onclick = () => { const s = b.dataset.sc === 'all' ? 'all' : 'repo'; if (s === prScope) return; prScope = s; void loadPrs(); };
+    b.onclick = () => { const s = b.dataset.sc === 'all' ? 'all' : 'repo'; if (s === prScope) return; prScope = s; activeAuthors.clear(); void loadPrs(); };
   });
   $('#prState')?.querySelectorAll<HTMLElement>('.iss-seg').forEach((b) => {
     b.onclick = () => { const s = b.dataset.st === 'closed' ? 'closed' : 'open'; if (s === prState) return; prState = s; void loadPrs(); };

@@ -497,6 +497,12 @@ ipcMain.handle('provider:pr-detail', async (_e, p: { provider: ProviderId; ws: s
   if (!validRepo(p?.repo) || !Number.isInteger(p?.number) || p.number <= 0) return { ok: false, error: 'Invalid request' };
   return a.prDetail(p?.ws, p.repo, p.number);
 });
+// Repo members (collaborators) — the PR author-filter list.
+ipcMain.handle('provider:repo-members', async (_e, p: { provider: ProviderId; ws: string; repo: string }) => {
+  const a = providerOf(p?.provider); if (!a) return badProvider;
+  if (!validRepo(p?.repo)) return { ok: false, error: 'Invalid repository' };
+  return a.repoMembers(p?.ws, p.repo);
+});
 // Create an issue on the provider (Tasks: file a validated task as a real issue).
 ipcMain.handle('provider:create-issue', async (_e, p: { provider: ProviderId; ws: string; repo: string; title: string; body: string }) => {
   const a = providerOf(p?.provider); if (!a) return badProvider;

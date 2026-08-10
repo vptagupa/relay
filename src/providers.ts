@@ -136,6 +136,13 @@ const github = {
     const prs = raw.map((p) => ({ number: Number(p.number) || 0, branch: str(asObj(p.head).ref), url: str(p.html_url), draft: !!p.draft, title: str(p.title), author: str(asObj(p.user).login) || undefined, state: p.merged_at ? 'merged' : (str(p.state) || undefined), updatedAt: Date.parse(str(p.updated_at)) || 0 })).filter((p) => p.branch);
     return { ok: true, prs, hasMore: raw.length === 100 };
   },
+  // Repo collaborators (for the PR author filter). Needs push access; a read-only token 403s, and the caller
+  // then falls back to the authors already in the loaded PRs. `login` matches the PR author's login.
+  async repoMembers(ws: string, repo: string): Promise<{ ok: boolean; members?: string[]; error?: string }> {
+    const r = await ghApi(ws, `/repos/${repo}/collaborators?per_page=100`);
+    if (!r.ok || !Array.isArray(r.json)) return { ok: false, error: r.status === 401 ? 'Not connected to GitHub' : `Could not list members (HTTP ${r.status})` };
+    return { ok: true, members: asArr(r.json).map((u) => str(u.login)).filter(Boolean) };
+  },
   // Full PR (with body) fetched on demand for the details hover.
   async prDetail(ws: string, repo: string, number: number): Promise<{ ok: boolean; detail?: PrDetail; error?: string }> {
     const r = await ghApi(ws, `/repos/${repo}/pulls/${number}`);
@@ -233,6 +240,12 @@ const gitlab = {
     const prs = raw.filter((m) => state === 'closed' ? str(m.state) !== 'opened' : true)
       .map((m) => ({ number: Number(m.iid) || 0, branch: str(m.source_branch), url: str(m.web_url), draft: !!m.draft || !!m.work_in_progress, title: str(m.title), author: str(asObj(m.author).username) || undefined, state: str(m.state) || undefined, updatedAt: Date.parse(str(m.updated_at)) || 0 })).filter((p) => p.branch);
     return { ok: true, prs, hasMore: raw.length === 100 };
+  },
+  // Project members (for the PR author filter) — `username` matches the MR author's username.
+  async repoMembers(ws: string, repo: string): Promise<{ ok: boolean; members?: string[]; error?: string }> {
+    const r = await glApi(ws, `/projects/${enc(repo)}/members/all?per_page=100`);
+    if (!r.ok || !Array.isArray(r.json)) return { ok: false, error: r.status === 401 ? 'Not connected to GitLab' : `Could not list members (HTTP ${r.status})` };
+    return { ok: true, members: asArr(r.json).map((u) => str(u.username)).filter(Boolean) };
   },
   async prDetail(ws: string, repo: string, number: number): Promise<{ ok: boolean; detail?: PrDetail; error?: string }> {
     const r = await glApi(ws, `/projects/${enc(repo)}/merge_requests/${number}`);
@@ -449,6 +462,14 @@ const bitbucket = {
     }).filter((p) => p.branch);
     return { ok: true, prs, hasMore: !!asObj(r.json).next };
   },
+  // Workspace members (Bitbucket has no repo-level member list; the workspace owns access). `nickname ||
+  // display_name` matches the PR author format above.
+  async repoMembers(ws: string, repo: string): Promise<{ ok: boolean; members?: string[]; error?: string }> {
+    const workspace = repo.split('/')[0];
+    const r = await bbApi(ws, `/2.0/workspaces/${encodeURIComponent(workspace)}/members?pagelen=100`);
+    if (r.status === 401 || r.status === 403 || !Array.isArray(asObj(r.json).values)) return { ok: false, error: `Could not list members (HTTP ${r.status})` };
+    return { ok: true, members: asArr(asObj(r.json).values).map((m) => { const u = asObj(m.user); return str(u.nickname || u.display_name); }).filter(Boolean) };
+  },
   async prDetail(ws: string, repo: string, number: number): Promise<{ ok: boolean; detail?: PrDetail; error?: string }> {
     const r = await bbApi(ws, `/2.0/repositories/${repo}/pullrequests/${number}`);
     if (!r.ok || !r.json || typeof r.json !== 'object') return { ok: false, error: `Could not load PR (HTTP ${r.status})` };
@@ -488,6 +509,7 @@ export interface Adapter {
   issues(ws: string, repo: string, state?: IssueState, page?: number): Promise<{ ok: boolean; issues?: Issue[]; hasMore?: boolean; error?: string }>;
   repos(ws: string, opts?: RepoListOpts): Promise<{ ok: boolean; repos?: RepoRow[]; error?: string }>;
   prs(ws: string, repo: string, state?: IssueState, page?: number): Promise<{ ok: boolean; prs?: PrRow[]; hasMore?: boolean; error?: string }>;
+  repoMembers(ws: string, repo: string): Promise<{ ok: boolean; members?: string[]; error?: string }>;
   prDetail(ws: string, repo: string, number: number): Promise<{ ok: boolean; detail?: PrDetail; error?: string }>;
   createIssue(ws: string, repo: string, title: string, body: string): Promise<{ ok: boolean; number?: number; url?: string; error?: string }>;
   issueState(ws: string, repo: string, number: number): Promise<{ ok: boolean; state?: 'open' | 'closed'; error?: string }>;

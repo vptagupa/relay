@@ -1052,6 +1052,16 @@ body.tabdrag .dz{display:block;pointer-events:auto}
 /* repo selector + its dropdown menu */
 .iss-repo-sel{max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;background:transparent;border:none;color:var(--muted);font:10.5px/1.4 var(--mono);cursor:pointer;padding:2px 5px;border-radius:6px;margin-left:6px;flex:1;text-align:left}
 .iss-repo-sel:hover{background:var(--surface-2);color:var(--text-dim)}
+/* Author-filter icon (Issues + PR rails): a count badge (data-n) rides the corner; the icon goes accent when a filter is active. */
+.authf{position:relative}
+.authf.on{color:var(--accent)}
+.authf[data-n]:not([data-n=""])::after{content:attr(data-n);position:absolute;top:-1px;right:-1px;min-width:13px;height:13px;padding:0 3px;box-sizing:border-box;border-radius:99px;background:var(--accent);color:var(--on-accent);font:700 8.5px/13px var(--mono);text-align:center;pointer-events:none}
+/* The multi-select author checklist popup (rides on .iss-menu). */
+.author-menu .authchk{display:flex;align-items:center;gap:8px;width:100%;padding:6px 9px;border-radius:7px;color:var(--text-dim);font:11.5px/1.3 var(--sans);cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.author-menu .authchk:hover{background:var(--surface-2)}
+.author-menu .authchk input{accent-color:var(--accent);flex:none;margin:0;cursor:pointer}
+.author-menu .authchk span{overflow:hidden;text-overflow:ellipsis}
+.auth-empty{padding:8px 10px;color:var(--muted);font:11px/1.4 var(--sans)}
 .iss-menu{position:fixed;z-index:90;background:var(--surface);border:1px solid var(--border-strong);border-radius:10px;box-shadow:var(--shadow);padding:5px;min-width:210px;max-width:290px}
 .iss-mi{display:flex;align-items:center;gap:8px;width:100%;text-align:left;background:transparent;border:none;color:var(--text-dim);font:11.5px/1.3 var(--sans);padding:7px 9px;border-radius:7px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .iss-mi:hover{background:var(--surface-2);color:var(--text)}

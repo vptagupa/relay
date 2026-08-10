@@ -123,6 +123,8 @@ const api = {
   providerPrs: (ws: string, provider: ProviderId, repo: string, state: 'open' | 'closed' = 'open', page = 1): Promise<{ ok: boolean; prs?: { number: number; branch: string; url: string; draft: boolean; title?: string; author?: string; state?: string; updatedAt?: number }[]; hasMore?: boolean; error?: string }> => ipcRenderer.invoke('provider:prs', { ws, provider, repo, state, page }),
   // Full PR/MR (with body/labels/reviewers/base branch) — fetched on demand for the details hover.
   providerPrDetail: (ws: string, provider: ProviderId, repo: string, number: number): Promise<{ ok: boolean; detail?: { number: number; title: string; body: string; state: string; draft: boolean; url: string; author?: string; sourceBranch: string; baseBranch: string; labels: string[]; reviewers: string[]; createdAt?: number; updatedAt?: number }; error?: string }> => ipcRenderer.invoke('provider:pr-detail', { ws, provider, repo, number }),
+  // Repo members/collaborators — the PR rail's author-filter list.
+  providerRepoMembers: (ws: string, provider: ProviderId, repo: string): Promise<{ ok: boolean; members?: string[]; error?: string }> => ipcRenderer.invoke('provider:repo-members', { ws, provider, repo }),
   // Real-time notifications via a local webhook receiver: start/stop it, and subscribe to parsed issue/PR events.
   webhookControl: (enabled: boolean, port: number, secret: string): Promise<{ ok: boolean; running: boolean; error?: string }> => ipcRenderer.invoke('webhook:control', { enabled, port, secret }),
   webhookStatus: (): Promise<{ running: boolean }> => ipcRenderer.invoke('webhook:status'),

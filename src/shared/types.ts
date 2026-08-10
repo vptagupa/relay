@@ -142,6 +142,7 @@ export interface Settings {
   issueRepo?: string;    // LEGACY (pre per-workspace): global active repo — migrated into issueRepoByWs
   issueReposByWs?: Record<string, string[]>; // tracked repos per workspace id (Issues are per-workspace)
   issueRepoByWs?: Record<string, string>;    // active repo per workspace id; empty → infer from the folder's remote
+  prRepoByWs?: Record<string, string>;       // the PR rail's OWN active repo per workspace (independent of Issues); empty → infer from the folder
   issueAgent?: string;   // preferred coding agent id for Assign (claude/gemini/codex/aider/antigravity)
   issueConcurrency?: number; // max agents the assign queue runs at once (per repo); default 2
   issuePipelineByKey?: Record<string, string>; // per-issue pipeline id, keyed "provider:repo#number"; unset → default validate-fix
