@@ -35,14 +35,23 @@ async function saveTemplates(map: Record<string, string[]>): Promise<void> {
   renderList();
 }
 
-// The dependency checklist for the currently-picked main repo (its saved deps pre-checked).
+// The dependency checklist for the currently-picked main repo (its saved deps pre-checked). A persistent
+// #rdSearch input (wired once in initRepoDeps) filters this list; shown only when the list is long.
 function renderDepsChecklist(): void {
   const box = $('#rdDeps'); if (!box) return;
-  if (!selectedMain) { box.innerHTML = '<div class="rd-hint">Pick a main repository to choose its dependencies.</div>'; return; }
+  const search = $('#rdSearch') as HTMLInputElement | null;
+  const hideSearch = () => { if (search) { search.style.display = 'none'; search.value = ''; } };
+  if (!selectedMain) { box.innerHTML = '<div class="rd-hint">Pick a main repository to choose its dependencies.</div>'; hideSearch(); return; }
   const candidates = allRepos().filter((id) => id !== selectedMain);
-  if (!candidates.length) { box.innerHTML = '<div class="rd-hint">No other tracked repos to depend on — track more in the Issues rail → Sources.</div>'; return; }
+  if (!candidates.length) { box.innerHTML = '<div class="rd-hint">No other tracked repos to depend on — track more in the Issues rail → Sources.</div>'; hideSearch(); return; }
   const current = new Set(repoDepsFor(selectedMain));
   box.innerHTML = candidates.map((id) => `<label class="iss-dep"><input type="checkbox" value="${esc(id)}"${current.has(id) ? ' checked' : ''}><b>${esc(shortName(id))}</b><span class="mut">${esc(id)}</span></label>`).join('');
+  if (search) { search.value = ''; search.style.display = candidates.length > 6 ? '' : 'none'; } // reset the filter for the new repo's list
+}
+// Filter the dependency checklist by the search box (reads its live children each time).
+function filterDeps(q: string): void {
+  const query = q.trim().toLowerCase();
+  document.querySelectorAll<HTMLElement>('#rdDeps .iss-dep').forEach((it) => { it.style.display = !query || (it.textContent || '').toLowerCase().includes(query) ? '' : 'none'; });
 }
 
 // The saved templates, most useful for a quick "main → deps" overview + delete.
@@ -70,6 +79,8 @@ export function refreshRepoDeps(): void {
 export function initRepoDeps(): void {
   const mainSel = $('#rdMain') as HTMLSelectElement | null;
   if (mainSel) mainSel.onchange = () => { selectedMain = mainSel.value; renderDepsChecklist(); };
+  const search = $('#rdSearch') as HTMLInputElement | null;
+  if (search) search.oninput = () => filterDeps(search.value);
   const save = $('#rdSave'); if (save) save.onclick = async () => {
     if (!selectedMain) { toast('Pick a main repository first'); return; }
     const deps = Array.from(document.querySelectorAll<HTMLInputElement>('#rdDeps input:checked')).map((cb) => cb.value);
