@@ -36,6 +36,14 @@ const PUSH_CAP = 5;             // max individual native notifications per poll 
 
 const KIND_ICON: Record<AppNotification['kind'], string> = { 'new-issue': '＋', 'closed-issue': '✕', 'new-pr': '⇄', 'closed-pr': '✓' };
 const KIND_LABEL: Record<AppNotification['kind'], string> = { 'new-issue': 'New issue', 'closed-issue': 'Issue closed', 'new-pr': 'New PR', 'closed-pr': 'PR closed' };
+// The bell menu filters notifications by tab: General (all), Issues (issue events), PR (pull-request events).
+type NotifTab = 'general' | 'issues' | 'pr';
+let notifTab: NotifTab = 'general';
+const isIssueKind = (k: AppNotification['kind']): boolean => k === 'new-issue' || k === 'closed-issue';
+const isPrKind = (k: AppNotification['kind']): boolean => k === 'new-pr' || k === 'closed-pr';
+// Does a notification belong to the ACTIVE tab? (General matches everything.) Drives the list, the counts, and
+// the tab-scoped Mark-all-read / Clear actions.
+const inTab = (n: AppNotification): boolean => notifTab === 'issues' ? isIssueKind(n.kind) : notifTab === 'pr' ? isPrKind(n.kind) : true;
 const PROV_DOT: Record<ProviderId, string> = { github: 'gh', gitlab: 'gl', bitbucket: 'bb' };
 const PROV_NAME: Record<ProviderId, string> = { github: 'GitHub', gitlab: 'GitLab', bitbucket: 'Bitbucket' };
 
@@ -188,12 +196,20 @@ export function renderBell(): void {
 }
 function renderMenu(): void {
   const menu = $('#notifMenu'); if (!menu) return;
-  const list = listFor(wsKey());
-  const rows = list.length ? list.map((it) => `<button class="nt-item${it.read ? '' : ' unread'}" data-url="${esc(it.url)}" data-id="${esc(it.id)}">
+  const all = listFor(wsKey());
+  const shown = all.filter(inTab);                       // the active tab's notifications
+  const unread = (pred: (n: AppNotification) => boolean): number => all.filter((n) => !n.read && pred(n)).length;
+  const tab = (id: NotifTab, label: string, pred: (n: AppNotification) => boolean): string => {
+    const c = unread(pred);
+    return `<button class="nt-tab${notifTab === id ? ' active' : ''}" data-tab="${id}">${label}${c ? `<span class="nt-tc">${c > 99 ? '99+' : c}</span>` : ''}</button>`;
+  };
+  const tabs = `<div class="nt-tabs">${tab('general', 'General', () => true)}${tab('issues', 'Issues', (n) => isIssueKind(n.kind))}${tab('pr', 'PR', (n) => isPrKind(n.kind))}</div>`;
+  const rows = shown.length ? shown.map((it) => `<button class="nt-item${it.read ? '' : ' unread'}" data-url="${esc(it.url)}" data-id="${esc(it.id)}">
       <span class="nt-ic">${KIND_ICON[it.kind]}</span>
       <span class="nt-b"><span class="nt-t">${esc(KIND_LABEL[it.kind])} #${it.number}</span><span class="nt-s">${esc(it.title || it.repo)}</span><span class="nt-m">${it.actor ? `<span class="nt-who">${esc(it.actor)}</span> · ` : ''}${esc(it.repo)} · ${esc(relTime(it.ts))}</span></span>
-    </button>`).join('') : '<div class="nt-empty">No notifications yet.</div>';
-  menu.innerHTML = `<div class="nt-head"><span>Notifications</span><span class="nt-acts">${list.length ? '<button class="nt-a" data-act="read">Mark all read</button><button class="nt-a" data-act="clear">Clear</button>' : ''}<button class="nt-a" data-act="settings" title="Notification settings">⚙</button></span></div><div class="nt-list">${rows}</div>`;
+    </button>`).join('') : `<div class="nt-empty">No ${notifTab === 'general' ? '' : notifTab === 'pr' ? 'PR ' : 'issue '}notifications${notifTab === 'general' ? ' yet' : ' in this tab'}.</div>`;
+  menu.innerHTML = `<div class="nt-head"><span>Notifications</span><span class="nt-acts">${shown.length ? '<button class="nt-a" data-act="read">Mark all read</button><button class="nt-a" data-act="clear">Clear</button>' : ''}<button class="nt-a" data-act="settings" title="Notification settings">⚙</button></span></div>${tabs}<div class="nt-list">${rows}</div>`;
+  menu.querySelectorAll<HTMLElement>('.nt-tab').forEach((t) => { t.onclick = (e) => { e.stopPropagation(); notifTab = t.dataset.tab as NotifTab; renderMenu(); }; });
   menu.querySelectorAll<HTMLElement>('.nt-item').forEach((b) => { b.onclick = (e) => { e.stopPropagation(); markRead(b.dataset.id!); const u = b.dataset.url; if (u) relay.openExternal(u); toggleMenu(false); }; });
   menu.querySelector<HTMLElement>('[data-act="read"]')?.addEventListener('click', (e) => { e.stopPropagation(); markAllRead(); });
   menu.querySelector<HTMLElement>('[data-act="clear"]')?.addEventListener('click', (e) => { e.stopPropagation(); clearAll(); });
@@ -203,13 +219,14 @@ function markRead(id: string): void {
   const ws = wsKey(); const byWs = { ...(state.settings.notificationsByWs || {}) };
   byWs[ws] = (byWs[ws] || []).map((n) => (n.id === id ? { ...n, read: true } : n)); void persist(byWs); renderBell();
 }
-function markAllRead(): void {
+function markAllRead(): void {   // marks read only the ACTIVE tab (General = all)
   const ws = wsKey(); const byWs = { ...(state.settings.notificationsByWs || {}) };
-  byWs[ws] = (byWs[ws] || []).map((n) => ({ ...n, read: true })); void persist(byWs); renderBell();
+  byWs[ws] = (byWs[ws] || []).map((n) => (inTab(n) ? { ...n, read: true } : n)); void persist(byWs); renderBell();
 }
-function clearAll(): void {
+function clearAll(): void {       // clears only the ACTIVE tab's notifications (General = all)
   const ws = wsKey(); const byWs = { ...(state.settings.notificationsByWs || {}) };
-  byWs[ws] = []; void persist(byWs); renderBell(); toggleMenu(false);
+  byWs[ws] = (byWs[ws] || []).filter((n) => !inTab(n)); void persist(byWs); renderBell();
+  if (!(byWs[ws] || []).length) toggleMenu(false); // close only when nothing is left at all
 }
 function toggleMenu(open?: boolean): void {
   const menu = $('#notifMenu'); const bell = $('#notifBell'); if (!menu || !bell) return;

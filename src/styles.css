@@ -166,6 +166,11 @@ button{font-family:inherit;color:inherit;cursor:pointer;border:none;background:n
 .nt-acts{display:flex;gap:6px}
 .nt-a{border:none;background:transparent;color:var(--accent-2);font:10.5px var(--mono);cursor:pointer;padding:2px 4px;border-radius:5px}
 .nt-a:hover{background:var(--surface-2)}
+.nt-tabs{flex-shrink:0;display:flex;gap:2px;padding:0 8px;border-bottom:1px solid var(--border)}
+.nt-tab{flex:1;display:inline-flex;align-items:center;justify-content:center;gap:5px;padding:8px 6px;margin-bottom:-1px;background:none;border:none;border-bottom:2px solid transparent;color:var(--muted);font:600 11.5px var(--sans);cursor:pointer;transition:color .12s,border-color .12s}
+.nt-tab:hover{color:var(--text-dim)}
+.nt-tab.active{color:var(--text);border-bottom-color:var(--accent)}
+.nt-tc{background:var(--accent);color:var(--on-accent);border-radius:99px;font:600 9px/1.4 var(--mono);padding:1px 5px;min-width:14px;text-align:center}
 .nt-list{overflow-y:auto;min-height:0;padding:4px}
 .nt-empty{padding:24px 12px;text-align:center;color:var(--muted);font:11.5px var(--sans)}
 .nt-item{display:flex;gap:10px;width:100%;text-align:left;background:transparent;border:none;padding:13px 14px;cursor:pointer}
