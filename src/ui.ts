@@ -14,8 +14,9 @@ export function toast(msg: string, ok = false): void {
   toastT = setTimeout(() => { w.innerHTML = ''; toastT = null; }, 2600);
 }
 
-/** Turn `el` into an inline editor: select its text, commit on Enter/blur, cancel (restore) on Escape.
- *  `onDone` always runs afterward (commit OR cancel). A draggable ancestor is un-draggabled while editing. */
+/** Turn `el` into an inline editor: select its text, commit on Enter/blur, insert a newline on Shift+Enter,
+ *  cancel (restore) on Escape. `onDone` always runs afterward (commit OR cancel). A draggable ancestor is
+ *  un-draggabled while editing. (Multiline shows for fields whose CSS is white-space:pre-wrap, e.g. bookmarks.) */
 export function makeEditable(el: HTMLElement, commit: (v: string) => void, onDone?: () => void): void {
   const dragAnc = el.closest('[draggable="true"]') as HTMLElement | null; // don't drag while renaming
   if (dragAnc) dragAnc.draggable = false;
@@ -35,8 +36,11 @@ export function makeEditable(el: HTMLElement, commit: (v: string) => void, onDon
     onDone?.(); // always runs, on commit OR cancel
   };
   el.onkeydown = (e) => {
-    if (e.key === 'Enter') { e.preventDefault(); done(true); }
-    else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); done(false); } // don't let Escape also close the panel
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      if (e.shiftKey) document.execCommand('insertText', false, '\n'); // Shift+Enter → a literal newline (multiline bookmarks); pre-wrap renders it, textContent keeps it
+      else done(true);                                                  // plain Enter commits
+    } else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); done(false); } // don't let Escape also close the panel
   };
   el.onblur = () => done(true);
 }
