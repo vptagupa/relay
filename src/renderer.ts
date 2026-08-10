@@ -1342,8 +1342,27 @@ function openSettings() { reflectSettings(); selectSettingsTab('general'); $('#s
 function closeSettings() { $('#settings').classList.remove('show'); if (!$('#palette').classList.contains('show')) $('#scrim').classList.remove('show'); }
 
 /* ----------------------------- rename ----------------------------- */
-function renameTab(id: string, v: string) { const t = state.tabs.find((x) => x.id === id); if (t && v) { t.name = v; renderTabs(); persistWorkspace(); } else renderTabs(); }
-async function renameLib(id: string, v: string) { const s = state.library.find((x) => x.id === id); if (s && v) { s.name = v; state.library = await relay.upsertSession(s); } renderLibrary(); }
+function renameTab(id: string, v: string) {
+  const t = state.tabs.find((x) => x.id === id);
+  if (!t || !v) { renderTabs(); return; }
+  t.name = v; renderTabs(); persistWorkspace();
+  // If this terminal is saved in the Library, rename its entry too — otherwise the stale Library name is
+  // written back over the tab on the next close-flush (flushTabToLibrary) or boot reconcile, reverting it.
+  const libId = t.libId || state.library.find((s) => s.termId === t.id)?.id;
+  const s = libId ? state.library.find((x) => x.id === libId) : undefined;
+  if (s && s.name !== v) { s.name = v; void relay.upsertSession(s).then((lib: SavedSession[]) => { state.library = lib; renderLibrary(); }).catch(() => {}); }
+}
+async function renameLib(id: string, v: string) {
+  const s = state.library.find((x) => x.id === id);
+  if (s && v) {
+    s.name = v; state.library = await relay.upsertSession(s);
+    // Keep any OPEN tab for this session in sync so a workspace autosave / close-flush can't revert the name.
+    let hit = false;
+    for (const t of state.tabs) if ((t.libId && t.libId === id) || (!!s.termId && t.id === s.termId)) { t.name = v; hit = true; }
+    if (hit) { renderTabs(); persistWorkspace(); }
+  }
+  renderLibrary();
+}
 
 /* ----------------------------- agent open/close ----------------------------- */
 function openAgent() { closeHistory(); closeBookmarks(); $('#agentPanel').classList.add('show'); renderChat(); ($('#agentInput') as HTMLElement).focus(); }
