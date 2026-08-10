@@ -113,7 +113,7 @@ async function deleteBlueprint(id: string): Promise<void> {
   toast(`Deleted “${bp.name}”`);
 }
 
-// A self-contained modal overlay (own scrim; Escape or scrim-click closes). Themed via the app's CSS vars.
+// A self-contained modal overlay (own scrim; closes via its button or Escape — NOT a backdrop click). Themed via the app's CSS vars.
 function modal(html: string): { root: HTMLElement; close: () => void } {
   const root = document.createElement('div'); root.className = 'tpl-modal';
   root.innerHTML = `<div class="tpl-sc"></div>${html}`;
@@ -121,7 +121,7 @@ function modal(html: string): { root: HTMLElement; close: () => void } {
   const close = () => { root.remove(); document.removeEventListener('keydown', onKey); };
   document.body.appendChild(root);
   document.addEventListener('keydown', onKey);
-  root.querySelector('.tpl-sc')?.addEventListener('click', close);
+  // Overlay/scrim click does NOT close the dialog — close via its own button or Escape (the scrim is a static backdrop).
   return { root, close };
 }
 // Screen 1 — edit a template's name + per-terminal startup commands; live-collect its [params].

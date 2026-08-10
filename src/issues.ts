@@ -706,15 +706,15 @@ function overrideInvalid(key: string): void {
 }
 
 /* ----------------------------- assign → agent ----------------------------- */
-// A self-contained modal (own scrim; Escape or scrim-click closes), reusing the app's dialog styles.
+// A self-contained modal (own scrim; closes via its button or Escape — NOT a backdrop click), reusing the app's dialog styles.
 function modal(html: string, onClose?: () => void): { root: HTMLElement; close: () => void } {
   const root = document.createElement('div'); root.className = 'tpl-modal';
   root.innerHTML = `<div class="tpl-sc"></div>${html}`;
   const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') { e.preventDefault(); close(); } };
-  const close = () => { root.remove(); document.removeEventListener('keydown', onKey); onClose?.(); }; // onClose fires on ANY close (Escape/scrim/button)
+  const close = () => { root.remove(); document.removeEventListener('keydown', onKey); onClose?.(); }; // onClose fires on ANY close (Escape or the button)
   document.body.appendChild(root);
   document.addEventListener('keydown', onKey);
-  root.querySelector('.tpl-sc')?.addEventListener('click', close);
+  // Overlay/scrim click does NOT close the dialog — close via its own button or Escape (the scrim is a static backdrop).
   return { root, close };
 }
 
@@ -987,7 +987,7 @@ async function openIssueMap(): Promise<void> {
   const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') { e.preventDefault(); close(); } };
   const close = () => { root.remove(); document.removeEventListener('keydown', onKey); };
   document.addEventListener('keydown', onKey);
-  root.querySelector('.tpl-sc')?.addEventListener('click', close);
+  // Overlay/scrim click does NOT close the dialog — close via its own button or Escape (the scrim is a static backdrop).
   root.querySelector('#imCancel')?.addEventListener('click', close);
   const canvasPoint = (e: PointerEvent) => { const r = canvas.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; };
 

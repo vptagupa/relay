@@ -218,7 +218,7 @@ function modal(html: string): { root: HTMLElement; close: () => void } {
   const close = () => { root.remove(); document.removeEventListener('keydown', onKey); };
   document.body.appendChild(root);
   document.addEventListener('keydown', onKey);
-  root.querySelector('.tpl-sc')?.addEventListener('click', close);
+  // Overlay/scrim click does NOT close the dialog — close via its own button or Escape (the scrim is a static backdrop).
   return { root, close };
 }
 // A compact wired-path preview: kind-coloured stage chips along the pipeline's success path.
@@ -370,7 +370,7 @@ export async function openPrMap(prs: PrRef[], ctx: PrCtx): Promise<void> {
   const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') { e.preventDefault(); close(); } };
   const close = () => { root.remove(); document.removeEventListener('keydown', onKey); };
   document.addEventListener('keydown', onKey);
-  root.querySelector('.tpl-sc')?.addEventListener('click', close);
+  // Overlay/scrim click does NOT close the dialog — close via its own button or Escape (the scrim is a static backdrop).
   root.querySelector('#pmCancel')?.addEventListener('click', close);
   const canvasPoint = (e: PointerEvent) => { const r = canvas.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; };
 

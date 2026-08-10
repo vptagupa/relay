@@ -39,7 +39,7 @@ const KIND_LABEL: Record<AppNotification['kind'], string> = { 'new-issue': 'New 
 const PROV_DOT: Record<ProviderId, string> = { github: 'gh', gitlab: 'gl', bitbucket: 'bb' };
 const PROV_NAME: Record<ProviderId, string> = { github: 'GitHub', gitlab: 'GitLab', bitbucket: 'Bitbucket' };
 
-// A minimal modal (own scrim; Escape / scrim-click closes) — same shape as the Issues rail's.
+// A minimal modal (own scrim; closes via its button or Escape — NOT a backdrop click) — same shape as the Issues rail's.
 function modal(html: string, onClose?: () => void): { root: HTMLElement; close: () => void } {
   const root = document.createElement('div'); root.className = 'tpl-modal';
   root.innerHTML = `<div class="tpl-sc"></div>${html}`;
@@ -47,7 +47,7 @@ function modal(html: string, onClose?: () => void): { root: HTMLElement; close: 
   const close = () => { root.remove(); document.removeEventListener('keydown', onKey); onClose?.(); };
   document.body.appendChild(root);
   document.addEventListener('keydown', onKey);
-  root.querySelector('.tpl-sc')?.addEventListener('click', close);
+  // Overlay/scrim click does NOT close the dialog — close via its own button or Escape (the scrim is a static backdrop).
   return { root, close };
 }
 

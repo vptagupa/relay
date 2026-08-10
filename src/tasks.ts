@@ -178,7 +178,8 @@ function modal(html: string): { root: HTMLElement; close: () => void } {
   const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') { e.preventDefault(); close(); } };
   const close = () => { root.remove(); document.removeEventListener('keydown', onKey); };
   document.body.appendChild(root); document.addEventListener('keydown', onKey);
-  root.querySelector('.tpl-sc')?.addEventListener('click', close);
+  // Overlay/scrim click does NOT close — a stray click outside the card must not discard the form. Close via the
+  // dialog's own button (or Escape). The scrim stays as the dimmed backdrop.
   return { root, close };
 }
 

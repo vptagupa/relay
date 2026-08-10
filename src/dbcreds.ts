@@ -55,7 +55,7 @@ function modal(html: string): { root: HTMLElement; close: () => void } {
   const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') { e.preventDefault(); close(); } };
   const close = () => { root.remove(); document.removeEventListener('keydown', onKey); };
   document.body.appendChild(root); document.addEventListener('keydown', onKey);
-  root.querySelector('.tpl-sc')?.addEventListener('click', close);
+  // Overlay/scrim click does NOT close the dialog — close via its own button or Escape (the scrim is a static backdrop).
   return { root, close };
 }
 

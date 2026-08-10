@@ -68,7 +68,7 @@ export function openPipelineBuilder(base: PipelineDef, onSaved: (savedId?: strin
   };
   const close = () => { root.remove(); document.removeEventListener('keydown', onKey); };
   document.addEventListener('keydown', onKey);
-  root.querySelector('.tpl-sc')?.addEventListener('click', close);
+  // Overlay/scrim click does NOT close the builder — close via its own button or Escape (the scrim is a static backdrop).
   root.querySelector('#pbCancel')?.addEventListener('click', close);
 
   // ---- palette (add a stage of each kind) ----

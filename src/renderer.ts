@@ -1810,7 +1810,10 @@ $('#settingsClose').onclick = closeSettings;
 $('#setTabs').addEventListener('click', (e) => { const t = (e.target as HTMLElement).closest('.set-tab') as HTMLElement | null; if (t?.dataset.tab) selectSettingsTab(t.dataset.tab); });
 $('#cfOk').onclick = () => closeConfirm(true);
 $('#cfCancel').onclick = () => closeConfirm(false);
-$('#scrim').onclick = () => { closeConfirm(false); closeSettings(); closePalette(); };
+// Backdrop click cancels the confirm dialog and dismisses the palette (both ephemeral), but does NOT close
+// Settings — Settings holds forms (API keys, DB creds, sync), so a stray outside-click must not discard them.
+// Close Settings with its Done button or Escape.
+$('#scrim').onclick = () => { closeConfirm(false); closePalette(); };
 $('#setWsBtn').onclick = async () => { state.settings = await relay.openWorkspace(); setActiveWsRoot(state.settings.workspace || null); updateStatus(); reflectSettings(); };
 $('#autoApprove').addEventListener('change', async (e) => { state.settings = await relay.patchSettings({ autoApprove: (e.target as HTMLInputElement).checked }); });
 document.querySelectorAll('.set[data-key]').forEach((b) => b.addEventListener('click', async () => {
