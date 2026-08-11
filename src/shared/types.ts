@@ -130,6 +130,7 @@ export interface Settings {
   librarySplit: number;             // Library section height as a fraction of the sidebar (0–1)
   sidebarWidth: number;             // sidebar width in px
   shellIntegration: boolean;        // inject command-block markers into new shells
+  useWinpty?: boolean;              // Windows: use the legacy winpty backend instead of ConPTY (fixes PCs where ConPTY is broken — terminals spawn but I/O is dead / TUIs crash)
   blocksView: boolean;              // Warp-style blocks as the main view (vs classic xterm)
   fileEditor?: string;              // editor id (see shared/editors.ts) the Files list opens a code file in; default 'code' (VS Code), 'system' = OS default
   notifications: boolean;           // desktop notification when a long command finishes unfocused

@@ -242,11 +242,16 @@ if (!isSquirrel) {
 /* -------------------- PTY IPC -------------------- */
 ipcMain.handle('pty:create', async (e, { id, cwd, cols, rows, restore, runCmd, dbCredId }) => {
   try {
-    const integrate = (await store.getSettings()).shellIntegration;
+    const settings = await store.getSettings();
+    const integrate = settings.shellIntegration;
+    // Windows terminal backend: default ConPTY, but fall back to the legacy winpty when the user enables it
+    // (or sets RELAY_NO_CONPTY=1). Some PCs have a broken/blocked ConPTY where terminals spawn but their I/O is
+    // dead (nothing executes / no output) and full-screen TUIs crash — winpty sidesteps ConPTY entirely.
+    const useConpty = !(settings.useWinpty || process.env.RELAY_NO_CONPTY === '1');
     // A pipeline run may reference a saved DB credential template — resolve it HERE (main-only) into env vars
     // for this shell, so the agent can connect without the secret ever touching the renderer or a file on disk.
     const envExtra = typeof dbCredId === 'string' && dbCredId ? await keys.resolveDbCredEnv(dbCredId).catch(() => ({})) : undefined;
-    const reattached = createTerm(id, cwd, e.sender, cols, rows, restore, integrate, typeof runCmd === 'string' ? runCmd : undefined, envExtra);
+    const reattached = createTerm(id, cwd, e.sender, cols, rows, restore, integrate, typeof runCmd === 'string' ? runCmd : undefined, envExtra, useConpty);
     // `alt` lets the renderer restore the live-interactive view for a reattached full-screen TUI (Claude Code).
     return { reattached, alt: isAltScreen(id) };
   } catch (err) { logFatal('pty:create', err); return { reattached: false, alt: false }; } // a spawn failure must not reject into the renderer

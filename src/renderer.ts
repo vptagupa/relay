@@ -1313,6 +1313,7 @@ function reflectSettings() {
   renderThemeGrid();
   ($('#autoApprove') as HTMLInputElement).checked = state.settings.autoApprove;
   ($('#shellIntegration') as HTMLInputElement).checked = state.settings.shellIntegration;
+  ($('#useWinpty') as HTMLInputElement).checked = !!state.settings.useWinpty;
   ($('#blocksViewSet') as HTMLInputElement).checked = state.settings.blocksView;
   ($('#notifySet') as HTMLInputElement).checked = state.settings.notifications;
   ($('#notifyIssuesSet') as HTMLInputElement).checked = state.settings.issuePushNotify !== false;
@@ -1525,6 +1526,7 @@ function onBlockAreaClick(e: Event) {
 }
 $('#histList').addEventListener('click', onBlockAreaClick);
 $('#shellIntegration').addEventListener('change', async (e) => { state.settings = await relay.patchSettings({ shellIntegration: (e.target as HTMLInputElement).checked }); toast('Applies to new terminals'); });
+$('#useWinpty').addEventListener('change', async (e) => { state.settings = await relay.patchSettings({ useWinpty: (e.target as HTMLInputElement).checked }); toast('Applies to new terminals — open a new tab to test'); });
 async function toggleBlocksView() { state.settings = await relay.patchSettings({ blocksView: !state.settings.blocksView }); updateMainView(); }
 $('#btnBlocks').onclick = toggleBlocksView;
 $('#btnSplitRight').onclick = () => splitClone('row');

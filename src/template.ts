@@ -204,6 +204,7 @@ export function appHtml(panes: string): string {
       <!-- Terminal -->
       <div class="set-panel" data-panel="terminal">
         <label class="chk"><input type="checkbox" id="shellIntegration"> Command blocks — capture each command as a block in History (shell integration; applies to new terminals)</label>
+        <label class="chk"><input type="checkbox" id="useWinpty"> Legacy terminal engine (winpty) — turn on only if terminals don't run commands or crash on this PC (bypasses Windows ConPTY; applies to new terminals)</label>
         <label class="chk"><input type="checkbox" id="blocksViewSet"> Blocks view — show commands as blocks in the main terminal (full-screen apps drop to the live terminal automatically)</label>
       </div>
       <!-- Notifications -->

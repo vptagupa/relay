@@ -71,7 +71,7 @@ function defaultShell(): string {
  * Create OR reattach a terminal. Returns true if it reattached to an existing
  * live shell (buffer replayed), false if a new shell was spawned.
  */
-export function createTerm(id: string, cwd: string, wc: WebContents, cols = 80, rows = 24, restore?: string, integrate = false, runCmd?: string, envExtra?: Record<string, string>): boolean {
+export function createTerm(id: string, cwd: string, wc: WebContents, cols = 80, rows = 24, restore?: string, integrate = false, runCmd?: string, envExtra?: Record<string, string>, useConpty = true): boolean {
   const existing = terms.get(id);
   if (existing) {
     // Same-run resume: the shell is still alive. (restore ignored.)
@@ -131,7 +131,8 @@ export function createTerm(id: string, cwd: string, wc: WebContents, cols = 80, 
     rows,
     cwd: startDir,
     env,
-  });
+    useConpty, // win32 only (ignored elsewhere): false → legacy winpty backend, the ConPTY fallback for PCs where ConPTY is broken
+  } as import('node-pty').IWindowsPtyForkOptions);
   const term: Term = { proc, buf: '', wc, parser: null, pending: new Map(), alt: false, touchedAt: Date.now() };
   terms.set(id, term);
 
