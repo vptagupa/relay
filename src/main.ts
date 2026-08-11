@@ -6,7 +6,7 @@ import { exec, execFile } from 'node:child_process';
 import http from 'node:http';
 import { createHash, randomBytes } from 'node:crypto';
 import { httpsReq, PROVIDERS, providerOf, providerFromRemote, bitbucketExchangeCode, bitbucketAuthorizeUrl, bbOAuthConfigured, BB_OAUTH_PORT, BB_REDIRECT_URI, getOAuthApp, setOAuthApp, githubClientId, migrateGlobalSecretsToWs, type ProviderId } from './providers';
-import { createTerm, writeTerm, resizeTerm, detachTerm, killTerm, killAll, isAltScreen } from './pty';
+import { createTerm, writeTerm, resizeTerm, detachTerm, killTerm, killAll, isAltScreen, termStats, setReapLogger } from './pty';
 import { startWebhookServer, stopWebhookServer, webhookRunning } from './webhooks';
 import * as store from './store';
 import * as keys from './keys';
@@ -87,6 +87,34 @@ async function logRenderer(text: string): Promise<void> {
     }
     await fsp.appendFile(f, line);
   } catch { /* diagnostics only */ }
+}
+// A plain timestamped line in the shared log (heartbeat + shell-cap events). Same file as logFatal so the
+// run-up sits right next to any crash record; append-only so it never wipes those records.
+function logLine(text: string): void {
+  try { appendFileSync(path.join(app.getPath('userData'), 'slayert-error.log'), `[${new Date().toISOString()}] ${text}\n`); } catch { /* diagnostics only */ }
+}
+// Memory heartbeat — a main-process V8 OOM aborts WITHOUT firing uncaughtException, so a long-run crash leaves
+// no log. This records main-process memory + live-shell counts so a crash has a visible run-up. Terse when
+// idle: only writes when memory/shell-count actually moves, or every 10 min as a pulse.
+let lastHb = { rssMB: -1, shells: -1, at: 0 };
+function heartbeatTick(): void {
+  try {
+    const m = process.memoryUsage(); const t = termStats();
+    const mb = (n: number) => Math.round(n / 1048576);
+    const rssMB = mb(m.rss); const now = Date.now();
+    const moved = t.total !== lastHb.shells || Math.abs(rssMB - lastHb.rssMB) > Math.max(20, lastHb.rssMB * 0.05);
+    if (!moved && now - lastHb.at < 600000) return;   // nothing notable AND logged within 10 min → skip
+    lastHb = { rssMB, shells: t.total, at: now };
+    const warn = rssMB > 1400 ? '  ⚠ HIGH — approaching the main-process memory ceiling' : '';
+    logLine(`heartbeat: rss=${rssMB}MB heap=${mb(m.heapUsed)}/${mb(m.heapTotal)}MB ext=${mb(m.external)}MB shells=${t.total}(attached ${t.attached}/detached ${t.detached})${warn}`);
+  } catch { /* diagnostics only */ }
+}
+function startDiagnostics(): void {
+  // Surface the bounded keep-alive in the log so an over-cap eviction is visible (not a silent shell disappearing).
+  setReapLogger((killed, total) => logLine(`term-cap: evicted ${killed} idle background shell(s) over the cap; ${total} live`));
+  heartbeatTick();                                   // one at boot for a baseline
+  const iv = setInterval(heartbeatTick, 120000);     // every 2 min
+  iv.unref?.();                                       // never keep the app alive just for the heartbeat
 }
 process.on('uncaughtException', (err) => {
   logFatal('uncaughtException', err);
@@ -200,7 +228,7 @@ if (!isSquirrel) {
       if (win) { win.show(); win.focus(); routeDeeplink(url); } else bootDeeplink = url;
     });
 
-    app.whenReady().then(createWindow);
+    app.whenReady().then(() => { createWindow(); startDiagnostics(); });
     app.on('window-all-closed', () => {
       killAll();
       if (process.platform !== 'darwin') app.quit();
