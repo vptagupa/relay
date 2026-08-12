@@ -23,10 +23,14 @@ const isProvider = (s: unknown): s is ProviderId => typeof s === 'string' && (PR
 export interface RepoRow { repo: string; desc: string; priv: boolean; }
 export interface RepoListOpts { workspaces?: string[]; } // Bitbucket lists per workspace (CHANGE-2770); others ignore this
 export interface PrRow { number: number; branch: string; url: string; draft: boolean; title?: string; author?: string; state?: string; updatedAt?: number; }
+// Mergeability, as far as the provider will tell us: 'conflict' = the head can't auto-merge into the base (needs
+// manual resolution); 'clean' = merges cleanly; 'unknown' = the provider hasn't computed it (GitHub is lazy) or
+// doesn't expose it (Bitbucket). Only 'conflict' drives the ⚠ badge + resolve action — 'unknown' shows nothing.
+export type MergeState = 'clean' | 'conflict' | 'unknown';
 // The full PR/MR — fetched on demand for the details view (kept off the list so list payloads stay lean).
 export interface PrDetail {
   number: number; title: string; body: string; state: string; draft: boolean; url: string;
-  author?: string; sourceBranch: string; baseBranch: string;
+  author?: string; sourceBranch: string; baseBranch: string; mergeState: MergeState;
   labels: string[]; reviewers: string[]; createdAt?: number; updatedAt?: number;
 }
 interface ApiResult { ok: boolean; status: number; json: unknown; }
@@ -217,9 +221,13 @@ const github = {
     const r = await ghApi(ws, `/repos/${repo}/pulls/${number}`);
     if (!r.ok || !r.json || typeof r.json !== 'object') return { ok: false, error: `Could not load PR (HTTP ${r.status})` };
     const p = asObj(r.json);
+    // `mergeable_state === 'dirty'` is the ONLY value that means a real conflict; 'blocked'/'behind'/'unstable'
+    // are mergeable-with-caveats (not conflicts). `mergeable === null` / state 'unknown' = GitHub still computing.
+    const ms = str(p.mergeable_state);
+    const mergeState: MergeState = ms === 'dirty' ? 'conflict' : (p.mergeable == null || ms === '' || ms === 'unknown') ? 'unknown' : 'clean';
     return { ok: true, detail: {
       number: Number(p.number) || 0, title: str(p.title), body: str(p.body), state: p.merged_at ? 'merged' : (str(p.state) || ''), draft: !!p.draft, url: str(p.html_url),
-      author: str(asObj(p.user).login) || undefined, sourceBranch: str(asObj(p.head).ref), baseBranch: str(asObj(p.base).ref),
+      author: str(asObj(p.user).login) || undefined, sourceBranch: str(asObj(p.head).ref), baseBranch: str(asObj(p.base).ref), mergeState,
       labels: asArr(p.labels).map((l) => str(l.name)).filter(Boolean), reviewers: asArr(p.requested_reviewers).map((u) => str(u.login)).filter(Boolean),
       createdAt: Date.parse(str(p.created_at)) || 0, updatedAt: Date.parse(str(p.updated_at)) || 0,
     } };
@@ -335,9 +343,13 @@ const gitlab = {
     const r = await glApi(ws, `/projects/${enc(repo)}/merge_requests/${number}`);
     if (!r.ok || !r.json || typeof r.json !== 'object') return { ok: false, error: `Could not load MR (HTTP ${r.status})` };
     const m = asObj(r.json);
+    // GitLab gives `has_conflicts` directly; `merge_status === 'cannot_be_merged'` corroborates. 'checking' /
+    // 'unchecked' means the mergeability job hasn't run yet → unknown.
+    const merge = str(m.merge_status);
+    const mergeState: MergeState = (m.has_conflicts === true || merge === 'cannot_be_merged') ? 'conflict' : (merge === '' || merge === 'checking' || merge === 'unchecked') ? 'unknown' : 'clean';
     return { ok: true, detail: {
       number: Number(m.iid) || 0, title: str(m.title), body: str(m.description), state: str(m.state) || '', draft: !!m.draft || !!m.work_in_progress, url: str(m.web_url),
-      author: str(asObj(m.author).username) || undefined, sourceBranch: str(m.source_branch), baseBranch: str(m.target_branch),
+      author: str(asObj(m.author).username) || undefined, sourceBranch: str(m.source_branch), baseBranch: str(m.target_branch), mergeState,
       labels: (Array.isArray(m.labels) ? m.labels as unknown[] : []).map((l) => str(l)).filter(Boolean), reviewers: asArr(m.reviewers).map((u) => str(u.username)).filter(Boolean),
       createdAt: Date.parse(str(m.created_at)) || 0, updatedAt: Date.parse(str(m.updated_at)) || 0,
     } };
@@ -582,9 +594,10 @@ const bitbucket = {
     const r = await bbApi(ws, `/2.0/repositories/${repo}/pullrequests/${number}`);
     if (!r.ok || !r.json || typeof r.json !== 'object') return { ok: false, error: `Could not load PR (HTTP ${r.status})` };
     const p = asObj(r.json); const author = asObj(p.author);
+    // Bitbucket's PR object carries no conflict/mergeable flag (it'd need a merge dry-run) → always 'unknown'.
     return { ok: true, detail: {
       number: Number(p.id) || 0, title: str(p.title), body: str(asObj(p.summary).raw || p.description), state: str(p.state) || '', draft: false, url: str(asObj(asObj(p.links).html).href),
-      author: str(author.nickname || author.display_name) || undefined, sourceBranch: str(asObj(asObj(p.source).branch).name), baseBranch: str(asObj(asObj(p.destination).branch).name),
+      author: str(author.nickname || author.display_name) || undefined, sourceBranch: str(asObj(asObj(p.source).branch).name), baseBranch: str(asObj(asObj(p.destination).branch).name), mergeState: 'unknown',
       labels: [], reviewers: asArr(p.reviewers).map((u) => str(asObj(u).nickname || asObj(u).display_name)).filter(Boolean),
       createdAt: Date.parse(str(p.created_on)) || 0, updatedAt: Date.parse(str(p.updated_on)) || 0,
     } };

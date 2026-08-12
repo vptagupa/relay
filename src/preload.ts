@@ -122,7 +122,7 @@ const api = {
   // PRs/MRs for a repo by state (default open, page 1) — links an issue's branch to its PR AND drives the PR rail.
   providerPrs: (ws: string, provider: ProviderId, repo: string, state: 'open' | 'closed' = 'open', page = 1, authors?: string[]): Promise<{ ok: boolean; prs?: { number: number; branch: string; url: string; draft: boolean; title?: string; author?: string; state?: string; updatedAt?: number }[]; hasMore?: boolean; error?: string }> => ipcRenderer.invoke('provider:prs', { ws, provider, repo, state, page, authors }),
   // Full PR/MR (with body/labels/reviewers/base branch) — fetched on demand for the details hover.
-  providerPrDetail: (ws: string, provider: ProviderId, repo: string, number: number): Promise<{ ok: boolean; detail?: { number: number; title: string; body: string; state: string; draft: boolean; url: string; author?: string; sourceBranch: string; baseBranch: string; labels: string[]; reviewers: string[]; createdAt?: number; updatedAt?: number }; error?: string }> => ipcRenderer.invoke('provider:pr-detail', { ws, provider, repo, number }),
+  providerPrDetail: (ws: string, provider: ProviderId, repo: string, number: number): Promise<{ ok: boolean; detail?: { number: number; title: string; body: string; state: string; draft: boolean; url: string; author?: string; sourceBranch: string; baseBranch: string; mergeState: 'clean' | 'conflict' | 'unknown'; labels: string[]; reviewers: string[]; createdAt?: number; updatedAt?: number }; error?: string }> => ipcRenderer.invoke('provider:pr-detail', { ws, provider, repo, number }),
   // Repo members/collaborators — the PR rail's author-filter list.
   providerRepoMembers: (ws: string, provider: ProviderId, repo: string): Promise<{ ok: boolean; members?: string[]; error?: string }> => ipcRenderer.invoke('provider:repo-members', { ws, provider, repo }),
   // API rate-limit state — pollers skip a cycle while `limited` is true (until the window resets).
@@ -143,6 +143,12 @@ const api = {
   // Review-assign a PR: create (or reuse) an isolated worktree with the PR's SOURCE branch checked out
   // (fetches the PR head; `branch` = source branch, needed for Bitbucket which has no numbered PR ref).
   prWorktreeAdd: (provider: ProviderId, repo: string, dir: string, number: number, branch: string, brief: string): Promise<{ ok: boolean; path?: string; branch?: string; reused?: boolean; briefRel?: string; error?: string }> => ipcRenderer.invoke('git:pr-worktree-add', { provider, repo, dir, number, branch, brief }),
+  // Resolve a PR's merge conflict: check out its SOURCE branch into a worktree, merge the BASE branch in so the
+  // conflict is live for the user/agent to resolve, then push the resolution back to update the PR.
+  // `merging` = left mid-merge with conflicts (the expected path); `clean` = base merged with no conflict;
+  // `dirty` = the worktree had uncommitted changes, left untouched; `pushable` = the source branch is on origin,
+  // so `git push origin HEAD:<source>` will update the PR (false for fork PRs whose head isn't in origin).
+  prResolveWorktree: (provider: ProviderId, repo: string, dir: string, number: number, branch: string, base: string): Promise<{ ok: boolean; path?: string; branch?: string; base?: string; conflicts?: string[]; merging?: boolean; clean?: boolean; dirty?: boolean; pushable?: boolean; error?: string }> => ipcRenderer.invoke('git:pr-resolve-worktree', { provider, repo, dir, number, branch, base }),
   // Link dependency repos into an issue worktree as read-only reference (checked out to their latest default under .deps/).
   linkDeps: (wt: string, dir: string, deps: { provider: ProviderId; repo: string }[]): Promise<{ ok: boolean; linked?: { name: string; repo: string }[]; error?: string }> => ipcRenderer.invoke('git:link-deps', { wt, dir, deps }),
   // List EXISTING worktrees for a repo (branch → path), no side effects — to reopen a terminal in an issue/task worktree after its tab/app closed.

@@ -102,6 +102,7 @@ export async function loadPrs(): Promise<void> {
   if (!r.ok) { phase = 'error'; errMsg = r.error || `Could not list ${PR_WORD[provider]}s`; render(); return; }
   prs = r.prs || []; prsHasMore = !!r.hasMore; phase = 'ready'; render();
   maybeAutoFill();
+  void sweepMergeStatus(seq);   // detect merge conflicts among the loaded PRs (bounded, cached) → badges/resolve
 }
 
 // "All repos": fan out one request per tracked repo (across providers), tag each PR with its repo, merge, and
@@ -149,6 +150,7 @@ async function loadMorePrs(): Promise<void> {
   prs.push(...(r.prs as PrItem[]).filter((p: PrItem) => !seen.has(p.number)));
   prsPage = nextPage; prsHasMore = !!r.hasMore;
   renderKeepScroll(); maybeAutoFill();
+  void sweepMergeStatus(seq);   // sweep the newly-appended page for conflicts too
 }
 
 /* ----------------------------- hover detail card ----------------------------- */
@@ -165,9 +167,13 @@ function relTime(ms?: number): string {
   return `${Math.floor(mo / 12)}y ago`;
 }
 // The full PR, fetched on hover and cached (keyed provider:repo#number) so re-hovering is instant.
-interface PrDetail { number: number; title: string; body: string; state: string; draft: boolean; url: string; author?: string; sourceBranch: string; baseBranch: string; labels: string[]; reviewers: string[]; createdAt?: number; updatedAt?: number; }
+type MergeState = 'clean' | 'conflict' | 'unknown';
+interface PrDetail { number: number; title: string; body: string; state: string; draft: boolean; url: string; author?: string; sourceBranch: string; baseBranch: string; mergeState: MergeState; labels: string[]; reviewers: string[]; createdAt?: number; updatedAt?: number; }
 const detailCache = new Map<string, PrDetail>();
 const prKey = (p: PrItem) => `${p.provider || provider}:${p.repo || repo}#${p.number}`;
+// A loaded PR's mergeability, if its detail has been fetched (by the conflict sweep or a hover). Undefined = not
+// yet known. Only 'conflict' is surfaced (a ⚠ badge + the ⚔ resolve action) — 'clean'/'unknown' show nothing.
+const mergeStateOf = (p: PrItem): MergeState | undefined => detailCache.get(prKey(p))?.mergeState;
 
 // The hover card is HOVERABLE (pointer-events:auto) + scrollable so a long description can be read/scrolled.
 // Moving from the row into the card keeps it open (a short hide-delay bridges the gap); leaving the card hides it.
@@ -187,6 +193,8 @@ function ensureHoverEl(): HTMLElement {
       const t = e.target as HTMLElement;
       // ⚡ Review → open the pipeline-assign dialog for this PR (not the provider).
       if (t.closest('.prh-review')) { const pr = hoverPr; if (pr) { hidePrHover(); void openPrAssign(prRefOf(pr), prCtxOf(pr)); } return; }
+      // ⚔ Resolve → open a terminal in a worktree with the conflict live.
+      if (t.closest('.prh-resolve')) { const pr = hoverPr; if (pr) { hidePrHover(); void resolvePr(pr); } return; }
       // Only the "open on <provider>" footer opens the PR — clicking the title/body does nothing (so text stays selectable).
       if (!t.closest('.prh-hint')) return;
       const url = detailCache.get(hoverKey)?.url || hoverUrl; if (url) relay.openExternal(url);
@@ -207,6 +215,8 @@ function hoverHtml(p: PrItem, d?: PrDetail, failed = false): string {
   if (p.repo) meta.push(`<div><span class="src-dot ${PROV_DOT[pp]}"></span> ${esc(p.repo)}</div>`);
   const author = d?.author || p.author; if (author) meta.push(`<div>✍ ${esc(author)}</div>`);
   meta.push(`<div>⎇ ${esc(d?.sourceBranch || p.branch)}${d?.baseBranch ? ` → ${esc(d.baseBranch)}` : ''}</div>`);
+  if (d?.mergeState === 'conflict') meta.push(`<div class="prh-conflict">⚠ merge conflict — needs resolution</div>`);
+  else if (d?.mergeState === 'clean') meta.push(`<div class="prh-clean">✓ no merge conflicts</div>`);
   if (d?.createdAt) meta.push(`<div class="prh-upd">opened ${esc(relTime(d.createdAt))}</div>`);
   const upd = d?.updatedAt || p.updatedAt; if (upd) meta.push(`<div class="prh-upd">updated ${esc(relTime(upd))}</div>`);
   const labels = d?.labels?.length ? `<div class="prh-labels">${d.labels.map((l) => `<span class="prh-lab">${esc(l)}</span>`).join('')}</div>` : '';
@@ -215,7 +225,7 @@ function hoverHtml(p: PrItem, d?: PrDetail, failed = false): string {
     ? (d.body.trim() ? `<div class="prh-body">${esc(d.body)}</div>` : '<div class="prh-body empty">No description.</div>')
     : failed ? '<div class="prh-body empty">Couldn’t load the description.</div>'
     : '<div class="prh-body loading"><span class="isr-mspin"></span> loading details…</div>';
-  return `<div class="prh-top"><span class="prh-num">#${p.number}</span><span class="pr-badge st ${esc(st)}">${esc(st)}</span>${(d?.draft ?? p.draft) ? '<span class="pr-badge draft">draft</span>' : ''}<button class="prh-review" data-prreview="1" title="Review this ${pp === 'gitlab' ? 'MR' : 'PR'} with a pipeline">⚡ Review</button></div>
+  return `<div class="prh-top"><span class="prh-num">#${p.number}</span><span class="pr-badge st ${esc(st)}">${esc(st)}</span>${(d?.draft ?? p.draft) ? '<span class="pr-badge draft">draft</span>' : ''}<button class="prh-review" data-prreview="1" title="Review this ${pp === 'gitlab' ? 'MR' : 'PR'} with a pipeline">⚡ Review</button>${(d?.mergeState === 'conflict' && st === 'open') ? '<button class="prh-resolve" data-prresolve="1" title="Resolve the merge conflict in a terminal">⚔ Resolve</button>' : ''}</div>
     <div class="prh-title">${esc(d?.title || p.title || '(no title)')}</div>
     <div class="prh-meta">${meta.join('')}</div>
     ${labels}${revs}${body}
@@ -252,6 +262,70 @@ const prProvider = (p: PrItem): ProviderId => p.provider || provider;
 const prRepo = (p: PrItem): string => p.repo || repo || '';
 const prRefOf = (p: PrItem): PrRef => ({ number: p.number, title: p.title, branch: p.branch, url: p.url, provider: prProvider(p), repo: prRepo(p) });
 const prCtxOf = (p: PrItem): PrCtx => ({ provider: prProvider(p), repo: prRepo(p), dir: state.settings.workspace || '' });
+
+/* ----------------------------- conflict detection + resolve stage ----------------------------- */
+const SWEEP_CAP = 30;          // cap the per-load detail burst; PRs past it fill in on hover
+// The PR LIST endpoint carries no mergeability, so detect conflicts by fetching each loaded OPEN PR's detail —
+// bounded (4 workers, ≤SWEEP_CAP per load) + cached in detailCache, then re-render so conflicted rows get a ⚠
+// badge + ⚔ resolve action. Runs ONLY on an explicit load (the PR rail has no background poll), so it never
+// drains the rate limit on its own; conditional requests make re-sweeps free (304). Skips All-repos, closed PRs,
+// and Bitbucket (no mergeable field). Re-fetches 'unknown' entries (GitHub computes mergeability lazily).
+// No overlap guard needed: it's seq-guarded (a stale sweep stops + won't render) and cache-guarded (`needs`), and
+// a duplicate fetch is a free 304 — a hard "one at a time" flag would instead SKIP a rapid second load's sweep.
+async function sweepMergeStatus(seq: number, retry = 0): Promise<void> {
+  if (prScope === 'all' || prState !== 'open' || !repo || provider === 'bitbucket') return;
+  // Re-check anything not confirmed 'clean' (missing / unknown / conflict) so a resolved conflict clears its badge
+  // and a still-computing PR resolves; keep 'clean' PRs (the bulk) cached. An unchanged re-check is a free 304.
+  const needs = (p: PrItem): boolean => { const d = detailCache.get(prKey(p)); return !d || d.mergeState !== 'clean'; };
+  const targets = prs.filter(needs).slice(0, SWEEP_CAP);
+  if (!targets.length) return;
+  const rl = await relay.providerRateLimit().catch(() => null); if (rl?.limited) return;   // don't pile detail calls onto a rate-limited token
+  if (seq !== loadSeq) return;                                  // state may have changed during the await
+  const ws = wsKey(); let i = 0; let got = false;
+  const worker = async (): Promise<void> => {
+    while (i < targets.length && seq === loadSeq) {
+      const p = targets[i++]; const key = prKey(p);
+      const res = await relay.providerPrDetail(ws, p.provider || provider, p.repo || repo!, p.number).catch(() => null);
+      if (res && res.ok && res.detail) { detailCache.set(key, res.detail as PrDetail); got = true; }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(4, targets.length) }, () => worker()));
+  if (seq !== loadSeq) return;                                  // a newer load superseded this sweep
+  if (got && phase === 'ready') render();                       // reveal the freshly-detected conflict badges
+  // GitHub computes mergeability lazily, so a first fetch can return 'unknown'. Retry ONCE after a beat so
+  // conflicts surface without the user reloading (conditional requests keep the retry a cheap 304).
+  if (retry < 1 && provider === 'github' && prs.some((p) => detailCache.get(prKey(p))?.mergeState === 'unknown'))
+    window.setTimeout(() => { if (seq === loadSeq) void sweepMergeStatus(seq, retry + 1); }, 2500);
+}
+
+// Open the conflict-resolution stage for a PR: check out its source branch into a worktree with the base merged
+// in (conflict live), then open a terminal there to resolve → commit → push. Needs the base branch (from the
+// cached/fetched detail).
+let resolving = false;   // guards the whole flow (incl. the base fetch) so a double-click can't open two terminals
+async function resolvePr(p: PrItem): Promise<void> {
+  if (resolving) return;
+  resolving = true;
+  try {
+    const prov = prProvider(p), r = prRepo(p), num = p.number, word = PR_WORD[prov];
+    let base = detailCache.get(prKey(p))?.baseBranch || '';
+    if (!base) {   // detail not fetched yet (e.g. clicked before the sweep reached it) → fetch it now for the base branch
+      const d = await relay.providerPrDetail(wsKey(), prov, r, num).catch(() => null);
+      if (d && d.ok && d.detail) { detailCache.set(prKey(p), d.detail as PrDetail); base = d.detail.baseBranch || ''; }
+    }
+    if (!base) { toast(`Couldn't determine the base branch for ${word} #${num}`); return; }
+    toast(`Preparing a conflict worktree for ${word} #${num}…`, true);
+    const res = await relay.prResolveWorktree(prov, r, state.settings.workspace || '', num, p.branch, base).catch(() => ({ ok: false, error: 'Resolve failed' }));
+    if (!res.ok || !res.path) { toast(res.error || `Couldn't prepare the conflict worktree for ${word} #${num}`); return; }
+    deps.openAgentTab({ cwd: res.path, name: `${word} #${num} · resolve`, runCmd: 'git status' });   // surface the conflicted files on open
+    const n = res.conflicts?.length || 0;
+    // The worktree branch is `pr-<n>` but its upstream is origin/<source> — a bare `git push` refuses on the name
+    // mismatch (push.default=simple), so hand the user the explicit refspec that actually updates the PR.
+    const pushCmd = res.pushable ? `git push origin HEAD:${p.branch}` : '';
+    if (res.dirty) toast(`${word} #${num}: worktree has uncommitted changes — opened as-is (didn't merge ${base})`);
+    else if (res.clean) toast(res.pushable ? `${word} #${num}: ${base} merged cleanly — no conflicts. Push to update: ${pushCmd}` : `${word} #${num}: ${base} merged cleanly — no conflicts.`, true);
+    else toast(res.pushable ? `${word} #${num}: ${n} conflicted file${n === 1 ? '' : 's'} — resolve & commit, then: ${pushCmd}` : `${word} #${num}: ${n} conflicted file${n === 1 ? '' : 's'} — resolve & commit (push needs the source repo/fork)`, true);
+  } finally { resolving = false; }
+}
 
 /* ----------------------------- repo + author pickers ----------------------------- */
 // The PR rail's OWN repo picker (mirrors the Issues rail menu) — picks from the tracked repos, sets prRepoByWs.
@@ -335,7 +409,9 @@ function render(): void {
     const pp = p.provider || provider;
     const st = (p.state || prState).toLowerCase();
     const runSt = prStatusOf(pp, p.repo || repo || '', p.number);   // review-pipeline status for this PR
-    return `<div class="pr-row" data-url="${esc(p.url)}">
+    const conflict = st === 'open' && mergeStateOf(p) === 'conflict';  // only open PRs are resolvable
+    const wd = pp === 'gitlab' ? 'MR' : 'PR';
+    return `<div class="pr-row${conflict ? ' conflict' : ''}" data-url="${esc(p.url)}">
       <div class="pr-hash">#${p.number}</div>
       <div class="pr-body">
         <div class="pr-title">${esc(p.title || '(no title)')}</div>
@@ -343,9 +419,10 @@ function render(): void {
       </div>
       <div class="pr-side">
         ${runSt !== 'idle' ? `<span class="pr-run ${runSt}" data-prrun="1" title="Review: ${esc(PR_STATUS_LABEL[runSt] || runSt)} — click to manage">${esc(PR_STATUS_LABEL[runSt] || runSt)}</span>` : ''}
+        ${conflict ? `<span class="pr-badge conflict" title="This ${wd} has merge conflicts">⚠ conflict</span><button class="pr-resolve" data-prresolve="1" title="Resolve the merge conflict in a terminal">⚔</button>` : ''}
         ${p.draft ? '<span class="pr-badge draft">draft</span>' : ''}
         <span class="pr-badge st ${esc(st)}">${esc(st)}</span>
-        <button class="pr-assign" data-prasg="1" title="Review this ${pp === 'gitlab' ? 'MR' : 'PR'} with a pipeline">⚡</button>
+        <button class="pr-assign" data-prasg="1" title="Review this ${wd} with a pipeline">⚡</button>
         <span class="pr-ext">↗</span>
       </div>
     </div>`;
@@ -365,6 +442,8 @@ function render(): void {
     if (asg) asg.onclick = (e) => { e.stopPropagation(); hidePrHover(); if (p) void openPrAssign(prRefOf(p), prCtxOf(p)); };
     const chip = row.querySelector<HTMLElement>('[data-prrun]');
     if (chip) chip.onclick = (e) => { e.stopPropagation(); if (p) onPrChip(prProvider(p), prRepo(p), p.number); };
+    const res = row.querySelector<HTMLElement>('[data-prresolve]');   // ⚔ open the conflict-resolution terminal
+    if (res) res.onclick = (e) => { e.stopPropagation(); hidePrHover(); if (p) void resolvePr(p); };
   });
 }
 

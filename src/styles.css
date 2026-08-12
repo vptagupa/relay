@@ -998,6 +998,12 @@ body.tabdrag .dz{display:block;pointer-events:auto}
 .pr-run.reviewing,.pr-run.working{border-color:#a78bfa66;color:#a78bfa}
 .pr-run.ready{border-color:#2ea04366;color:#3fb950}
 .pr-run.changes{border-color:#e0a44a66;color:#e0a44a}
+/* merge-conflict badge + ⚔ resolve action on a PR row (conflict detected via the bounded detail sweep) */
+.pr-badge.conflict{border-color:#da363366;color:#f85149;text-transform:none}
+.pr-row.conflict{border-color:#da363333}
+.pr-row.conflict:hover{border-color:#da363366}
+.pr-resolve{flex:none;border:none;background:transparent;color:#f85149;cursor:pointer;font-size:12px;line-height:1;padding:2px 3px;border-radius:6px;opacity:.8}
+.pr-resolve:hover{background:var(--surface-3,var(--surface-2));opacity:1}
 /* compact wired-path pipeline preview (Assign dialog + map-board pipeline nodes) */
 .prp-st{display:inline-flex;align-items:center;gap:5px;font-size:11px;color:var(--text-dim)}
 .prp-dot{width:7px;height:7px;border-radius:50%;display:inline-block;flex:none}
@@ -1051,6 +1057,10 @@ body.tabdrag .dz{display:block;pointer-events:auto}
 /* ⚡ Review action in the hover card (pushed to the right of the top row) */
 .prh-review{margin-left:auto;border:1px solid var(--border-strong);background:transparent;color:var(--accent);cursor:pointer;font:11px/1 var(--mono);padding:4px 9px;border-radius:7px;white-space:nowrap}
 .prh-review:hover{background:var(--surface-2);border-color:var(--accent)}
+.prh-resolve{margin-left:6px;border:1px solid #da363366;background:transparent;color:#f85149;cursor:pointer;font:11px/1 var(--mono);padding:4px 9px;border-radius:7px;white-space:nowrap}
+.prh-resolve:hover{background:var(--surface-2);border-color:#f85149}
+.prh-conflict{color:#f85149}
+.prh-clean{color:#3fb950}
 /* open/closed state toggle (segmented) */
 .iss-state{display:flex;gap:2px;margin:4px 8px 6px;padding:2px;background:var(--surface-2);border:1px solid var(--border);border-radius:8px}
 .iss-seg{flex:1;padding:4px 0;border:none;background:transparent;color:var(--text-dim);font:600 11px/1.2 var(--sans);border-radius:6px;cursor:pointer}
