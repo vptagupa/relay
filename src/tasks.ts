@@ -368,10 +368,20 @@ function openTaskDetails(t: Task): void {
 }
 
 /* ----------------------------- render the rail ----------------------------- */
+let taskRepoFilter = '';   // '' = all repos; else "provider:repo" — a client-side filter of the local task list
+const taskRepoId = (t: Task): string => `${t.provider}:${t.repo}`;
 function render(): void {
   const el = $('#taskList'); if (!el) return;
-  const list = tasksFor(wsKey());
-  if (!list.length) { el.innerHTML = `<div class="isr-empty"><div class="isr-ei">📝</div><div>No tasks yet</div><div class="isr-es">Draft a proposed issue, validate it against the repo, and file it only if valid.</div></div>`; return; }
+  const all = tasksFor(wsKey());
+  if (taskRepoFilter && !all.some((t) => taskRepoId(t) === taskRepoFilter)) taskRepoFilter = ''; // drop a stale filter (ws switch / deletion)
+  const repoEl = $('#taskRepo');
+  if (repoEl) {
+    (repoEl as HTMLElement).style.display = all.length ? '' : 'none';
+    repoEl.textContent = `${taskRepoFilter ? parseRepoId(taskRepoFilter).repo : 'All repos'} ▾`;
+  }
+  if (!all.length) { el.innerHTML = `<div class="isr-empty"><div class="isr-ei">📝</div><div>No tasks yet</div><div class="isr-es">Draft a proposed issue, validate it against the repo, and file it only if valid.</div></div>`; return; }
+  const list = taskRepoFilter ? all.filter((t) => taskRepoId(t) === taskRepoFilter) : all;
+  if (!list.length) { el.innerHTML = `<div class="isr-empty"><div class="isr-ei">🗂️</div><div>No tasks for this repo</div><div class="isr-es">Switch the repo filter back to All.</div></div>`; return; }
   el.innerHTML = list.map((t) => `<div class="tk-row" data-id="${esc(t.id)}">
       <div class="tk-body">
         <div class="tk-title">${esc(t.title)}</div>
@@ -390,10 +400,29 @@ function render(): void {
   });
 }
 
+// Repo filter dropdown — the distinct repos among the workspace's tasks, plus "All repos". Client-side (tasks are local).
+function closeTaskRepoMenu(): void { document.getElementById('taskRepoMenu')?.remove(); }
+function openTaskRepoMenu(): void {
+  const btn = $('#taskRepo'); if (!btn) return;
+  if (document.getElementById('taskRepoMenu')) { closeTaskRepoMenu(); return; }
+  const repos = [...new Set(tasksFor(wsKey()).map(taskRepoId))].sort();
+  const allRow = `<button class="iss-mi ${!taskRepoFilter ? 'on' : ''}" data-repo=""><span class="d">⌂</span> All repos</button>`;
+  const rows = repos.map((id) => { const { provider: p, repo: r } = parseRepoId(id); return `<button class="iss-mi ${taskRepoFilter === id ? 'on' : ''}" data-repo="${esc(id)}"><span class="d src-dot ${PROV_DOT[(p as ProviderId)] || 'gh'}"></span> ${esc(r)}</button>`; }).join('');
+  const menu = document.createElement('div'); menu.className = 'iss-menu'; menu.id = 'taskRepoMenu';
+  menu.innerHTML = allRow + (rows ? `<div class="iss-menu-list">${rows}</div>` : '');
+  document.body.appendChild(menu);
+  const r = btn.getBoundingClientRect(); menu.style.left = Math.round(r.left) + 'px'; menu.style.top = Math.round(r.bottom + 4) + 'px';
+  menu.querySelectorAll<HTMLElement>('.iss-mi').forEach((mi) => {
+    mi.onclick = (e) => { e.stopPropagation(); closeTaskRepoMenu(); taskRepoFilter = mi.dataset.repo || ''; render(); };
+  });
+  setTimeout(() => document.addEventListener('click', closeTaskRepoMenu, { once: true }), 0);
+}
+
 /* ----------------------------- wire-up ----------------------------- */
 export function initTasks(d: TasksDeps): void {
   deps = d;
   const nw = $('#taskNew'); if (nw) nw.onclick = () => openTaskForm();
+  const rsel = $('#taskRepo'); if (rsel) rsel.onclick = (e) => { e.stopPropagation(); openTaskRepoMenu(); };
   render();
   // Resume filed-issue tracking after a reboot: the persisted status shows immediately; re-sync shortly after.
   ensureTracking();

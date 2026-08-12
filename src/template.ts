@@ -79,7 +79,7 @@ export function appHtml(panes: string): string {
             <div class="side-list" id="prList"></div>
           </div>
           <div class="side-view side-tasks" id="viewTasks">
-            <div class="side-head"><span class="side-title">Tasks</span><button class="files-up" id="taskNew" title="New task"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button></div>
+            <div class="side-head"><span class="side-title">Tasks</span><button class="iss-repo-sel" id="taskRepo" title="Filter tasks by repository" style="display:none"></button><button class="files-up" id="taskNew" title="New task"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button></div>
             <div class="side-list" id="taskList"></div>
           </div>
           <div class="side-foot"><span class="sdot" id="storeDot"></span><span id="storeText">Saved on this machine</span></div>
