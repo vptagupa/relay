@@ -272,6 +272,8 @@ export interface Issue {
   assignees?: string[];             // GitHub logins assigned to the issue (for the "assigned to me" filter)
   author?: string;                  // the creator's login/username (for the "created by" filter)
   milestone?: string;               // milestone title, if any
+  provider?: string;                // set only in the "All repos" scope — this issue's own provider (else the active one)
+  repo?: string;                    // set only in the "All repos" scope — this issue's own repo id (else the active one)
 }
 
 // --- Issue Pipelines (serializable, so custom pipelines can be authored + persisted) ---
