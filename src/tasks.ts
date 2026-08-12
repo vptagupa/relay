@@ -351,7 +351,7 @@ function openTaskDetails(t: Task): void {
         ${t.result ? `<label class="iss-lbl">${resultLabel}</label><div class="tk-result">${esc(t.result)}</div>` : ''}
         ${t.issueUrl ? `<div class="iss-wt">Filed as issue <a href="#" data-issue>#${t.issueNumber} ↗</a> — status: <b>${t.status === 'closed' ? 'closed' : 'open'}</b> (synced from the issue)</div>` : ''}
       </div>
-      <div class="ft"><span class="hint"></span><span class="r"><button class="tpl-btn ghost" data-del>Delete</button><button class="tpl-btn ghost" data-edit>Edit</button>${action}<button class="tpl-btn ghost" data-x>Close</button></span></div>
+      <div class="ft"><span class="hint"></span><span class="r"><button class="tpl-btn ghost" data-term style="display:none">⧉ Open terminal</button><button class="tpl-btn ghost" data-del>Delete</button><button class="tpl-btn ghost" data-edit>Edit</button>${action}<button class="tpl-btn ghost" data-x>Close</button></span></div>
     </div>`);
   root.querySelector('[data-x]')?.addEventListener('click', close);
   root.querySelector('[data-issue]')?.addEventListener('click', (e) => { e.preventDefault(); if (t.issueUrl) relay.openExternal(t.issueUrl); });
@@ -359,6 +359,12 @@ function openTaskDetails(t: Task): void {
   root.querySelector('[data-del]')?.addEventListener('click', () => { close(); deleteTask(t.id); toast('Task deleted'); });
   root.querySelector('[data-edit]')?.addEventListener('click', () => { close(); openTaskForm(t); });
   root.querySelector('[data-run]')?.addEventListener('click', () => { close(); void runValidate(t); });
+  // ⧉ Reopen a terminal in this task's existing worktree (survives a closed tab / crash / quit). Shown only if it exists.
+  const termBtn = root.querySelector<HTMLElement>('[data-term]');
+  if (termBtn) void relay.worktreesList(t.provider as ProviderId, t.repo, state.settings.workspace || '').then((res: { ok: boolean; list: { branch: string; path: string }[] }) => {
+    const wt = res.ok ? res.list.find((w: { branch: string; path: string }) => w.branch === `task-${t.id}`)?.path : undefined;
+    if (wt) { termBtn.style.display = ''; termBtn.onclick = () => { close(); deps.openAgentTab({ cwd: wt, name: `task: ${t.title.slice(0, 20)}` }); }; }
+  }).catch(() => { /* best-effort */ });
 }
 
 /* ----------------------------- render the rail ----------------------------- */

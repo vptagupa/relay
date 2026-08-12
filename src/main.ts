@@ -648,6 +648,22 @@ async function resolveRepoRoot(git: string, provider: ProviderId, repo: string, 
 function worktreeFolder(repoRoot: string): string {
   return `${path.basename(repoRoot) || 'repo'}-${createHash('sha1').update(repoRoot.replace(/\\/g, '/').toLowerCase()).digest('hex').slice(0, 8)}`;
 }
+// Resolve the repo root for an EXISTING checkout WITHOUT any side effects (no fetch, no clone) — used to
+// locate already-created worktrees so the rail can reopen a terminal into them. Returns null if neither the
+// open folder is this repo nor a managed clone exists (⇒ no worktrees could exist).
+async function locateRepoRoot(git: string, provider: ProviderId, repo: string, dir?: string): Promise<string | null> {
+  if (typeof dir === 'string' && dir) {
+    const top = await runBin(git, ['-C', dir, 'rev-parse', '--show-toplevel']);
+    if (top.ok) {
+      const root = top.stdout.trim();
+      const rem = await runBin(git, ['-C', root, 'remote', 'get-url', 'origin']);
+      const fromRemote = rem.ok ? providerFromRemote(rem.stdout) : null;
+      if (fromRemote && fromRemote.provider === provider && fromRemote.repo === repo) return root;
+    }
+  }
+  const cacheRoot = path.join(app.getPath('userData'), 'repos', `${provider}__${repo.replace(/\//g, '__')}`);
+  return existsSync(path.join(cacheRoot, '.git')) ? cacheRoot : null;
+}
 
 // Drop stale worktree registrations, then sweep the empty <folder>/<branch> and <folder> dirs a
 // hand-deleted worktree leaves behind, so the tree doesn't accumulate orphans and a stale-empty path
@@ -744,6 +760,21 @@ ipcMain.handle('git:worktree-add', async (_e, p: { provider?: ProviderId; repo: 
     const briefRel = await dropSlayerBrief(git, wtPath, `.slayer/issue-${num}.md`, typeof p?.brief === 'string' ? p.brief : '');
     return { ok: true, path: wtPath, branch, base, reused, briefRel };
   } catch (err) { logFatal('git:worktree-add', err); return { ok: false, error: 'Worktree creation failed' }; }
+});
+
+// List EXISTING worktree dirs for a repo (branch → path), NO fetch/clone. The Issues/Tasks rails use it to
+// offer "reopen a terminal" on an issue/task whose worktree survived a closed tab / crash / accidental quit.
+ipcMain.handle('git:worktrees', async (_e, p: { provider?: ProviderId; repo: string; dir?: string }) => {
+  try {
+    const provider = (p?.provider || 'github') as ProviderId;
+    if (!providerOf(provider) || !validRepo(p?.repo)) return { ok: false, list: [] };
+    const git = await resolveBin('git'); if (!git) return { ok: false, list: [] };
+    const repoRoot = await locateRepoRoot(git, provider, p.repo, typeof p?.dir === 'string' ? p.dir : undefined);
+    if (!repoRoot) return { ok: true, list: [] };   // never checked out here ⇒ no worktrees
+    const base = path.join(app.getPath('userData'), 'worktrees', worktreeFolder(repoRoot));
+    const branches = await fsp.readdir(base).catch(() => [] as string[]);   // the sweep removes empties, so what's left is real
+    return { ok: true, list: branches.map((branch) => ({ branch, path: path.join(base, branch) })) };
+  } catch (err) { logFatal('git:worktrees', err); return { ok: false, list: [] }; }
 });
 
 // Create (or reuse) an isolated worktree with a PR/MR's SOURCE branch checked out, so a review pipeline

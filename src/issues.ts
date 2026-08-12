@@ -123,6 +123,8 @@ const activeLabels = new Set<string>();         // active provider-label filter 
 const activeAuthors = new Set<string>();        // active "created by" filter (OR — an issue has one author)
 let members: string[] = [];                      // the active repo's members — the author-filter list (∪ loaded authors)
 let membersFor = '';                             // the "provider:repo" the loaded members belong to — gate a re-fetch to a repo change
+let wtByBranch = new Map<string, string>();      // 'issue-<N>' → existing worktree path — powers the reopen-terminal (⧉) action
+let wtFor = '';                                  // the "provider:repo" the worktree map belongs to (fetched once per repo)
 let authorReloadT: number | null = null;         // debounce: coalesce rapid author toggles into one server-side re-query
 let mineOnly = false;                            // "assigned to me" toggle
 let myLogin = '';                                // the connected provider login (for "assigned to me")
@@ -252,6 +254,15 @@ function authorOptions(): string[] {
 async function loadMembers(mkey: string, p: ProviderId, r: string, ws: string): Promise<void> {
   const res = await relay.providerRepoMembers(ws, p, r).catch(() => ({ ok: false } as { ok: boolean; members?: string[] }));
   if (membersFor === mkey) members = res.ok && res.members ? res.members : [];
+}
+// Existing worktrees for this repo (branch → path) so a row whose worktree survived a closed tab / crash gets a
+// ⧉ reopen-terminal icon. Fetched once per repo; a repo switch supersedes an in-flight fetch. Re-renders on arrival.
+async function loadWorktrees(mkey: string, p: ProviderId, r: string, dir: string): Promise<void> {
+  const res = await relay.worktreesList(p, r, dir).catch(() => ({ ok: false } as { ok: boolean; list?: { branch: string; path: string }[] }));
+  if (wtFor !== mkey) return;                   // repo switched → stale
+  const m = new Map<string, string>();
+  if (res.ok && res.list) for (const w of res.list) m.set(w.branch, w.path);
+  wtByBranch = m; render();
 }
 // A toggle re-queries the provider server-side, debounced so ticking several authors fires ONE fetch. render()
 // first, for an instant badge + a client-filtered preview of the already-loaded issues while the fetch runs.
@@ -409,6 +420,7 @@ function render(): void {
       <div class="isr-side">
         <span class="isr-st ${st}" data-num="${i.number}" title="${chipTitle(st)}">${st}</span>
         ${prByBranch[`issue-${i.number}`] ? `<button class="isr-pr" data-url="${esc(prByBranch[`issue-${i.number}`].url)}" title="Open pull request">PR ↗</button>` : ''}
+        ${wtByBranch.has(`issue-${i.number}`) ? `<button class="isr-term" data-num="${i.number}" title="Open a terminal in this issue's worktree">⧉</button>` : ''}
         <button class="isr-info" data-num="${i.number}" title="View issue details">ⓘ</button>
         <button class="isr-ext" data-url="${esc(i.url)}" title="Open #${i.number} on ${esc(pc.name)}">↗</button>
       </div>
@@ -427,6 +439,10 @@ function render(): void {
   });
   el.querySelectorAll<HTMLElement>('.isr-ext, .isr-pr').forEach((b) => {
     b.onclick = (e) => { e.stopPropagation(); const u = b.dataset.url; if (u) relay.openExternal(u); };
+  });
+  // ⧉ Reopen a terminal in the issue's existing worktree (after its tab was closed / the app crashed).
+  el.querySelectorAll<HTMLElement>('.isr-term').forEach((b) => {
+    b.onclick = (e) => { e.stopPropagation(); const n = Number(b.dataset.num); const wt = wtByBranch.get(`issue-${n}`); if (wt) { deps.openAgentTab({ cwd: wt, name: `#${n} terminal` }); toast(`Opened a terminal in #${n}'s worktree`, true); } };
   });
   // Status chip: queued → cancel; a live stage (working/validating/fixing) → free the slot (so a run that
   // never opens a PR can't wedge the queue); invalid → open Details (to read the reason + override).
@@ -502,6 +518,7 @@ export async function loadIssues(): Promise<void> {
   if (curKey !== lastKey) { lastKey = curKey; activeFilters.clear(); activeLabels.clear(); mineOnly = false; query = ''; const sEl = $('#issSearch') as HTMLInputElement | null; if (sEl) sEl.value = ''; }
   issuesPage = 1; issuesHasMore = false; loadingMore = false;      // reset infinite-scroll paging for the new pull
   if (membersFor !== mkey) { membersFor = mkey; members = []; void loadMembers(mkey, provider, repo, ws); } // members: once per repo, not per state/author reload
+  if (wtFor !== mkey) { wtFor = mkey; wtByBranch = new Map(); void loadWorktrees(mkey, provider, repo, dir); } // existing worktrees (reopen-terminal), once per repo
   // Server-side author filter: when authors are picked, the provider returns only their issues (a bounded set,
   // no infinite scroll) — finding matches beyond the loaded pages, not just filtering what's already here.
   const authors = activeAuthors.size ? [...activeAuthors] : undefined;

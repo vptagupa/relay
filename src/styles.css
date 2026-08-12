@@ -923,6 +923,10 @@ body.tabdrag .dz{display:block;pointer-events:auto}
 .isr-ext,.isr-info{opacity:0;background:none;border:none;color:var(--muted);cursor:pointer;font-size:12px;padding:0 2px;transition:opacity .12s}
 .isr:hover .isr-ext,.isr:hover .isr-info{opacity:.8}
 .isr-ext:hover,.isr-info:hover{color:var(--accent-2)}
+/* ⧉ reopen-terminal: visible (accent) on rows that HAVE a worktree, so it's discoverable without hovering. */
+.isr-term{background:none;border:none;color:var(--accent-2);opacity:.65;cursor:pointer;font-size:12px;padding:0 2px;transition:opacity .12s,color .12s}
+.isr:hover .isr-term{opacity:1}
+.isr-term:hover{color:var(--accent)}
 /* issue details modal (read-only) */
 .iss-det .det-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px}
 .iss-det .det-repo{display:inline-flex;align-items:center;gap:5px;font:10.5px/1.4 var(--mono);color:var(--muted)}
