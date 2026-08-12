@@ -10,7 +10,7 @@ import type { AppNotification } from './shared/types';
 
 const relay = (window as any).relay;
 
-export interface NotifDeps { activeWsId: () => string; }
+export interface NotifDeps { activeWsId: () => string; wsName: (id: string) => string; }
 let deps: NotifDeps;
 
 type ProviderId = 'github' | 'gitlab' | 'bitbucket';
@@ -39,6 +39,9 @@ const KIND_LABEL: Record<AppNotification['kind'], string> = { 'new-issue': 'New 
 // The bell menu filters notifications by tab: General (all), Issues (issue events), PR (pull-request events).
 type NotifTab = 'general' | 'issues' | 'pr';
 let notifTab: NotifTab = 'general';
+// Scope: just the active workspace (default) or EVERY workspace's notifications merged (manage them all in one place).
+type NotifScope = 'ws' | 'all';
+let notifScope: NotifScope = 'ws';
 const isIssueKind = (k: AppNotification['kind']): boolean => k === 'new-issue' || k === 'closed-issue';
 const isPrKind = (k: AppNotification['kind']): boolean => k === 'new-pr' || k === 'closed-pr';
 // Does a notification belong to the ACTIVE tab? (General matches everything.) Drives the list, the counts, and
@@ -71,6 +74,19 @@ let menuOpen = false;
 /* ----------------------------- persistence + reads ----------------------------- */
 const listFor = (ws: string): AppNotification[] => (state.settings.notificationsByWs || {})[ws] || [];
 const unreadFor = (ws: string): number => listFor(ws).filter((n) => !n.read).length;
+// The notifications the bell/menu act on for the current scope, each tagged with its workspace, newest first.
+function scopedNotes(): { ws: string; note: AppNotification }[] {
+  if (notifScope === 'all') {
+    const byWs = state.settings.notificationsByWs || {};
+    const out: { ws: string; note: AppNotification }[] = [];
+    for (const ws of Object.keys(byWs)) for (const note of byWs[ws]) out.push({ ws, note });
+    return out.sort((a, b) => b.note.ts - a.note.ts);   // merge every workspace, most recent first
+  }
+  const ws = wsKey();
+  return listFor(ws).map((note) => ({ ws, note }));
+}
+// Unread across EVERY workspace — the badge count when the bell is in "All workspaces" scope.
+const totalUnread = (): number => Object.values(state.settings.notificationsByWs || {}).reduce((n, list) => n + list.filter((x) => !x.read).length, 0);
 async function persist(byWs: Record<string, AppNotification[]>): Promise<void> {
   state.settings.notificationsByWs = byWs;                     // reflect immediately; persist in the background
   try { state.settings = await relay.patchSettings({ notificationsByWs: byWs }); } catch { /* keep the in-memory copy */ }
@@ -189,44 +205,51 @@ function firePush(notes: AppNotification[]): void {
 
 /* ----------------------------- bell + dropdown (active workspace) ----------------------------- */
 export function renderBell(): void {
-  const n = unreadFor(wsKey());
+  const n = notifScope === 'all' ? totalUnread() : unreadFor(wsKey());   // badge follows the chosen scope
   const badge = $('#notifBadge');
   if (badge) { badge.textContent = n > 99 ? '99+' : String(n); (badge as HTMLElement).style.display = n ? '' : 'none'; }
   if (menuOpen) renderMenu();
 }
 function renderMenu(): void {
   const menu = $('#notifMenu'); if (!menu) return;
-  const all = listFor(wsKey());
-  const shown = all.filter(inTab);                       // the active tab's notifications
-  const unread = (pred: (n: AppNotification) => boolean): number => all.filter((n) => !n.read && pred(n)).length;
+  const scoped = scopedNotes();                          // {ws, note} for the current scope, newest first
+  const shown = scoped.filter((x) => inTab(x.note));     // the active tab's notifications
+  const unread = (pred: (n: AppNotification) => boolean): number => scoped.filter((x) => !x.note.read && pred(x.note)).length;
   const tab = (id: NotifTab, label: string, pred: (n: AppNotification) => boolean): string => {
     const c = unread(pred);
     return `<button class="nt-tab${notifTab === id ? ' active' : ''}" data-tab="${id}">${label}${c ? `<span class="nt-tc">${c > 99 ? '99+' : c}</span>` : ''}</button>`;
   };
   const tabs = `<div class="nt-tabs">${tab('general', 'General', () => true)}${tab('issues', 'Issues', (n) => isIssueKind(n.kind))}${tab('pr', 'PR', (n) => isPrKind(n.kind))}</div>`;
-  const rows = shown.length ? shown.map((it) => `<button class="nt-item${it.read ? '' : ' unread'}" data-url="${esc(it.url)}" data-id="${esc(it.id)}">
+  const scopeBtn = (id: NotifScope, label: string): string => `<button class="nt-sc${notifScope === id ? ' on' : ''}" data-scope="${id}">${label}</button>`;
+  const scope = `<div class="nt-scope">${scopeBtn('ws', 'This workspace')}${scopeBtn('all', 'All workspaces')}</div>`;
+  const rows = shown.length ? shown.map(({ ws, note: it }) => `<button class="nt-item${it.read ? '' : ' unread'}" data-url="${esc(it.url)}" data-id="${esc(it.id)}" data-ws="${esc(ws)}">
       <span class="nt-ic">${KIND_ICON[it.kind]}</span>
-      <span class="nt-b"><span class="nt-t">${esc(KIND_LABEL[it.kind])} #${it.number}</span><span class="nt-s">${esc(it.title || it.repo)}</span><span class="nt-m">${it.actor ? `<span class="nt-who">${esc(it.actor)}</span> · ` : ''}${esc(it.repo)} · ${esc(relTime(it.ts))}</span></span>
-    </button>`).join('') : `<div class="nt-empty">No ${notifTab === 'general' ? '' : notifTab === 'pr' ? 'PR ' : 'issue '}notifications${notifTab === 'general' ? ' yet' : ' in this tab'}.</div>`;
-  menu.innerHTML = `<div class="nt-head"><span>Notifications</span><span class="nt-acts">${shown.length ? '<button class="nt-a" data-act="read">Mark all read</button><button class="nt-a" data-act="clear">Clear</button>' : ''}<button class="nt-a" data-act="settings" title="Notification settings">⚙</button></span></div>${tabs}<div class="nt-list">${rows}</div>`;
+      <span class="nt-b"><span class="nt-t">${esc(KIND_LABEL[it.kind])} #${it.number}</span><span class="nt-s">${esc(it.title || it.repo)}</span><span class="nt-m">${notifScope === 'all' ? `<span class="nt-ws">${esc(deps.wsName(ws))}</span> · ` : ''}${it.actor ? `<span class="nt-who">${esc(it.actor)}</span> · ` : ''}${esc(it.repo)} · ${esc(relTime(it.ts))}</span></span>
+    </button>`).join('') : `<div class="nt-empty">No ${notifTab === 'general' ? '' : notifTab === 'pr' ? 'PR ' : 'issue '}notifications${notifScope === 'all' ? ' across your workspaces' : notifTab === 'general' ? ' yet' : ' in this tab'}.</div>`;
+  menu.innerHTML = `<div class="nt-head"><span>Notifications</span><span class="nt-acts">${shown.length ? '<button class="nt-a" data-act="read">Mark all read</button><button class="nt-a" data-act="clear">Clear</button>' : ''}<button class="nt-a" data-act="settings" title="Notification settings">⚙</button></span></div>${scope}${tabs}<div class="nt-list">${rows}</div>`;
+  menu.querySelectorAll<HTMLElement>('.nt-sc').forEach((s) => { s.onclick = (e) => { e.stopPropagation(); notifScope = s.dataset.scope as NotifScope; renderBell(); }; }); // renderBell re-renders the badge + (menu open) the list
   menu.querySelectorAll<HTMLElement>('.nt-tab').forEach((t) => { t.onclick = (e) => { e.stopPropagation(); notifTab = t.dataset.tab as NotifTab; renderMenu(); }; });
-  menu.querySelectorAll<HTMLElement>('.nt-item').forEach((b) => { b.onclick = (e) => { e.stopPropagation(); markRead(b.dataset.id!); const u = b.dataset.url; if (u) relay.openExternal(u); toggleMenu(false); }; });
+  menu.querySelectorAll<HTMLElement>('.nt-item').forEach((b) => { b.onclick = (e) => { e.stopPropagation(); markRead(b.dataset.id!, b.dataset.ws!); const u = b.dataset.url; if (u) relay.openExternal(u); toggleMenu(false); }; });
   menu.querySelector<HTMLElement>('[data-act="read"]')?.addEventListener('click', (e) => { e.stopPropagation(); markAllRead(); });
   menu.querySelector<HTMLElement>('[data-act="clear"]')?.addEventListener('click', (e) => { e.stopPropagation(); clearAll(); });
   menu.querySelector<HTMLElement>('[data-act="settings"]')?.addEventListener('click', (e) => { e.stopPropagation(); toggleMenu(false); openNotifSettings(); });
 }
-function markRead(id: string): void {
-  const ws = wsKey(); const byWs = { ...(state.settings.notificationsByWs || {}) };
+function markRead(id: string, ws: string): void {   // ws carried on the row (its own workspace, even in All scope)
+  const byWs = { ...(state.settings.notificationsByWs || {}) };
   byWs[ws] = (byWs[ws] || []).map((n) => (n.id === id ? { ...n, read: true } : n)); void persist(byWs); renderBell();
 }
-function markAllRead(): void {   // marks read only the ACTIVE tab (General = all)
-  const ws = wsKey(); const byWs = { ...(state.settings.notificationsByWs || {}) };
-  byWs[ws] = (byWs[ws] || []).map((n) => (inTab(n) ? { ...n, read: true } : n)); void persist(byWs); renderBell();
+// Which workspaces the bulk actions touch: every one in "All" scope, else just the active workspace.
+const scopeTargets = (byWs: Record<string, AppNotification[]>): string[] => (notifScope === 'all' ? Object.keys(byWs) : [wsKey()]);
+function markAllRead(): void {   // marks read the ACTIVE tab (General = all), across the current scope
+  const byWs = { ...(state.settings.notificationsByWs || {}) };
+  for (const ws of scopeTargets(byWs)) byWs[ws] = (byWs[ws] || []).map((n) => (inTab(n) ? { ...n, read: true } : n));
+  void persist(byWs); renderBell();
 }
-function clearAll(): void {       // clears only the ACTIVE tab's notifications (General = all)
-  const ws = wsKey(); const byWs = { ...(state.settings.notificationsByWs || {}) };
-  byWs[ws] = (byWs[ws] || []).filter((n) => !inTab(n)); void persist(byWs); renderBell();
-  if (!(byWs[ws] || []).length) toggleMenu(false); // close only when nothing is left at all
+function clearAll(): void {       // clears the ACTIVE tab's notifications (General = all), across the current scope
+  const byWs = { ...(state.settings.notificationsByWs || {}) };
+  for (const ws of scopeTargets(byWs)) byWs[ws] = (byWs[ws] || []).filter((n) => !inTab(n));
+  void persist(byWs); renderBell();
+  if (!scopedNotes().length) toggleMenu(false); // close only when nothing is left in view at all
 }
 function toggleMenu(open?: boolean): void {
   const menu = $('#notifMenu'); const bell = $('#notifBell'); if (!menu || !bell) return;

@@ -19,7 +19,7 @@ import { filterHistory, railEntry } from './history';
 import { initFiles, renderFiles } from './files';
 import { initBlockView, blockHtml, bvBlockHtml, collapsedBlocks, fmtDur } from './block-view';
 import { openTplMenu, saveAsTemplate, runStartupIfPending } from './blueprints';
-import { initWorkspaces, loadWorkspaceMeta, restoreWorkspaceSnapshot, settleDeeplink, createWorkspace, openWsMenu, closeWsMenu, handleDeeplink, setActiveWsRoot, setActiveWsTheme, getActiveWsId, duplicateWorkspace, exportWorkspace, importWorkspace, toggleTrust, copyWorkspaceLink, activeWorkspaceDef, isWorkspaceTrusted } from './workspaces';
+import { initWorkspaces, loadWorkspaceMeta, restoreWorkspaceSnapshot, settleDeeplink, createWorkspace, openWsMenu, closeWsMenu, handleDeeplink, setActiveWsRoot, setActiveWsTheme, getActiveWsId, duplicateWorkspace, exportWorkspace, importWorkspace, toggleTrust, copyWorkspaceLink, activeWorkspaceDef, isWorkspaceTrusted, wsNameOf } from './workspaces';
 import { initIssues, pullIssues, loadIssues } from './issues';
 import { initPrs, loadPrs } from './prs';
 import { initTasks, renderTasks } from './tasks';
@@ -1963,7 +1963,7 @@ new ResizeObserver(() => { clearTimeout(_roT); _roT = setTimeout(() => { fitPane
   initTasks({ activeWsId: getActiveWsId, openAgentTab: (o) => { void newTab({ cwd: o.cwd, name: o.name, runCmd: o.runCmd, dbCredId: o.dbCredId }); } });
   if ((state.settings.sidebarView || 'library') === 'prs') void loadPrs(); // restore-on-boot when PR was the last view
   // Notifications — background poller (all workspaces) + the per-workspace header bell.
-  initNotifications({ activeWsId: getActiveWsId });
+  initNotifications({ activeWsId: getActiveWsId, wsName: wsNameOf });
   // Database credential templates (Settings panel) — the encrypted list the assign dialogs reference.
   initDbCreds();
   // Repository-dependency templates (Settings → Agents) — auto-select deps by main repo in Assign/Validate.

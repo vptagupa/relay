@@ -48,6 +48,8 @@ let wsActiveId = '';
 const WS_COLORS = ['#6e7bff', '#f2a93b', '#4ec46a', '#ff2e97', '#22d3ee', '#a78bfa', '#f0616a'];
 const nextWsColor = () => WS_COLORS[wsDefs.length % WS_COLORS.length];
 const activeWsDef = (): WorkspaceDef | undefined => wsDefs.find((w) => w.id === wsActiveId);
+// Resolve a workspace id → its display name (for the notifications "All workspaces" view). Falls back gracefully.
+export const wsNameOf = (id: string): string => wsDefs.find((w) => w.id === id)?.name || 'Workspace';
 const addWorkspaceDef = (def: WorkspaceDef): void => { wsDefs.push(def); }; // for blueprints.ts (spawn-from-template)
 export const getActiveWsId = (): string => wsActiveId;
 

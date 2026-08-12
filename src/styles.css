@@ -171,6 +171,12 @@ button{font-family:inherit;color:inherit;cursor:pointer;border:none;background:n
 .nt-tab:hover{color:var(--text-dim)}
 .nt-tab.active{color:var(--text);border-bottom-color:var(--accent)}
 .nt-tc{background:var(--accent);color:var(--on-accent);border-radius:99px;font:600 9px/1.4 var(--mono);padding:1px 5px;min-width:14px;text-align:center}
+/* Scope toggle: active workspace vs every workspace's notifications merged. */
+.nt-scope{flex-shrink:0;display:flex;gap:4px;padding:7px 10px 6px;border-bottom:1px solid var(--border)}
+.nt-sc{flex:1;padding:4px 8px;background:var(--surface-2);border:1px solid var(--border);border-radius:6px;color:var(--muted);font:600 10.5px var(--sans);cursor:pointer;transition:color .12s,background .12s,border-color .12s}
+.nt-sc:hover{color:var(--text-dim)}
+.nt-sc.on{background:var(--accent-ghost);border-color:var(--accent-line);color:var(--accent)}
+.nt-ws{color:var(--accent);font-weight:600}   /* which workspace a row belongs to, shown in All-workspaces scope */
 .nt-list{overflow-y:auto;min-height:0;padding:4px}
 .nt-empty{padding:24px 12px;text-align:center;color:var(--muted);font:11.5px var(--sans)}
 .nt-item{display:flex;gap:10px;width:100%;text-align:left;background:transparent;border:none;padding:13px 14px;cursor:pointer}
