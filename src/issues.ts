@@ -631,9 +631,13 @@ async function loadMoreIssues(): Promise<void> {
 // issue isn't currently pulled (which would over-launch past CAP or tear down the PR poll). A running stage
 // (validating/fixing) holds a slot; reaching review (applyPrs) or invalid frees it.
 const rkPrefix = (): string => `${provider}:${repo || ''}#`;
+// GLOBAL occupancy — the CAP is a total concurrency limit and the queue/drain are cross-repo (each run has its
+// OWN worktree), so count EVERY occupying run. Counting only the active repo let another repo's stuck slot wedge
+// the whole queue: a run stuck 'fixing' (its PR went undetected while rate-limited) would block assigns with no
+// visible cause — the queue reads "full" though no terminal is live. Free a stuck slot via its status chip.
 const workingCount = (): number => {
-  let c = 0; const pre = rkPrefix();
-  for (const [k, s] of runStatus) if (k.startsWith(pre) && OCCUPYING.includes(s)) c++;
+  let c = 0;
+  for (const s of runStatus.values()) if (OCCUPYING.includes(s)) c++;
   return c;
 };
 // Apply a fresh PR/MR map: light up review chips, and free the slot of any occupying run whose branch now
@@ -680,7 +684,7 @@ async function pollPrs(): Promise<void> {
   applyPrs(pr.prs); // a newly-opened PR/MR may free a slot; also refreshes review chips / PR buttons
 }
 function ensurePolling(): void {
-  const active = queue.some((q) => q.provider === provider && q.repo === repo) || workingCount() > 0;
+  const active = queue.length > 0 || workingCount() > 0;   // any queued item or working agent (any repo) keeps the PR poller alive
   if (active && pollTimer == null) pollTimer = window.setInterval(() => void pollPrs(), 30000);
   else if (!active && pollTimer != null) { clearInterval(pollTimer); pollTimer = null; }
 }
