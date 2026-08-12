@@ -666,13 +666,15 @@ async function locateRepoRoot(git: string, provider: ProviderId, repo: string, d
 }
 // Recursively sum file bytes under a dir. Skips `.deps` (junctions into the shared managed clones — not this
 // worktree's own bytes) and symlinks, so a worktree's size isn't inflated by (or looped through) linked repos.
-async function dirSize(p: string): Promise<number> {
+async function dirSize(p: string, deadline = Infinity): Promise<number> {
+  if (Date.now() > deadline) return 0;
   let total = 0;
   const ents = await fsp.readdir(p, { withFileTypes: true }).catch(() => [] as import('fs').Dirent[]);
   for (const e of ents) {
+    if (Date.now() > deadline) break;   // time-budget: bail out; the returned size becomes a lower bound
     if (e.isSymbolicLink() || e.name === '.deps') continue;
     const full = path.join(p, e.name);
-    if (e.isDirectory()) total += await dirSize(full);
+    if (e.isDirectory()) total += await dirSize(full, deadline);
     else if (e.isFile()) { const st = await fsp.stat(full).catch(() => null); if (st) total += st.size; }
   }
   return total;
@@ -800,25 +802,47 @@ ipcMain.handle('app:stats', () => {
     return { ramMB: Math.round(ramKB / 1024), cpuPct: Math.round(cpu) };
   } catch { return { ramMB: 0, cpuPct: 0 }; }
 });
-// Every worktree on disk (across all repos) with its size + age, plus the managed-clone cache size — for the
-// "Manage worktrees" dialog and the About storage total. Walks the tree, so it's a moment; called on demand.
+// Every worktree on disk (branch + age only) — FAST (no size walk; summing bytes over full checkouts +
+// .git + node_modules is far too slow, even native `du` times out). Sizes come lazily via worktrees:size.
 ipcMain.handle('worktrees:list', async () => {
   try {
     const wtBase = path.join(app.getPath('userData'), 'worktrees');
-    const list: { folder: string; branch: string; path: string; sizeMB: number; mtimeMs: number }[] = [];
+    const list: { folder: string; branch: string; path: string; mtimeMs: number }[] = [];
     for (const folder of await fsp.readdir(wtBase).catch(() => [] as string[])) {
       const fpath = path.join(wtBase, folder);
       if (!(await fsp.stat(fpath).catch(() => null))?.isDirectory()) continue;
       for (const branch of await fsp.readdir(fpath).catch(() => [] as string[])) {
         const wp = path.join(fpath, branch);
         const st = await fsp.stat(wp).catch(() => null); if (!st?.isDirectory()) continue;
-        list.push({ folder, branch, path: wp, sizeMB: Math.round((await dirSize(wp)) / 1048576), mtimeMs: st.mtimeMs });
+        list.push({ folder, branch, path: wp, mtimeMs: st.mtimeMs });
       }
     }
-    list.sort((a, b) => b.sizeMB - a.sizeMB);
-    const reposMB = Math.round((await dirSize(path.join(app.getPath('userData'), 'repos')).catch(() => 0)) / 1048576);
-    return { ok: true, list, reposMB };
-  } catch (err) { logFatal('worktrees:list', err); return { ok: false, list: [], reposMB: 0 }; }
+    list.sort((a, b) => b.mtimeMs - a.mtimeMs);   // most-recently-used first
+    return { ok: true, list };
+  } catch (err) { logFatal('worktrees:list', err); return { ok: false, list: [] }; }
+});
+// Size of ONE worktree, time-budgeted (~2.5s) so a giant node_modules can't hang the UI. `partial` ⇒ the walk
+// was cut short and sizeMB is a lower bound. Path must be under the worktrees dir.
+ipcMain.handle('worktrees:size', async (_e, p: { path: string }) => {
+  try {
+    const wtBase = path.resolve(path.join(app.getPath('userData'), 'worktrees'));
+    const target = path.resolve(typeof p?.path === 'string' ? p.path : '');
+    if (target === wtBase || !target.startsWith(wtBase + path.sep)) return { ok: false };
+    const deadline = Date.now() + 2500;
+    const bytes = await dirSize(target, deadline);
+    return { ok: true, sizeMB: Math.round(bytes / 1048576), partial: Date.now() > deadline };
+  } catch { return { ok: false }; }
+});
+// Budgeted total disk of worktrees + the clone cache (a lower bound when it hits the ~5s budget) — for the
+// About "Storage" line, so it stays responsive instead of walking millions of files to completion.
+ipcMain.handle('worktrees:total', async () => {
+  try {
+    const ud = app.getPath('userData');
+    const deadline = Date.now() + 5000;
+    const wt = await dirSize(path.join(ud, 'worktrees'), deadline);
+    const repos = await dirSize(path.join(ud, 'repos'), deadline);
+    return { ok: true, totalMB: Math.round((wt + repos) / 1048576), partial: Date.now() > deadline };
+  } catch { return { ok: false, totalMB: 0, partial: false }; }
 });
 // Delete a worktree dir to reclaim disk. Path MUST be strictly under the worktrees dir (never delete elsewhere).
 // git's registration for it becomes stale and is pruned on the next worktree-add (pruneAndSweepWorktrees).

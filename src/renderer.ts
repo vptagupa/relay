@@ -1347,7 +1347,7 @@ declare const __APP_VERSION__: string;
 declare const __RECENT_COMMITS__: readonly string[];
 // The About dialog — a brief description, the current version, and the 3 most recent commit subjects (as of
 // this build). Self-contained modal (Close button / Escape; no backdrop-click close, like the other dialogs).
-type WtItem = { folder: string; branch: string; path: string; sizeMB: number; mtimeMs: number };
+type WtItem = { folder: string; branch: string; path: string; mtimeMs: number };
 const fmtMB = (mb: number): string => (mb >= 1024 ? (mb / 1024).toFixed(1) + ' GB' : Math.max(0, Math.round(mb)) + ' MB');
 function openAbout(): void {
   const version = typeof __APP_VERSION__ === 'string' ? __APP_VERSION__ : '';
@@ -1377,9 +1377,11 @@ function openAbout(): void {
     if (r) r.textContent = fmtMB(s.ramMB); if (c) c.textContent = s.cpuPct + '%';
   };
   void tick(); poll = window.setInterval(tick, 1500);
-  void relay.worktreesManage().then((res: { ok: boolean; list: WtItem[]; reposMB: number }) => {
+  // Storage is a budgeted walk in main (a lower bound if it hits the ~5s cap) — shows "…" then the number,
+  // never hangs. Exact byte-summing over full checkouts / node_modules is impractical (even `du` times out).
+  void relay.worktreesTotal().then((res: { ok: boolean; totalMB: number; partial: boolean }) => {
     if (!root.isConnected) return; const st = root.querySelector('#abStore');
-    if (st) st.textContent = res.ok ? fmtMB(res.list.reduce((n, w) => n + w.sizeMB, 0) + res.reposMB) : '—';
+    if (st) st.textContent = res.ok ? (res.partial ? '≥ ' : '') + fmtMB(res.totalMB) : '—';
   }).catch(() => {});
   root.querySelector('#abWorktrees')?.addEventListener('click', () => { close(); openWorktreesManager(); });
 }
@@ -1396,26 +1398,52 @@ function openWorktreesManager(): void {
   document.body.appendChild(root); document.addEventListener('keydown', onKey);
   root.querySelector('[data-x]')?.addEventListener('click', close);
   let items: WtItem[] = [];
+  const sizes = new Map<string, { mb: number; partial: boolean }>();   // path → size, filled lazily in the background
   const rel = (ms: number): string => { const s = Math.max(0, Math.floor((Date.now() - ms) / 1000)); if (s < 3600) return Math.floor(s / 60) + 'm ago'; const h = Math.floor(s / 3600); return h < 24 ? h + 'h ago' : Math.floor(h / 24) + 'd ago'; };
   const repoName = (folder: string): string => folder.replace(/-[0-9a-f]{8}$/, '');   // strip the disambiguating hash
-  const draw = (): void => {
-    const listEl = root.querySelector('#wtList'); const sub = root.querySelector('#wtSub'); if (!listEl) return;
-    if (sub) sub.textContent = `${items.length} · ${fmtMB(items.reduce((n, w) => n + w.sizeMB, 0))}`;
-    listEl.innerHTML = items.length ? items.map((w) => `<div class="wt-row">
-        <div class="wt-info"><div class="wt-branch">${esc(w.branch)}</div><div class="wt-meta">${esc(repoName(w.folder))} · ${fmtMB(w.sizeMB)} · ${esc(rel(w.mtimeMs))}</div></div>
-        <button class="wt-del" data-path="${esc(w.path)}">Delete</button>
-      </div>`).join('') : '<div class="mut" style="padding:14px">No worktrees — nothing to clean up.</div>';
-    listEl.querySelectorAll<HTMLButtonElement>('.wt-del').forEach((b) => {
-      b.onclick = async (): Promise<void> => {
-        if (b.dataset.confirm !== '1') { b.dataset.confirm = '1'; b.textContent = 'Confirm?'; b.classList.add('danger'); setTimeout(() => { if (b.isConnected) { b.dataset.confirm = ''; b.textContent = 'Delete'; b.classList.remove('danger'); } }, 3000); return; }
-        b.textContent = 'Deleting…'; b.disabled = true;
-        const res = await relay.worktreeRemove(b.dataset.path!).catch(() => ({ ok: false }));
-        if (res.ok) { items = items.filter((w) => w.path !== b.dataset.path); draw(); } else { b.textContent = 'Failed'; b.disabled = false; }
-      };
-    });
+  const sizeText = (p: string): string => { const s = sizes.get(p); return s ? (s.partial ? '≥ ' : '') + fmtMB(s.mb) : '…'; };
+  const updateSub = (): void => {
+    const sub = root.querySelector('#wtSub'); if (!sub) return;
+    let sum = 0, complete = true; for (const w of items) { const s = sizes.get(w.path); if (!s || s.partial) complete = false; if (s) sum += s.mb; }
+    sub.textContent = items.length ? `${items.length} · ${complete ? '' : '≥ '}${fmtMB(sum)}` : '0';
   };
-  void relay.worktreesManage().then((res: { ok: boolean; list: WtItem[]; reposMB: number }) => {
-    if (!root.isConnected) return; items = res.ok ? res.list : []; draw();
+  const wireDelete = (b: HTMLButtonElement): void => {
+    b.onclick = async (): Promise<void> => {
+      const p = b.dataset.path!;
+      if (b.dataset.confirm !== '1') { b.dataset.confirm = '1'; b.textContent = 'Confirm?'; b.classList.add('danger'); setTimeout(() => { if (b.isConnected) { b.dataset.confirm = ''; b.textContent = 'Delete'; b.classList.remove('danger'); } }, 3000); return; }
+      b.textContent = 'Deleting…'; b.disabled = true;
+      const res = await relay.worktreeRemove(p).catch(() => ({ ok: false }));
+      if (res.ok) {
+        items = items.filter((w) => w.path !== p); sizes.delete(p); b.closest('.wt-row')?.remove();
+        if (!items.length) { const l = root.querySelector('#wtList'); if (l) l.innerHTML = '<div class="mut" style="padding:14px">No worktrees — nothing to clean up.</div>'; }
+        updateSub();
+      } else { b.textContent = 'Failed'; b.disabled = false; }
+    };
+  };
+  const rowHtml = (w: WtItem): string => `<div class="wt-row" data-path="${esc(w.path)}">
+      <div class="wt-info"><div class="wt-branch">${esc(w.branch)}</div><div class="wt-meta">${esc(repoName(w.folder))} · <span class="wt-size">${sizeText(w.path)}</span> · ${esc(rel(w.mtimeMs))}</div></div>
+      <button class="wt-del" data-path="${esc(w.path)}">Delete</button>
+    </div>`;
+  // Measure sizes one-at-a-time in the background (each budgeted in main); fill each row's size cell + the total
+  // as they land, WITHOUT re-rendering rows (so an in-progress delete-confirm isn't reset).
+  const measureAll = async (): Promise<void> => {
+    for (const w of items) {
+      if (!root.isConnected) return;
+      const r = await relay.worktreeSize(w.path).catch(() => ({ ok: false } as { ok: boolean; sizeMB?: number; partial?: boolean }));
+      if (r.ok && typeof r.sizeMB === 'number') {
+        sizes.set(w.path, { mb: r.sizeMB, partial: !!r.partial });
+        const cell = root.querySelector(`.wt-row[data-path="${CSS.escape(w.path)}"] .wt-size`); if (cell) cell.textContent = sizeText(w.path);
+        updateSub();
+      }
+    }
+  };
+  void relay.worktreesManage().then((res: { ok: boolean; list: WtItem[] }) => {
+    if (!root.isConnected) return;
+    items = res.ok ? res.list : [];
+    const listEl = root.querySelector('#wtList');
+    if (listEl) listEl.innerHTML = items.length ? items.map(rowHtml).join('') : '<div class="mut" style="padding:14px">No worktrees — nothing to clean up.</div>';
+    root.querySelectorAll<HTMLButtonElement>('.wt-del').forEach(wireDelete);
+    updateSub(); void measureAll();
   }).catch(() => { const l = root.querySelector('#wtList'); if (l) l.innerHTML = '<div class="mut" style="padding:14px">Couldn’t scan worktrees.</div>'; });
 }
 function openSettings() { reflectSettings(); selectSettingsTab('general'); $('#settings').classList.add('show'); $('#scrim').classList.add('show'); }

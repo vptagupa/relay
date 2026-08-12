@@ -145,9 +145,12 @@ const api = {
   linkDeps: (wt: string, dir: string, deps: { provider: ProviderId; repo: string }[]): Promise<{ ok: boolean; linked?: { name: string; repo: string }[]; error?: string }> => ipcRenderer.invoke('git:link-deps', { wt, dir, deps }),
   // List EXISTING worktrees for a repo (branch → path), no side effects — to reopen a terminal in an issue/task worktree after its tab/app closed.
   worktreesList: (provider: ProviderId, repo: string, dir: string): Promise<{ ok: boolean; list: { branch: string; path: string }[] }> => ipcRenderer.invoke('git:worktrees', { provider, repo, dir }),
-  // About dialog: live app resource usage (all processes) + a walk of every worktree (size/age) and the clone cache size, + delete-to-reclaim.
+  // About dialog: live app resource usage (all processes), a fast worktree list (sizes filled lazily/budgeted),
+  // a budgeted total, and delete-to-reclaim.
   appStats: (): Promise<{ ramMB: number; cpuPct: number }> => ipcRenderer.invoke('app:stats'),
-  worktreesManage: (): Promise<{ ok: boolean; list: { folder: string; branch: string; path: string; sizeMB: number; mtimeMs: number }[]; reposMB: number }> => ipcRenderer.invoke('worktrees:list'),
+  worktreesManage: (): Promise<{ ok: boolean; list: { folder: string; branch: string; path: string; mtimeMs: number }[] }> => ipcRenderer.invoke('worktrees:list'),
+  worktreeSize: (path: string): Promise<{ ok: boolean; sizeMB?: number; partial?: boolean }> => ipcRenderer.invoke('worktrees:size', { path }),
+  worktreesTotal: (): Promise<{ ok: boolean; totalMB: number; partial: boolean }> => ipcRenderer.invoke('worktrees:total'),
   worktreeRemove: (path: string): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke('worktrees:remove', { path }),
   // Tasks: a validate-only worktree (branch task-<id> off the latest default) + filing a validated task as a real issue.
   taskWorktreeAdd: (provider: ProviderId, repo: string, dir: string, id: string, brief: string): Promise<{ ok: boolean; path?: string; branch?: string; reused?: boolean; briefRel?: string; error?: string }> => ipcRenderer.invoke('git:task-worktree-add', { provider, repo, dir, id, brief }),
