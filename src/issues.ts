@@ -439,7 +439,7 @@ function render(): void {
       <div class="isr-hash">#${i.number}</div>
       <div class="isr-body">
         <div class="isr-title">${esc(i.title)}</div>
-        ${dr ? `<div class="isr-repo" title="${esc(dr)}">${esc(dr)}</div>` : ''}
+        ${(i.author || dr) ? `<div class="isr-repo"${dr ? ` title="${esc(dr)}"` : ''}>${i.author ? `<span class="isr-author" title="Created by ${esc(i.author)}">✍ ${esc(i.author)}</span>` : ''}${i.author && dr ? ' · ' : ''}${dr ? esc(dr) : ''}</div>` : ''}
         <div class="isr-labs">
           ${i.labels.map(labelHtml).join('')}
           ${tags.map((t) => `<span class="isr-tag" data-key="${esc(key)}" data-tag="${esc(t)}" title="Remove #${esc(t)}">#${esc(t)}<span class="x">×</span></span>`).join('')}
@@ -672,6 +672,7 @@ function drainQueue(): void {
 // something to drive (a queued item or a working agent for this repo), and stops itself otherwise.
 async function pollPrs(): Promise<void> {
   if (issScope === 'all') return;   // All-repos has no single active repo; PR detection (prByBranch) is per-repo, so skip it (review chips/PR buttons are single-repo only)
+  const rl = await relay.providerRateLimit().catch(() => null); if (rl?.limited) return;   // rate-limited → skip
   const forProvider = provider, forRepo = repo, ws = wsKey();
   if (!forRepo) { ensurePolling(); return; }
   const pr = await relay.providerPrs(ws, forProvider, forRepo).catch(() => null);

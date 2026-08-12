@@ -106,6 +106,8 @@ function watchedWorkspaces(): string[] {
 async function pollAll(): Promise<void> {
   if (polling) return; polling = true;
   try {
+    const rl = await relay.providerRateLimit().catch(() => null);
+    if (rl?.limited) return;   // API rate-limited → skip this cycle (conditional requests keep most polls free anyway)
     const fresh: { ws: string; note: AppNotification }[] = [];
     for (const ws of watchedWorkspaces()) {
       for (const repoId of watchedRepos(ws)) {

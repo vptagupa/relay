@@ -33,23 +33,57 @@ interface ApiResult { ok: boolean; status: number; json: unknown; }
 
 // A minimal HTTPS request that resolves to { status, text } and never rejects. A 20s timeout guards the
 // panel/poll from a hung connection. Exported for main.ts's GitHub device-flow handlers.
-export function httpsReq(host: string, pathname: string, method: string, headers: Record<string, string>, body?: string): Promise<{ status: number; text: string }> {
+export function httpsReq(host: string, pathname: string, method: string, headers: Record<string, string>, body?: string): Promise<{ status: number; text: string; headers: Record<string, string | string[] | undefined> }> {
   return new Promise((resolve) => {
     let done = false;
-    const finish = (v: { status: number; text: string }) => { if (!done) { done = true; resolve(v); } };
+    const finish = (v: { status: number; text: string; headers: Record<string, string | string[] | undefined> }) => { if (!done) { done = true; resolve(v); } };
     const req = https.request({ host, path: pathname, method, headers: { 'User-Agent': 'SlayerT', ...headers }, timeout: 20000 }, (res) => {
-      let data = ''; res.on('data', (c) => (data += c)); res.on('end', () => finish({ status: res.statusCode || 0, text: data }));
+      let data = ''; res.on('data', (c) => (data += c)); res.on('end', () => finish({ status: res.statusCode || 0, text: data, headers: res.headers }));
     });
-    req.on('error', () => finish({ status: 0, text: '' }));
-    req.on('timeout', () => { req.destroy(); finish({ status: 0, text: '' }); });
+    req.on('error', () => finish({ status: 0, text: '', headers: {} }));
+    req.on('timeout', () => { req.destroy(); finish({ status: 0, text: '', headers: {} }); });
     if (body) req.write(body);
     req.end();
   });
 }
-// A GET that resolves to { ok, status, json }; ok = 2xx and body parsed. Never rejects.
+// Conditional-request cache + rate-limit tracker. GitHub/GitLab honour If-None-Match: an unchanged resource comes
+// back 304 and DOESN'T count against the hourly limit — the difference between a poller that drains the quota
+// and one that costs ~nothing. Keyed by host+path+token so a different account never reads another's cached body.
+interface EtagEntry { etag: string; json: unknown; }
+const etagCache = new Map<string, EtagEntry>();
+let rlRemaining = Infinity;   // last-seen X-RateLimit-Remaining (core)
+let rlReset = 0;              // epoch ms when the window resets
+let rlBackoffUntil = 0;       // pause API calls until this epoch ms (set on a 403/429 rate-limit hit)
+export function rateLimitStatus(): { remaining: number; resetMs: number; backoffUntil: number; limited: boolean } {
+  return { remaining: rlRemaining, resetMs: rlReset, backoffUntil: rlBackoffUntil, limited: Date.now() < rlBackoffUntil };
+}
+const hdr = (h: Record<string, string | string[] | undefined>, k: string): string => { const v = h[k]; return Array.isArray(v) ? (v[0] || '') : (v || ''); };
+// A short, non-reversible tag of the auth header, so the ETag cache never serves one token's body to another.
+function tokenTag(headers: Record<string, string>): string {
+  const a = headers['Authorization'] || headers['PRIVATE-TOKEN'] || '';
+  let h = 0; for (let i = 0; i < a.length; i++) h = (Math.imul(h, 31) + a.charCodeAt(i)) | 0;
+  return String(h);
+}
+// A GET that resolves to { ok, status, json }; ok = 2xx and body parsed. Never rejects. Uses a conditional
+// request (If-None-Match) so an unchanged resource returns 304 — free (no rate-limit cost) — and serves the
+// cached body; also records X-RateLimit headers and sets a backoff window on a rate-limit hit.
 async function apiGet(host: string, pathname: string, headers: Record<string, string>): Promise<ApiResult> {
-  const r = await httpsReq(host, pathname, 'GET', headers);
+  const ck = `${host} ${pathname} ${tokenTag(headers)}`;
+  const cached = etagCache.get(ck);
+  const r = await httpsReq(host, pathname, 'GET', cached ? { ...headers, 'If-None-Match': cached.etag } : headers);
+  const rem = Number(hdr(r.headers, 'x-ratelimit-remaining')); if (!Number.isNaN(rem)) rlRemaining = rem;
+  const rst = Number(hdr(r.headers, 'x-ratelimit-reset')); if (rst) rlReset = rst * 1000;
+  if (r.status === 304 && cached) return { ok: true, status: 200, json: cached.json };   // unchanged → free; serve cache
+  if ((r.status === 403 || r.status === 429) && (rem === 0 || hdr(r.headers, 'retry-after'))) {
+    const ra = Number(hdr(r.headers, 'retry-after'));
+    rlBackoffUntil = Date.now() + (Number.isNaN(ra) || !ra ? Math.max(60000, rlReset - Date.now()) : ra * 1000);
+  }
   let json: unknown = null; try { json = JSON.parse(r.text); } catch { /* non-json error body */ }
+  const etag = hdr(r.headers, 'etag');
+  if (r.status >= 200 && r.status < 300 && etag) {
+    if (etagCache.size > 800) etagCache.delete(etagCache.keys().next().value as string); // soft cap (oldest-out)
+    etagCache.set(ck, { etag, json });
+  }
   return { ok: r.status >= 200 && r.status < 300, status: r.status, json };
 }
 // A JSON POST (creating an issue), same shape as apiGet. Never rejects. Sends an explicit Content-Length so a

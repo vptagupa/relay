@@ -5,7 +5,7 @@ import { promises as fsp, appendFileSync, existsSync, mkdirSync, copyFileSync, r
 import { exec, execFile } from 'node:child_process';
 import http from 'node:http';
 import { createHash, randomBytes } from 'node:crypto';
-import { httpsReq, PROVIDERS, providerOf, providerFromRemote, bitbucketExchangeCode, bitbucketAuthorizeUrl, bbOAuthConfigured, BB_OAUTH_PORT, BB_REDIRECT_URI, getOAuthApp, setOAuthApp, githubClientId, migrateGlobalSecretsToWs, type ProviderId } from './providers';
+import { httpsReq, PROVIDERS, providerOf, providerFromRemote, bitbucketExchangeCode, bitbucketAuthorizeUrl, bbOAuthConfigured, BB_OAUTH_PORT, BB_REDIRECT_URI, getOAuthApp, setOAuthApp, githubClientId, migrateGlobalSecretsToWs, rateLimitStatus, type ProviderId } from './providers';
 import { createTerm, writeTerm, resizeTerm, detachTerm, killTerm, killAll, isAltScreen, termStats, setReapLogger } from './pty';
 import { startWebhookServer, stopWebhookServer, webhookRunning } from './webhooks';
 import * as store from './store';
@@ -542,6 +542,8 @@ ipcMain.handle('provider:repo-members', async (_e, p: { provider: ProviderId; ws
   if (!validRepo(p?.repo)) return { ok: false, error: 'Invalid repository' };
   return a.repoMembers(p?.ws, p.repo);
 });
+// API rate-limit state (from the conditional-request layer) — the pollers back off when limited.
+ipcMain.handle('provider:rate-limit', () => rateLimitStatus());
 // Create an issue on the provider (Tasks: file a validated task as a real issue).
 ipcMain.handle('provider:create-issue', async (_e, p: { provider: ProviderId; ws: string; repo: string; title: string; body: string }) => {
   const a = providerOf(p?.provider); if (!a) return badProvider;
