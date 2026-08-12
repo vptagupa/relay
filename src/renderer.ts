@@ -205,7 +205,17 @@ async function newTab(seed?: Partial<OpenTab> & { libId?: string; runCmd?: strin
   if (seed?.bkNonce && !reattached) tab.bkNonce = uid();
   if (activate) switchTab(id);
   renderTabs(); persistWorkspace();
+  void resolveTabRepo(tab); // fill the tab's repo (for its hover tooltip) from the cwd's git remote — non-blocking
   return tab;
+}
+// Resolve the git repo (owner/name) for a tab's cwd — shown in the tab's hover tooltip when available. A cheap
+// local git call, deduped by cwd (cd within the same repo won't refetch), re-rendering the tabs when it changes.
+async function resolveTabRepo(t: Tab): Promise<void> {
+  const cwd = t.cwd; if (!cwd || t.repoCwd === cwd) return;
+  t.repoCwd = cwd;
+  const inf = await relay.providerRepoFromRemote(cwd).catch(() => null);
+  const repo = (inf && inf.repo) || '';
+  if (t.repo !== repo) { t.repo = repo; renderTabs(); }
 }
 // "Add a folder": pick a directory and immediately open a new terminal rooted there,
 // named after the folder. The chosen folder also becomes the current project (so plain
@@ -436,7 +446,7 @@ function tabHtml(t: Tab): string {
   const activeInGroup = t.id === state.gv[t.group]; // the visible tab of its own group
   const running = runningTabs.has(t.id) ? ' running' : '';
   // VS Code-style: while a tab is producing live output, the close slot shows a dot (reverts to ✕ on hover).
-  return `<div class="tab ${activeInGroup ? 'active' : ''}${(t.tabBg || t.tabFg) ? ' colored' : ''}${running}" draggable="true" data-tab="${t.id}" title="${esc(t.name)} · ${esc(modelById(t.model).short)}"${style}>
+  return `<div class="tab ${activeInGroup ? 'active' : ''}${(t.tabBg || t.tabFg) ? ' colored' : ''}${running}" draggable="true" data-tab="${t.id}" title="${esc(t.name)} · ${esc(modelById(t.model).short)}${t.repo ? ` · ${esc(t.repo)}` : ''}"${style}>
       <span class="tab-glyph"${fgStyle}>${svgIcon('i-term', 13)}</span><span class="tab-name" data-rename="${t.id}">${esc(t.name)}</span>
       <span class="tab-close" data-close="${t.id}" title="Close"><i class="tab-live" title="Running — live output"></i><span class="tab-x">✕</span></span>
     </div>`;
@@ -848,7 +858,7 @@ relay.onPtyBlock((id: string, ev: { type: 'start' | 'update' | 'end'; block: Blo
   // The shell reported its working directory (fires each prompt) — keep the tab's cwd live so the
   // cd autocomplete lists the *current* folder and the status bar stays accurate after a `cd`.
   if (ev.type === 'cwd') {
-    if (ev.cwd && ev.cwd !== t.cwd) { t.cwd = ev.cwd; if (state.active === id) updateStatus(); }
+    if (ev.cwd && ev.cwd !== t.cwd) { t.cwd = ev.cwd; if (state.active === id) updateStatus(); void resolveTabRepo(t); } // cd'd elsewhere → refresh the tab's repo (tooltip)
     runStartupIfPending(id); // a template's startup command runs on the terminal's first prompt (shell ready)
     return;
   }
