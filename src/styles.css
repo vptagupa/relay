@@ -405,6 +405,23 @@ button{font-family:inherit;color:inherit;cursor:pointer;border:none;background:n
 .about-ver{font-size:12.5px;color:var(--text);margin-top:12px}
 .about-commits{margin:6px 0 0;padding-left:18px;display:flex;flex-direction:column;gap:4px}
 .about-commits li{font-size:12px;color:var(--text-dim);line-height:1.4}
+/* About: live resource usage + the worktree-manager link. */
+.about-stats{display:flex;gap:16px;margin-top:10px;padding:8px 10px;background:var(--surface-2);border:1px solid var(--border);border-radius:8px;font:11px/1.4 var(--mono);color:var(--muted)}
+.about-stats b{color:var(--text);font-weight:600}
+.about-link{margin-top:8px;background:none;border:none;color:var(--accent);font:600 12px var(--sans);cursor:pointer;padding:2px 0;text-align:left}
+.about-link:hover{text-decoration:underline}
+/* Worktree manager. */
+.wt-card{width:min(560px,94vw)}
+.wt-card .hd .t small{margin-left:8px;color:var(--muted);font:500 11px var(--mono)}
+.wt-list{max-height:min(52vh,420px);overflow-y:auto;display:flex;flex-direction:column;gap:4px}
+.wt-row{display:flex;align-items:center;gap:10px;padding:8px 10px;border:1px solid var(--border);border-radius:8px;background:var(--surface-2)}
+.wt-info{flex:1;min-width:0}
+.wt-branch{font:600 12.5px var(--mono);color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.wt-meta{font:10.5px/1.4 var(--mono);color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:1px}
+.wt-del{flex:none;background:none;border:1px solid var(--border-strong);border-radius:6px;color:var(--muted);font:600 11px var(--sans);padding:4px 10px;cursor:pointer;transition:color .12s,border-color .12s,background .12s}
+.wt-del:hover{color:var(--err);border-color:var(--err)}
+.wt-del.danger{color:#fff;background:var(--err);border-color:var(--err)}
+.wt-del:disabled{opacity:.6;cursor:default}
 .field .set{padding:0 12px;border-radius:8px;background:var(--accent);color:var(--on-accent);font-weight:600;font-size:12.5px}
 .field .state{font-size:11px;margin-top:5px}
 /* theme picker */

@@ -1347,6 +1347,8 @@ declare const __APP_VERSION__: string;
 declare const __RECENT_COMMITS__: readonly string[];
 // The About dialog — a brief description, the current version, and the 3 most recent commit subjects (as of
 // this build). Self-contained modal (Close button / Escape; no backdrop-click close, like the other dialogs).
+type WtItem = { folder: string; branch: string; path: string; sizeMB: number; mtimeMs: number };
+const fmtMB = (mb: number): string => (mb >= 1024 ? (mb / 1024).toFixed(1) + ' GB' : Math.max(0, Math.round(mb)) + ' MB');
 function openAbout(): void {
   const version = typeof __APP_VERSION__ === 'string' ? __APP_VERSION__ : '';
   const commits = Array.isArray(__RECENT_COMMITS__) ? __RECENT_COMMITS__ : [];
@@ -1356,15 +1358,65 @@ function openAbout(): void {
       <div class="bd">
         <div class="about-desc">A cross-platform terminal with a Warp-style command-blocks view, nested split panes with per-pane tabs, a session Library &amp; Files browser, a multi-provider Issue / PR agent with staged pipelines, and end-to-end-encrypted cloud sync.</div>
         <div class="about-ver">Version <b>${esc(version || '—')}</b></div>
+        <div class="about-stats"><span>RAM <b id="abRam">…</b></span><span>CPU <b id="abCpu">…</b></span><span>Storage <b id="abStore">…</b></span></div>
+        <button class="about-link" id="abWorktrees">🗂 Manage worktrees…</button>
         <label class="iss-lbl">Recent changes</label>
         <ul class="about-commits">${commits.length ? commits.map((c) => `<li>${esc(c)}</li>`).join('') : '<li class="mut">—</li>'}</ul>
       </div>
       <div class="ft"><span class="hint"></span><span class="r"><button class="tpl-btn pri" data-x>Close</button></span></div>
     </div>`;
   const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') { e.preventDefault(); close(); } };
-  const close = () => { root.remove(); document.removeEventListener('keydown', onKey); };
+  let poll: number | null = null;
+  const close = () => { if (poll) clearInterval(poll); root.remove(); document.removeEventListener('keydown', onKey); };
   document.body.appendChild(root); document.addEventListener('keydown', onKey);
   root.querySelector('[data-x]')?.addEventListener('click', close);
+  // Live RAM/CPU (polled while open) + a one-shot storage total (worktrees + clone cache — walked in main).
+  const tick = async (): Promise<void> => {
+    const s = await relay.appStats().catch(() => null); if (!s || !root.isConnected) return;
+    const r = root.querySelector('#abRam'); const c = root.querySelector('#abCpu');
+    if (r) r.textContent = fmtMB(s.ramMB); if (c) c.textContent = s.cpuPct + '%';
+  };
+  void tick(); poll = window.setInterval(tick, 1500);
+  void relay.worktreesManage().then((res: { ok: boolean; list: WtItem[]; reposMB: number }) => {
+    if (!root.isConnected) return; const st = root.querySelector('#abStore');
+    if (st) st.textContent = res.ok ? fmtMB(res.list.reduce((n, w) => n + w.sizeMB, 0) + res.reposMB) : '—';
+  }).catch(() => {});
+  root.querySelector('#abWorktrees')?.addEventListener('click', () => { close(); openWorktreesManager(); });
+}
+// A list of every worktree on disk with size + age, and a per-item delete to reclaim disk (opened from About).
+function openWorktreesManager(): void {
+  const root = document.createElement('div'); root.className = 'tpl-modal';
+  const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') { e.preventDefault(); close(); } };
+  const close = () => { root.remove(); document.removeEventListener('keydown', onKey); };
+  root.innerHTML = `<div class="tpl-sc"></div><div class="tpl-card wt-card">
+      <div class="hd"><span class="dot" style="background:var(--accent)"></span><span class="t">Worktrees<small id="wtSub">scanning…</small></span></div>
+      <div class="bd"><div class="wt-list" id="wtList"><div class="mut" style="padding:14px">Scanning worktrees…</div></div></div>
+      <div class="ft"><span class="hint">Deleting frees disk but loses any uncommitted work in that worktree.</span><span class="r"><button class="tpl-btn pri" data-x>Close</button></span></div>
+    </div>`;
+  document.body.appendChild(root); document.addEventListener('keydown', onKey);
+  root.querySelector('[data-x]')?.addEventListener('click', close);
+  let items: WtItem[] = [];
+  const rel = (ms: number): string => { const s = Math.max(0, Math.floor((Date.now() - ms) / 1000)); if (s < 3600) return Math.floor(s / 60) + 'm ago'; const h = Math.floor(s / 3600); return h < 24 ? h + 'h ago' : Math.floor(h / 24) + 'd ago'; };
+  const repoName = (folder: string): string => folder.replace(/-[0-9a-f]{8}$/, '');   // strip the disambiguating hash
+  const draw = (): void => {
+    const listEl = root.querySelector('#wtList'); const sub = root.querySelector('#wtSub'); if (!listEl) return;
+    if (sub) sub.textContent = `${items.length} · ${fmtMB(items.reduce((n, w) => n + w.sizeMB, 0))}`;
+    listEl.innerHTML = items.length ? items.map((w) => `<div class="wt-row">
+        <div class="wt-info"><div class="wt-branch">${esc(w.branch)}</div><div class="wt-meta">${esc(repoName(w.folder))} · ${fmtMB(w.sizeMB)} · ${esc(rel(w.mtimeMs))}</div></div>
+        <button class="wt-del" data-path="${esc(w.path)}">Delete</button>
+      </div>`).join('') : '<div class="mut" style="padding:14px">No worktrees — nothing to clean up.</div>';
+    listEl.querySelectorAll<HTMLButtonElement>('.wt-del').forEach((b) => {
+      b.onclick = async (): Promise<void> => {
+        if (b.dataset.confirm !== '1') { b.dataset.confirm = '1'; b.textContent = 'Confirm?'; b.classList.add('danger'); setTimeout(() => { if (b.isConnected) { b.dataset.confirm = ''; b.textContent = 'Delete'; b.classList.remove('danger'); } }, 3000); return; }
+        b.textContent = 'Deleting…'; b.disabled = true;
+        const res = await relay.worktreeRemove(b.dataset.path!).catch(() => ({ ok: false }));
+        if (res.ok) { items = items.filter((w) => w.path !== b.dataset.path); draw(); } else { b.textContent = 'Failed'; b.disabled = false; }
+      };
+    });
+  };
+  void relay.worktreesManage().then((res: { ok: boolean; list: WtItem[]; reposMB: number }) => {
+    if (!root.isConnected) return; items = res.ok ? res.list : []; draw();
+  }).catch(() => { const l = root.querySelector('#wtList'); if (l) l.innerHTML = '<div class="mut" style="padding:14px">Couldn’t scan worktrees.</div>'; });
 }
 function openSettings() { reflectSettings(); selectSettingsTab('general'); $('#settings').classList.add('show'); $('#scrim').classList.add('show'); }
 function closeSettings() { $('#settings').classList.remove('show'); if (!$('#palette').classList.contains('show')) $('#scrim').classList.remove('show'); }

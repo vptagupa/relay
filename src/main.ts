@@ -664,6 +664,19 @@ async function locateRepoRoot(git: string, provider: ProviderId, repo: string, d
   const cacheRoot = path.join(app.getPath('userData'), 'repos', `${provider}__${repo.replace(/\//g, '__')}`);
   return existsSync(path.join(cacheRoot, '.git')) ? cacheRoot : null;
 }
+// Recursively sum file bytes under a dir. Skips `.deps` (junctions into the shared managed clones — not this
+// worktree's own bytes) and symlinks, so a worktree's size isn't inflated by (or looped through) linked repos.
+async function dirSize(p: string): Promise<number> {
+  let total = 0;
+  const ents = await fsp.readdir(p, { withFileTypes: true }).catch(() => [] as import('fs').Dirent[]);
+  for (const e of ents) {
+    if (e.isSymbolicLink() || e.name === '.deps') continue;
+    const full = path.join(p, e.name);
+    if (e.isDirectory()) total += await dirSize(full);
+    else if (e.isFile()) { const st = await fsp.stat(full).catch(() => null); if (st) total += st.size; }
+  }
+  return total;
+}
 
 // Drop stale worktree registrations, then sweep the empty <folder>/<branch> and <folder> dirs a
 // hand-deleted worktree leaves behind, so the tree doesn't accumulate orphans and a stale-empty path
@@ -775,6 +788,48 @@ ipcMain.handle('git:worktrees', async (_e, p: { provider?: ProviderId; repo: str
     const branches = await fsp.readdir(base).catch(() => [] as string[]);   // the sweep removes empties, so what's left is real
     return { ok: true, list: branches.map((branch) => ({ branch, path: path.join(base, branch) })) };
   } catch (err) { logFatal('git:worktrees', err); return { ok: false, list: [] }; }
+});
+
+// Live app resource usage for the About dialog. getAppMetrics() covers EVERY app process (main + renderer +
+// GPU + utility); RAM = summed working sets, CPU = summed per-process %. Cheap → safe to poll while open.
+ipcMain.handle('app:stats', () => {
+  try {
+    const metrics = app.getAppMetrics();
+    const ramKB = metrics.reduce((s, m) => s + (m.memory?.workingSetSize || 0), 0);   // workingSetSize is KB
+    const cpu = metrics.reduce((s, m) => s + (m.cpu?.percentCPUUsage || 0), 0);
+    return { ramMB: Math.round(ramKB / 1024), cpuPct: Math.round(cpu) };
+  } catch { return { ramMB: 0, cpuPct: 0 }; }
+});
+// Every worktree on disk (across all repos) with its size + age, plus the managed-clone cache size — for the
+// "Manage worktrees" dialog and the About storage total. Walks the tree, so it's a moment; called on demand.
+ipcMain.handle('worktrees:list', async () => {
+  try {
+    const wtBase = path.join(app.getPath('userData'), 'worktrees');
+    const list: { folder: string; branch: string; path: string; sizeMB: number; mtimeMs: number }[] = [];
+    for (const folder of await fsp.readdir(wtBase).catch(() => [] as string[])) {
+      const fpath = path.join(wtBase, folder);
+      if (!(await fsp.stat(fpath).catch(() => null))?.isDirectory()) continue;
+      for (const branch of await fsp.readdir(fpath).catch(() => [] as string[])) {
+        const wp = path.join(fpath, branch);
+        const st = await fsp.stat(wp).catch(() => null); if (!st?.isDirectory()) continue;
+        list.push({ folder, branch, path: wp, sizeMB: Math.round((await dirSize(wp)) / 1048576), mtimeMs: st.mtimeMs });
+      }
+    }
+    list.sort((a, b) => b.sizeMB - a.sizeMB);
+    const reposMB = Math.round((await dirSize(path.join(app.getPath('userData'), 'repos')).catch(() => 0)) / 1048576);
+    return { ok: true, list, reposMB };
+  } catch (err) { logFatal('worktrees:list', err); return { ok: false, list: [], reposMB: 0 }; }
+});
+// Delete a worktree dir to reclaim disk. Path MUST be strictly under the worktrees dir (never delete elsewhere).
+// git's registration for it becomes stale and is pruned on the next worktree-add (pruneAndSweepWorktrees).
+ipcMain.handle('worktrees:remove', async (_e, p: { path: string }) => {
+  try {
+    const wtBase = path.resolve(path.join(app.getPath('userData'), 'worktrees'));
+    const target = path.resolve(typeof p?.path === 'string' ? p.path : '');
+    if (target === wtBase || !target.startsWith(wtBase + path.sep)) return { ok: false, error: 'Invalid path' };
+    await fsp.rm(target, { recursive: true, force: true });
+    return { ok: true };
+  } catch (err) { logFatal('worktrees:remove', err); return { ok: false, error: 'Could not remove worktree' }; }
 });
 
 // Create (or reuse) an isolated worktree with a PR/MR's SOURCE branch checked out, so a review pipeline
