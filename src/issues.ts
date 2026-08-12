@@ -11,7 +11,7 @@ import { $, esc } from './dom';
 import { toast, addSearch } from './ui';
 import { openAuthorFilter } from './author-filter';
 import type { Issue } from './shared/types';
-import { allPipelines, pipelineById, isGate, nextEdge, stageIndexById, STOP, renderBrief, stageStatus, type PipelineDef, type BriefCtx } from './pipelines';
+import { allPipelines, pipelineById, isGate, nextEdge, stageIndexById, STOP, renderBrief, stageStatus, type PipelineDef, type StageDef, type BriefCtx } from './pipelines';
 import { openPipelineBuilder } from './pipeline-editor';
 import { AGENTS } from './agents-list';
 import { dbCredOptions, dbCredNote, loadDbCreds, dbCredMetas } from './dbcreds';
@@ -667,6 +667,7 @@ async function launchStage(key: string, idx: number): Promise<void> {
   // in the worktree across every stage, so Fix/Test/Review must be told about them (stage 0's file already has
   // both, from the Assign dialog's textarea). issueDepsFor filters to nothing → depsNote returns '' (no-op).
   const brief = renderBrief(stage.brief, briefCtx(run.issue, run.provider, idx))
+    + prNotes(stage, run.pipeline, run.provider)   // Fix → pipeline in the PR body; Review → verdict as a PR comment
     + depsNote(issueDepsFor(run.provider, run.repo, run.number))
     + dbCredNote(dbCredId);
   await relay.pipelinePrep(run.wt, idx === 0 ? null : briefRel, idx === 0 ? null : brief, idx).catch(() => {});
@@ -775,10 +776,26 @@ function briefCtx(i: Issue, prov: ProviderId, idx: number): BriefCtx {
   const body = (i.body || '').trim() || '_(no description provided)_';
   return { issue: `# Issue #${i.number}: ${i.title}\n\n${body}`, number: i.number, title: i.title, closeStep: PROVS[prov].closeStep(i.number), verdictRel: `.slayer/stage-${idx}.json` };
 }
+// PR-facing brief add-ons (best-effort agent instructions — the agent already has the git CLI it uses to open
+// the PR): the PR-opening stage surfaces the whole pipeline in the PR description, and the review stage mirrors
+// its verdict onto the PR as a comment. So the PR shows which stages produced it, and the review is visible on it.
+function prNotes(stage: StageDef, pipeline: PipelineDef, prov: ProviderId): string {
+  let out = '';
+  if (stage.brief.includes('{closeStep}')) {   // a stage that opens the PR/MR (Fix, Fix-only, or a custom one)
+    const flow = pipeline.stages.map((s) => s.name).join(' → ');
+    out += `\n\n---\nWhen you open the pull request, add this exact line to its description so the pipeline that produced it is visible:\n\n> 🔧 Slayer T pipeline: ${flow}`;
+  }
+  // Only when the pipeline actually opens a PR (a fix stage) — GitHub/GitLab have a CLI that comments on the current branch's PR.
+  if (stage.kind === 'review' && prov !== 'bitbucket' && pipeline.stages.some((s) => s.brief.includes('{closeStep}'))) {
+    const cmd = prov === 'gitlab' ? '`glab mr note --message "<verdict>"`' : '`gh pr comment --body "<verdict>"`';
+    out += `\n\n---\nAfter you write your verdict, ALSO post it as a comment on the pull request for the current branch — run ${cmd} with your verdict (pass/fail + the key findings). This surfaces the review on the PR itself.`;
+  }
+  return out;
+}
 // The rendered seed brief for a stage — editable in Assign before launch.
 function stageBriefText(p: PipelineDef, idx: number, i: Issue, prov: ProviderId): string {
   const stage = p.stages[idx]; if (!stage) return '';
-  return renderBrief(stage.brief, briefCtx(i, prov, idx));
+  return renderBrief(stage.brief, briefCtx(i, prov, idx)) + prNotes(stage, p, prov);
 }
 
 // The sequence graph — the issue as the head node, then the pipeline's WIRED success path (from the entry,
