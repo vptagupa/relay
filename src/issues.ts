@@ -262,13 +262,27 @@ async function loadMembers(mkey: string, p: ProviderId, r: string, ws: string): 
   const res = await relay.providerRepoMembers(ws, p, r).catch(() => ({ ok: false } as { ok: boolean; members?: string[] }));
   if (membersFor === mkey) members = res.ok && res.members ? res.members : [];
 }
-// Existing worktrees for this repo (branch → path) so a row whose worktree survived a closed tab / crash gets a
-// ⧉ reopen-terminal icon. Fetched once per repo; a repo switch supersedes an in-flight fetch. Re-renders on arrival.
+// wtByBranch key — includes provider/repo so it works in All-repos scope (issue-N branches collide across repos).
+const wtKey = (p: ProviderId | string, r: string, branch: string): string => `${p}:${r}:${branch}`;
+// Existing worktrees for this repo (→ path) so a row whose worktree survived a closed tab / crash gets a ⧉
+// reopen-terminal icon. Fetched once per repo; a repo switch supersedes an in-flight fetch. Re-renders on arrival.
 async function loadWorktrees(mkey: string, p: ProviderId, r: string, dir: string): Promise<void> {
   const res = await relay.worktreesList(p, r, dir).catch(() => ({ ok: false } as { ok: boolean; list?: { branch: string; path: string }[] }));
   if (wtFor !== mkey) return;                   // repo switched → stale
   const m = new Map<string, string>();
-  if (res.ok && res.list) for (const w of res.list) m.set(w.branch, w.path);
+  if (res.ok && res.list) for (const w of res.list) m.set(wtKey(p, r, w.branch), w.path);
+  wtByBranch = m; render();
+}
+// All-repos: fetch existing worktrees for EVERY tracked repo (parallel) so the ⧉ reopen icon works there too.
+async function loadAllWorktrees(seq: number, tracked: string[]): Promise<void> {
+  const dir = state.settings.workspace || '';
+  const m = new Map<string, string>();
+  await Promise.all(tracked.map(async (id) => {
+    const { provider: p, repo: r } = parseRepoId(id);
+    const res = await relay.worktreesList(p, r, dir).catch(() => ({ ok: false } as { ok: boolean; list?: { branch: string; path: string }[] }));
+    if (res.ok && res.list) for (const w of res.list) m.set(wtKey(p, r, w.branch), w.path);
+  }));
+  if (seq !== loadSeq || issScope !== 'all') return;   // superseded, or scope changed away
   wtByBranch = m; render();
 }
 // A toggle re-queries the provider server-side, debounced so ticking several authors fires ONE fetch. render()
@@ -419,7 +433,7 @@ function render(): void {
   el.innerHTML = vis.map((i) => {
     const dp = issP(i), dr = issR(i); const key = keyOf(i);
     const st = statusOf(i.number, dp, dr); const tags = getTags(i.number, dp, dr);
-    const wt = wtByBranch.get(`issue-${i.number}`);
+    const wt = wtByBranch.get(wtKey(dp, dr, `issue-${i.number}`));
     // Only an idle issue in the OPEN view is assignable; closed / in-progress rows open the details view.
     return `<div class="isr" data-key="${esc(key)}" title="${st === 'idle' && issueState === 'open' ? `Assign #${i.number} to a coding agent` : `View #${i.number} details`}">
       <div class="isr-hash">#${i.number}</div>
@@ -513,6 +527,7 @@ async function loadAllRepos(seq: number, ws: string): Promise<void> {
   const tracked = (state.settings.issueReposByWs || {})[ws] || [];
   if (!tracked.length) { phase = 'norepo'; errMsg = 'No repos tracked yet — add some in Sources (⚙).'; render(); return; }
   members = []; membersFor = ''; wtByBranch = new Map(); wtFor = ''; prByBranch = {}; myLogin = '';
+  void loadAllWorktrees(seq, tracked);   // ⧉ reopen-terminal icons across every tracked repo (non-blocking)
   let anyErr = '';
   const perRepo = await Promise.all(tracked.map(async (id) => {
     const { provider: p, repo: r } = parseRepoId(id);
