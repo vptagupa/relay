@@ -763,6 +763,7 @@ body.tabdrag .dz{display:block;pointer-events:auto}
 .k-reproduce .sg-dot{background:#22c3cf}
 .k-test .sg-dot{background:var(--accent-2)}
 .k-review .sg-dot{background:#a78bfa}
+.k-resolve .sg-dot{background:#e0774a}
 /* live per-stage state */
 .sg-stage.sg-pending,.sg-stage.sg-skipped{opacity:.45}
 .sg-stage.sg-running{border-color:var(--accent-line);box-shadow:0 0 0 3px var(--accent-ghost)}

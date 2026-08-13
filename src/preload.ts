@@ -148,7 +148,8 @@ const api = {
   // `merging` = left mid-merge with conflicts (the expected path); `clean` = base merged with no conflict;
   // `dirty` = the worktree had uncommitted changes, left untouched; `pushable` = the source branch is on origin,
   // so `git push origin HEAD:<source>` will update the PR (false for fork PRs whose head isn't in origin).
-  prResolveWorktree: (provider: ProviderId, repo: string, dir: string, number: number, branch: string, base: string): Promise<{ ok: boolean; path?: string; branch?: string; base?: string; conflicts?: string[]; merging?: boolean; clean?: boolean; dirty?: boolean; pushable?: boolean; error?: string }> => ipcRenderer.invoke('git:pr-resolve-worktree', { provider, repo, dir, number, branch, base }),
+  // `brief` (optional) seeds the resolve pipeline's stage-0 brief file, returned as `briefRel` like prWorktreeAdd.
+  prResolveWorktree: (provider: ProviderId, repo: string, dir: string, number: number, branch: string, base: string, brief?: string): Promise<{ ok: boolean; path?: string; branch?: string; base?: string; briefRel?: string; conflicts?: string[]; merging?: boolean; clean?: boolean; dirty?: boolean; pushable?: boolean; error?: string }> => ipcRenderer.invoke('git:pr-resolve-worktree', { provider, repo, dir, number, branch, base, brief }),
   // Link dependency repos into an issue worktree as read-only reference (checked out to their latest default under .deps/).
   linkDeps: (wt: string, dir: string, deps: { provider: ProviderId; repo: string }[]): Promise<{ ok: boolean; linked?: { name: string; repo: string }[]; error?: string }> => ipcRenderer.invoke('git:link-deps', { wt, dir, deps }),
   // List EXISTING worktrees for a repo (branch → path), no side effects — to reopen a terminal in an issue/task worktree after its tab/app closed.

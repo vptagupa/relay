@@ -78,12 +78,13 @@ interface PrRunInfo {
   provider: ProviderId; repo: string; number: number; title: string;
   headText: string;      // `# PR #n: title\n\n body` — seeds each stage's {issue} token
   base: string;          // base branch (for the {base} token), '' if unknown
+  source: string;        // source (head) branch — the {source} push target for the resolve stage
   pipeline: PipelineDef; // snapshot at assign time (survives later edits to a custom pipeline)
   stageIdx: number; wt: string; agentId: string; brief0Rel: string;
   awaiting: boolean;     // true while a GATE stage's verdict is being polled
   reason?: string;       // the review summary (shown after a terminal outcome)
 }
-interface PrQueueItem { provider: ProviderId; repo: string; number: number; title: string; headText: string; base: string; cwd: string; agentId: string; agentName: string; pipeline: PipelineDef; brief0Rel: string; }
+interface PrQueueItem { provider: ProviderId; repo: string; number: number; title: string; headText: string; base: string; source: string; cwd: string; agentId: string; agentName: string; pipeline: PipelineDef; brief0Rel: string; }
 
 const prRuns = new Map<string, PrRunInfo>();       // "provider:repo#number" → run
 const prRunStatus = new Map<string, PrStatus>();   // "provider:repo#number" → status
@@ -97,11 +98,11 @@ function workingCount(): number { let c = 0; for (const s of prRunStatus.values(
 /* ----------------------------- brief context ----------------------------- */
 const prHead = (n: number, title: string, body?: string): string =>
   `# ${title || `PR #${n}`} (PR #${n})\n\n${(body || '').trim() || '_(no description provided)_'}`;
-function prBriefCtx(run: { number: number; title: string; headText: string; base: string }, idx: number): BriefCtx {
-  return { issue: run.headText, number: run.number, title: run.title, closeStep: 'Summarize your review verdict.', base: run.base || '', verdictRel: `.slayer/stage-${idx}.json` };
+function prBriefCtx(run: { number: number; title: string; headText: string; base: string; source?: string }, idx: number): BriefCtx {
+  return { issue: run.headText, number: run.number, title: run.title, closeStep: 'Summarize your review verdict.', base: run.base || '', source: run.source || '', verdictRel: `.slayer/stage-${idx}.json` };
 }
 // The rendered seed brief for a stage — editable in Assign before launch.
-function stageBriefText(p: PipelineDef, idx: number, ctx: { number: number; title: string; headText: string; base: string }): string {
+function stageBriefText(p: PipelineDef, idx: number, ctx: { number: number; title: string; headText: string; base: string; source?: string }): string {
   const stage = p.stages[idx]; if (!stage) return '';
   return renderBrief(stage.brief, prBriefCtx(ctx, idx));
 }
@@ -127,20 +128,20 @@ async function launchPrStage(key: string, idx: number): Promise<void> {
   deps.refresh(); ensureStagePoll();
 }
 
-function startPrPipeline(o: { provider: ProviderId; repo: string; number: number; title: string; headText: string; base: string; pipeline: PipelineDef; wt: string; agentId: string; brief0Rel: string }): void {
+function startPrPipeline(o: { provider: ProviderId; repo: string; number: number; title: string; headText: string; base: string; source: string; pipeline: PipelineDef; wt: string; agentId: string; brief0Rel: string }): void {
   const key = keyOf(o.provider, o.repo, o.number);
-  prRuns.set(key, { provider: o.provider, repo: o.repo, number: o.number, title: o.title, headText: o.headText, base: o.base, pipeline: o.pipeline, stageIdx: 0, wt: o.wt, agentId: o.agentId, brief0Rel: o.brief0Rel, awaiting: false });
+  prRuns.set(key, { provider: o.provider, repo: o.repo, number: o.number, title: o.title, headText: o.headText, base: o.base, source: o.source, pipeline: o.pipeline, stageIdx: 0, wt: o.wt, agentId: o.agentId, brief0Rel: o.brief0Rel, awaiting: false });
   prRunStatus.set(key, stageToStatus(o.pipeline.stages[0].kind)); // synchronous, so a drain loop can't over-launch past CAP
   void launchPrStage(key, 0);
 }
 
 // Launch a prepared run now, or queue it if at capacity (its worktree + stage-0 brief already exist, so a
 // queued run auto-launches the instant a slot frees). Shared by Assign and the map board.
-function launchOrQueue(o: { provider: ProviderId; repo: string; number: number; title: string; headText: string; base: string; agentId: string; agentName: string; pipeline: PipelineDef; wt: string; brief0Rel: string }): 'queued' | 'launched' {
+function launchOrQueue(o: { provider: ProviderId; repo: string; number: number; title: string; headText: string; base: string; source: string; agentId: string; agentName: string; pipeline: PipelineDef; wt: string; brief0Rel: string }): 'queued' | 'launched' {
   const key = keyOf(o.provider, o.repo, o.number);
   if (workingCount() >= CAP()) {
     if (!prQueue.some((q) => keyOf(q.provider, q.repo, q.number) === key)) // don't double-queue
-      prQueue.push({ provider: o.provider, repo: o.repo, number: o.number, title: o.title, headText: o.headText, base: o.base, cwd: o.wt, agentId: o.agentId, agentName: o.agentName, pipeline: o.pipeline, brief0Rel: o.brief0Rel });
+      prQueue.push({ provider: o.provider, repo: o.repo, number: o.number, title: o.title, headText: o.headText, base: o.base, source: o.source, cwd: o.wt, agentId: o.agentId, agentName: o.agentName, pipeline: o.pipeline, brief0Rel: o.brief0Rel });
     prRunStatus.set(key, 'queued');
     return 'queued';
   }
@@ -155,7 +156,7 @@ function drainQueue(): void {
     const item = prQueue.shift()!;
     // Skip an item the user cancelled while it waited (its status was cleared).
     if (prRunStatus.get(keyOf(item.provider, item.repo, item.number)) !== 'queued') continue;
-    startPrPipeline({ provider: item.provider, repo: item.repo, number: item.number, title: item.title, headText: item.headText, base: item.base, pipeline: item.pipeline, wt: item.cwd, agentId: item.agentId, brief0Rel: item.brief0Rel });
+    startPrPipeline({ provider: item.provider, repo: item.repo, number: item.number, title: item.title, headText: item.headText, base: item.base, source: item.source, pipeline: item.pipeline, wt: item.cwd, agentId: item.agentId, brief0Rel: item.brief0Rel });
     toast(`Auto-launching review of ${PR_WORD[item.provider]} #${item.number}`, true);
     launched = true;
   }
@@ -235,12 +236,16 @@ function pipePreview(p: PipelineDef): string {
 }
 
 /* ----------------------------- assign a single PR ----------------------------- */
+// A resolve pipeline's stage-0 needs a DIFFERENT worktree prep (merge the base in to surface the conflict) than a
+// review's (just check out the head), and drives resolve-specific dialog copy. Keyed off the stage kind.
+const isResolvePipe = (pl: PipelineDef): boolean => pl.stages[0]?.kind === 'resolve';
 let assigning = false;
-export async function openPrAssign(pr: PrRef, ctx: PrCtx): Promise<void> {
+export async function openPrAssign(pr: PrRef, ctx: PrCtx, opts?: { pipelineId?: string }): Promise<void> {
   const prov = (pr.provider || ctx.provider) as ProviderId;
   const repo = pr.repo || ctx.repo;
   const dir = ctx.dir;
   const num = pr.number;
+  const source = pr.branch;   // the PR's source (head) branch — the {source} push target for a resolve stage
   await loadDbCreds();   // refresh the saved DB credential templates so the picker is current
   const detected = await relay.agentsDetect().catch(() => ({} as Record<string, boolean>));
   const installed = AGENTS.filter((a) => detected[a.id]);
@@ -248,33 +253,39 @@ export async function openPrAssign(pr: PrRef, ctx: PrCtx): Promise<void> {
   let agentId = (state.settings.issueAgent && detected[state.settings.issueAgent]) ? state.settings.issueAgent! : (installed[0]?.id || '');
   const agentOpts = AGENTS.map((a) => `<option value="${a.id}"${a.id === agentId ? ' selected' : ''}${detected[a.id] ? '' : ' disabled'}>${esc(a.name)}${detected[a.id] ? '' : ' — not installed'}</option>`).join('');
   const pipes = () => prPipelines(customPipelines());
-  let pipelineId = prPipelineFor(prov, repo, num);
+  // Pre-select a pipeline when asked (the ⚔ Resolve button passes 'resolve-pr'); else the PR's stored/default pick.
+  let pipelineId = (opts?.pipelineId && pipes().some((p) => p.id === opts.pipelineId)) ? opts.pipelineId : prPipelineFor(prov, repo, num);
   const pipeOpts = () => pipes().map((p) => `<option value="${p.id}"${p.id === pipelineId ? ' selected' : ''}>${esc(p.name)}${p.builtin ? '' : ' ✎'}</option>`).join('');
   let pipeline = prPipelineById(pipelineId, customPipelines());
   // Seed the brief from the PR list item now; enrich with the fetched body + base branch when it arrives.
   let head = prHead(num, pr.title || '', '');
   let base = '';
   let briefDirty = false;
-  let selectedDbCred = prDbCredFor(prov, repo, num);   // DB credential template injected into the review run's env
+  let selectedDbCred = prDbCredFor(prov, repo, num);   // DB credential template injected into the run's env
   const running = prStatusOf(prov, repo, num);
   const active = running !== 'idle' && running !== 'ready' && running !== 'changes';
-  const primary = agentOk ? '⚡ Run review' : 'Create worktree & open';
+  // Verb/primary/worktree-note track the selected pipeline: a resolve pipeline reads "Resolve", a review "Review".
+  const verbFor = (pl: PipelineDef) => isResolvePipe(pl) ? 'Resolve' : 'Review';
+  const primaryFor = () => agentOk ? (isResolvePipe(pipeline) ? '⚔ Resolve conflict' : '⚡ Run review') : 'Create worktree & open';
+  const wtNoteFor = (pl: PipelineDef) => isResolvePipe(pl)
+    ? `Merges the base branch into an isolated <code>pr-${num}</code> worktree so the conflict is live, then the agent resolves it, commits, and pushes to update the PR.`
+    : `Checks out <code>${esc(pr.branch)}</code> into an isolated worktree on <code>pr-${num}</code> and reviews the real diff. Later stages use their built-in briefs.`;
 
   const { root, close } = modal(`<div class="tpl-card iss-card">
-      <div class="hd"><span class="dot" style="background:var(--accent)"></span><span class="t">Review ${PR_WORD[prov]} #${num}<small>${esc(pr.title || pr.branch)}</small></span></div>
+      <div class="hd"><span class="dot" style="background:var(--accent)"></span><span class="t"><span id="prAsgVerb">${verbFor(pipeline)}</span> ${PR_WORD[prov]} #${num}<small>${esc(pr.title || pr.branch)}</small></span></div>
       <div class="bd">
         ${running !== 'idle' ? `<div class="iss-agent ok" id="prAsgStatus">Current: <b>${esc(PR_STATUS_LABEL[running] || running)}</b>${active ? ' — <a href="#" id="prAsgFree">free the slot</a>' : ''}</div>` : ''}
         <div class="iss-agentrow"><label class="iss-lbl" style="margin:0">Assign to</label><select class="iss-agentsel" id="prAgentSel"${agentOk ? '' : ' disabled'}>${agentOpts}</select></div>
-        <div class="iss-agent ${agentOk ? 'ok' : 'no'}">${agentOk ? '✓ reviews the PR branch in its own isolated worktree — never touches your checkout' : '⚠ No coding agent on PATH — the worktree still opens; install Claude Code (or Gemini / Codex / Aider) to auto-run.'}</div>
+        <div class="iss-agent ${agentOk ? 'ok' : 'no'}">${agentOk ? '✓ runs in its OWN isolated worktree — never touches your checkout' : '⚠ No coding agent on PATH — the worktree still opens; install Claude Code (or Gemini / Codex / Aider) to auto-run.'}</div>
         <div class="iss-agentrow"><label class="iss-lbl" style="margin:0">Pipeline</label><select class="iss-agentsel" id="prPipeSel">${pipeOpts()}</select><button class="iss-pipebuild" id="prPipeBuild" title="Build / edit pipelines">✎ Build</button></div>
         <div class="pipe-preview" id="prGraph">${pipePreview(pipeline)}</div>
         <div class="iss-pipedesc" id="prPipeDesc">${esc(pipeline.desc)}</div>
         ${dbCredMetas().length ? `<div class="iss-agentrow"><label class="iss-lbl" style="margin:0">Database</label><select class="iss-agentsel" id="prDb">${dbCredOptions(selectedDbCred)}</select></div>` : ''}
         <label class="iss-lbl">Brief · <span id="prBriefStage">${esc(pipeline.stages[0].name)}</span> stage <span class="mut">— edit before launch</span></label>
-        <textarea class="iss-brief" spellcheck="false" rows="10" id="prBrief">${esc(stageBriefText(pipeline, 0, { number: num, title: pr.title || '', headText: head, base }) + dbCredNote(selectedDbCred))}</textarea>
-        <div class="iss-wt">Checks out <code>${esc(pr.branch)}</code> into an isolated worktree on <code>pr-${num}</code> and reviews the real diff. Later stages use their built-in briefs.</div>
+        <textarea class="iss-brief" spellcheck="false" rows="10" id="prBrief">${esc(stageBriefText(pipeline, 0, { number: num, title: pr.title || '', headText: head, base, source }) + dbCredNote(selectedDbCred))}</textarea>
+        <div class="iss-wt" id="prAsgWt">${wtNoteFor(pipeline)}</div>
       </div>
-      <div class="ft"><span class="hint">Saved as <code>.slayer/pr-${num}.md</code> (git-excluded)</span><span class="r"><button class="tpl-btn ghost" data-x>Cancel</button><button class="tpl-btn pri" data-ok>${primary}</button></span></div>
+      <div class="ft"><span class="hint">Saved as <code>.slayer/pr-${num}.md</code> (git-excluded)</span><span class="r"><button class="tpl-btn ghost" data-x>Cancel</button><button class="tpl-btn pri" data-ok>${primaryFor()}</button></span></div>
     </div>`);
 
   const ta = root.querySelector('#prBrief') as HTMLTextAreaElement;
@@ -287,11 +298,14 @@ export async function openPrAssign(pr: PrRef, ctx: PrCtx): Promise<void> {
     const g = root.querySelector('#prGraph'); if (g) g.innerHTML = pipePreview(pipeline);
     const d = root.querySelector('#prPipeDesc'); if (d) d.textContent = pipeline.desc;
     const bs = root.querySelector('#prBriefStage'); if (bs) bs.textContent = pipeline.stages[0]?.name || '';
-    if (!briefDirty) ta.value = stageBriefText(pipeline, 0, { number: num, title: pr.title || '', headText: head, base }) + dbCredNote(selectedDbCred);
+    const vb = root.querySelector('#prAsgVerb'); if (vb) vb.textContent = verbFor(pipeline);           // Resolve / Review header
+    const wn = root.querySelector('#prAsgWt'); if (wn) wn.innerHTML = wtNoteFor(pipeline);              // worktree note follows the kind
+    if (!assigning) okBtn.textContent = primaryFor();                                                   // "⚔ Resolve conflict" / "⚡ Run review"
+    if (!briefDirty) ta.value = stageBriefText(pipeline, 0, { number: num, title: pr.title || '', headText: head, base, source }) + dbCredNote(selectedDbCred);
   };
   if (psel) psel.onchange = () => { pipelineId = psel.value; void setPrPipeline(prov, repo, num, pipelineId); syncPipe(); };
   const dbSel = root.querySelector('#prDb') as HTMLSelectElement | null;   // pick a DB credential template → persist + re-seed the DB note (unless edited)
-  if (dbSel) dbSel.onchange = () => { selectedDbCred = dbSel.value; void setPrDbCred(prov, repo, num, selectedDbCred); if (!briefDirty) ta.value = stageBriefText(pipeline, 0, { number: num, title: pr.title || '', headText: head, base }) + dbCredNote(selectedDbCred); };
+  if (dbSel) dbSel.onchange = () => { selectedDbCred = dbSel.value; void setPrDbCred(prov, repo, num, selectedDbCred); if (!briefDirty) ta.value = stageBriefText(pipeline, 0, { number: num, title: pr.title || '', headText: head, base, source }) + dbCredNote(selectedDbCred); };
   root.querySelector('#prPipeBuild')?.addEventListener('click', () => {
     openPipelineBuilder(pipeline, (savedId) => {
       if (savedId) { pipelineId = savedId; void setPrPipeline(prov, repo, num, pipelineId); }
@@ -310,30 +324,38 @@ export async function openPrAssign(pr: PrRef, ctx: PrCtx): Promise<void> {
     if (!root.isConnected || !res || !res.ok || !res.detail) return;
     head = prHead(num, res.detail.title || pr.title || '', res.detail.body);
     base = res.detail.baseBranch || '';
-    if (!briefDirty) ta.value = stageBriefText(pipeline, 0, { number: num, title: res.detail.title || pr.title || '', headText: head, base }) + dbCredNote(selectedDbCred);
+    if (!briefDirty) ta.value = stageBriefText(pipeline, 0, { number: num, title: res.detail.title || pr.title || '', headText: head, base, source }) + dbCredNote(selectedDbCred);
   }
 
   setTimeout(() => ta.focus(), 30);
   okBtn.addEventListener('click', async () => {
     if (assigning) return;
-    assigning = true; okBtn.disabled = true; okBtn.textContent = 'Checking out PR…';
-    const res = await relay.prWorktreeAdd(prov, repo, dir, num, pr.branch, ta.value).catch(() => ({ ok: false, error: 'Worktree creation failed' }));
+    const resolveMode = isResolvePipe(pipeline);
+    assigning = true; okBtn.disabled = true; okBtn.textContent = resolveMode ? 'Preparing conflict worktree…' : 'Checking out PR…';
+    // A resolve stage needs the base branch to merge in; make sure it's loaded (the async detail fetch may not
+    // have landed yet if the user clicked fast).
+    if (resolveMode && !base) { const d = await relay.providerPrDetail(activeWs(), prov, repo, num).catch(() => null); if (d && d.ok && d.detail) base = d.detail.baseBranch || ''; }
+    // Resolve merges the base in (conflict live); review just checks out the head. Both drop stage-0's brief + return briefRel.
+    const res = resolveMode
+      ? await relay.prResolveWorktree(prov, repo, dir, num, source, base, ta.value).catch(() => ({ ok: false, error: 'Resolve worktree failed' }))
+      : await relay.prWorktreeAdd(prov, repo, dir, num, pr.branch, ta.value).catch(() => ({ ok: false, error: 'Worktree creation failed' }));
     assigning = false;
-    // Launch even if the dialog was Escaped during checkout — the worktree exists and the agent/brief are already
-    // captured; an accidental Escape must not silently drop the run (the review toast still fires).
-    if (!res.ok) { okBtn.disabled = false; okBtn.textContent = primary; toast(res.error || 'Could not check out the PR'); return; }
+    // Launch even if the dialog was Escaped during prep — the worktree exists and the agent/brief are already
+    // captured; an accidental Escape must not silently drop the run (the toast still fires).
+    if (!res.ok) { okBtn.disabled = false; okBtn.textContent = primaryFor(); toast(res.error || (resolveMode ? 'Could not prepare the conflict worktree' : 'Could not check out the PR')); return; }
     const brief0Rel = res.briefRel || '';
     const agent = AGENTS.find((a) => a.id === agentId);
-    if (!(agentOk && agent)) {
-      deps.openAgentTab({ cwd: res.path!, name: `${PR_WORD[prov]} #${num}`, runCmd: undefined });
+    if (!(agentOk && agent)) {   // no coding agent → just open the (conflict-materialized) worktree as a plain terminal
+      deps.openAgentTab({ cwd: res.path!, name: resolveMode ? `${PR_WORD[prov]} #${num} · resolve` : `${PR_WORD[prov]} #${num}`, runCmd: resolveMode ? 'git status' : undefined });
       deps.refresh(); close();
-      toast(res.reused ? `Reopened worktree for ${PR_WORD[prov]} #${num}` : `Worktree ready for ${PR_WORD[prov]} #${num}`, true);
+      toast(res.reused ? `Reopened worktree for ${PR_WORD[prov]} #${num}` : (resolveMode ? `Conflict worktree ready for ${PR_WORD[prov]} #${num}` : `Worktree ready for ${PR_WORD[prov]} #${num}`), true);
       return;
     }
-    const r = launchOrQueue({ provider: prov, repo, number: num, title: pr.title || pr.branch, headText: head, base, agentId, agentName: agent.name, pipeline: clonePipeline(pipeline), wt: res.path!, brief0Rel });
+    const r = launchOrQueue({ provider: prov, repo, number: num, title: pr.title || pr.branch, headText: head, base, source, agentId, agentName: agent.name, pipeline: clonePipeline(pipeline), wt: res.path!, brief0Rel });
     deps.refresh(); close();
-    toast(r === 'queued' ? `Queued review of ${PR_WORD[prov]} #${num} — starts when a slot frees (${workingCount()}/${CAP()} running)`
-      : `Reviewing ${PR_WORD[prov]} #${num} · ${pipeline.name}`, true);
+    const noun = resolveMode ? 'conflict-resolve' : 'review';
+    toast(r === 'queued' ? `Queued ${noun} of ${PR_WORD[prov]} #${num} — starts when a slot frees (${workingCount()}/${CAP()} running)`
+      : `${resolveMode ? 'Resolving' : 'Reviewing'} ${PR_WORD[prov]} #${num} · ${pipeline.name}`, true);
   });
 }
 
@@ -422,12 +444,18 @@ export async function openPrMap(prs: PrRef[], ctx: PrCtx): Promise<void> {
       const p = mappable[k]; const pipeline = pipes.find((x) => x.id === pid); if (!p || !pipeline) continue;
       const prov = provOf(p), repo = repoOf(p), n = p.number;
       const head = prHead(n, p.title || '', '');
-      const brief0 = stageBriefText(pipeline, 0, { number: n, title: p.title || '', headText: head, base: '' });
-      const res = await relay.prWorktreeAdd(prov, repo, ctx.dir, n, p.branch, brief0).catch(() => ({ ok: false } as { ok: boolean; path?: string; briefRel?: string }));
+      const resolveMode = isResolvePipe(pipeline);
+      // A resolve pipeline needs the base branch (fetched per-PR) merged into the worktree; a review just checks out the head.
+      let base = '';
+      if (resolveMode) { const d = await relay.providerPrDetail(activeWs(), prov, repo, n).catch(() => null); if (d && d.ok && d.detail) base = d.detail.baseBranch || ''; }
+      const brief0 = stageBriefText(pipeline, 0, { number: n, title: p.title || '', headText: head, base, source: p.branch });
+      const res = resolveMode
+        ? await relay.prResolveWorktree(prov, repo, ctx.dir, n, p.branch, base, brief0).catch(() => ({ ok: false } as { ok: boolean; path?: string; briefRel?: string }))
+        : await relay.prWorktreeAdd(prov, repo, ctx.dir, n, p.branch, brief0).catch(() => ({ ok: false } as { ok: boolean; path?: string; briefRel?: string }));
       if (!res.ok) { toast(`Worktree failed for ${PR_WORD[prov]} #${n}`); continue; }
       const agent = AGENTS.find((a) => a.id === agentId);
-      if (agentOk && agent) launchOrQueue({ provider: prov, repo, number: n, title: p.title || p.branch, headText: head, base: '', agentId, agentName: agent.name, pipeline: clonePipeline(pipeline), wt: res.path!, brief0Rel: res.briefRel || '' });
-      else deps.openAgentTab({ cwd: res.path!, name: `${PR_WORD[prov]} #${n}`, runCmd: undefined });
+      if (agentOk && agent) launchOrQueue({ provider: prov, repo, number: n, title: p.title || p.branch, headText: head, base, source: p.branch, agentId, agentName: agent.name, pipeline: clonePipeline(pipeline), wt: res.path!, brief0Rel: res.briefRel || '' });
+      else deps.openAgentTab({ cwd: res.path!, name: resolveMode ? `${PR_WORD[prov]} #${n} · resolve` : `${PR_WORD[prov]} #${n}`, runCmd: resolveMode ? 'git status' : undefined });
       ok++;
     }
     deps.refresh(); running = false; close();

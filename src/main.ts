@@ -909,7 +909,7 @@ ipcMain.handle('git:pr-worktree-add', async (_e, p: { provider?: ProviderId; rep
 // real source branch (not refs/pull/n/head) and set its upstream to origin/<source> — that's what `pushable`
 // reports; the renderer then hands the user `git push origin HEAD:<source>` to push the resolution back to the PR
 // (the worktree branch is `pr-<n>`, so a bare push would refuse on the name mismatch). Never clobbers dirty work.
-ipcMain.handle('git:pr-resolve-worktree', async (_e, p: { provider?: ProviderId; repo: string; dir: string; number: number; branch?: string; base?: string }) => {
+ipcMain.handle('git:pr-resolve-worktree', async (_e, p: { provider?: ProviderId; repo: string; dir: string; number: number; branch?: string; base?: string; brief?: string }) => {
   try {
     const repo = p?.repo, dir = p?.dir, num = p?.number;
     const provider = (p?.provider || 'github') as ProviderId;
@@ -955,26 +955,28 @@ ipcMain.handle('git:pr-resolve-worktree', async (_e, p: { provider?: ProviderId;
       if (src && okRef(src) && (await runBin(git, ['-C', repoRoot, 'fetch', 'origin', src], { timeout: 120000 })).ok)
         pushable = (await runBin(git, ['-C', wtPath, 'branch', `--set-upstream-to=origin/${src}`, branch])).ok;
     }
+    // Drop the stage brief now that the worktree exists (so the resolve pipeline reads it like any other stage 0).
+    const briefRel = await dropSlayerBrief(git, wtPath, `.slayer/pr-${num}.md`, typeof p?.brief === 'string' ? p.brief : '');
     // Already mid-merge from a previous resolve attempt → don't touch it; just report the conflicts and reopen.
     if ((await runBin(git, ['-C', wtPath, 'rev-parse', '-q', '--verify', 'MERGE_HEAD'])).ok) {
       const uf = await runBin(git, ['-C', wtPath, 'diff', '--name-only', '--diff-filter=U']);
-      return { ok: true, path: wtPath, branch, base, merging: true, pushable, conflicts: uf.ok ? uf.stdout.split('\n').map((s) => s.trim()).filter(Boolean) : [] };
+      return { ok: true, path: wtPath, branch, base, briefRel, merging: true, pushable, conflicts: uf.ok ? uf.stdout.split('\n').map((s) => s.trim()).filter(Boolean) : [] };
     }
     // Refuse to merge over uncommitted local edits — leave the worktree exactly as the user left it.
     const dirtyRes = await runBin(git, ['-C', wtPath, 'status', '--porcelain']);
-    if (dirtyRes.ok && dirtyRes.stdout.trim()) return { ok: true, path: wtPath, branch, base, dirty: true, pushable, conflicts: [] };
+    if (dirtyRes.ok && dirtyRes.stdout.trim()) return { ok: true, path: wtPath, branch, base, briefRel, dirty: true, pushable, conflicts: [] };
     // Fetch the latest base and merge it in — conflicts (if any) now live in the worktree for resolution.
     const fb = await runBin(git, ['-C', wtPath, 'fetch', 'origin', base], { timeout: 120000 });
     if (!fb.ok) return { ok: false, error: `Couldn't fetch base ${base}: ${lastLine(fb, 'fetch failed')}` };
     const merge = await runBin(git, ['-C', wtPath, 'merge', '--no-edit', 'FETCH_HEAD']);
-    if (merge.ok) return { ok: true, path: wtPath, branch, base, clean: true, pushable, conflicts: [] };  // merged cleanly — PR was BEHIND, not conflicting
+    if (merge.ok) return { ok: true, path: wtPath, branch, base, briefRel, clean: true, pushable, conflicts: [] };  // merged cleanly — PR was BEHIND, not conflicting
     const uf = await runBin(git, ['-C', wtPath, 'diff', '--name-only', '--diff-filter=U']);
     const conflicts = uf.ok ? uf.stdout.split('\n').map((s) => s.trim()).filter(Boolean) : [];
     if (!conflicts.length) {  // merge failed for a non-conflict reason → abort so the worktree stays clean, surface why
       await runBin(git, ['-C', wtPath, 'merge', '--abort']).catch(() => {});
       return { ok: false, error: lastLine(merge, 'merge failed') };
     }
-    return { ok: true, path: wtPath, branch, base, merging: true, pushable, conflicts };
+    return { ok: true, path: wtPath, branch, base, briefRel, merging: true, pushable, conflicts };
   } catch (err) { logFatal('git:pr-resolve-worktree', err); return { ok: false, error: 'Resolve worktree failed' }; }
 });
 

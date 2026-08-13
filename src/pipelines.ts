@@ -91,6 +91,26 @@ const CUSTOM_BRIEF = `{issue}
 Replace this with the task for this stage, then carry it out.
 (If this stage should gate the next one, end by writing \`{verdictRel}\` as JSON: {"passed": true, "summary": "…"}.)`;
 
+// PR resolve: the PR's source branch is checked out AND its base branch has already been merged in (by the
+// resolve worktree prep), so the conflict is live for the agent to fix, commit, and push back to the PR.
+export const PR_RESOLVE_BRIEF = `{issue}
+
+---
+
+## Resolve this pull request's merge conflict
+The PR's source branch is checked out in THIS worktree, and its base branch (\`{base}\`) has just been merged in — leaving merge conflicts that block the PR. Resolve them so the PR can merge cleanly:
+
+1. **Find the conflicts:** \`git status\` and \`git diff --name-only --diff-filter=U\` list the conflicted files. (If there are none, the base merged cleanly — skip to step 4.)
+2. **Resolve each file:** reconcile the \`<<<<<<<\` / \`=======\` / \`>>>>>>>\` markers by keeping the intent of BOTH sides — the PR's change AND the base's change. Never blindly discard either side; read the surrounding code to understand what each meant.
+3. **Verify:** \`git add\` the resolved files, then run the project's build / tests to confirm nothing broke.
+4. **Commit & push:** \`git commit --no-edit\` to conclude the merge, then \`git push origin HEAD:{source}\` to update the pull request's branch. If that push is rejected (e.g. the PR comes from a fork you can't push to), do NOT push elsewhere — stop and report that a maintainer needs to push the resolution, and set passed=false below.
+
+Do not change unrelated code. If a conflict genuinely needs a human decision, leave it, explain what's ambiguous, and set passed=false below.
+
+When you're done, write your verdict to \`{verdictRel}\` as JSON on one object:
+{"passed": true, "summary": "which files you resolved, whether the build/tests passed, and that you pushed the update"}
+Set passed=true only if you resolved ALL conflicts, the build/tests pass, and you pushed; false if anything remains unresolved or needs a human.`;
+
 // PR review: the PR's SOURCE branch is already checked out in the worktree, so the agent reviews the real diff.
 export const PR_REVIEW_BRIEF = `{issue}
 
@@ -120,6 +140,7 @@ export const STAGE_KINDS: KindSpec[] = [
   { kind: 'reproduce', label: 'Reproduce', dot: '#22c3cf', gates: true,  brief: REPRODUCE_BRIEF },
   { kind: 'test',      label: 'Test',      dot: '#8fd0ff', gates: true,  brief: TEST_BRIEF },
   { kind: 'review',    label: 'Review',    dot: '#a78bfa', gates: true,  brief: REVIEW_BRIEF },
+  { kind: 'resolve',   label: 'Resolve',   dot: '#e0774a', gates: true,  brief: PR_RESOLVE_BRIEF },
   { kind: 'custom',    label: 'Custom',    dot: '#9aa3af', gates: false, brief: CUSTOM_BRIEF },
 ];
 export const kindSpec = (kind: StageKind): KindSpec => STAGE_KINDS.find((k) => k.kind === kind) || STAGE_KINDS[STAGE_KINDS.length - 1];
@@ -130,7 +151,7 @@ export function stageBrief(kind: StageKind, overrides?: Record<string, string>):
 }
 
 /* ----------------------------- brief rendering ----------------------------- */
-export interface BriefCtx { issue: string; number: number; title: string; closeStep: string; verdictRel: string; base?: string; }
+export interface BriefCtx { issue: string; number: number; title: string; closeStep: string; verdictRel: string; base?: string; source?: string; }
 // Interpolate ONLY the known tokens (so literal JSON braces like {"passed":…} in the template are untouched).
 export function renderBrief(brief: string, ctx: BriefCtx): string {
   return brief
@@ -139,6 +160,7 @@ export function renderBrief(brief: string, ctx: BriefCtx): string {
     .replace(/\{title\}/g, ctx.title)
     .replace(/\{closeStep\}/g, ctx.closeStep)
     .replace(/\{base\}/g, ctx.base || 'the base branch')
+    .replace(/\{source\}/g, ctx.source || 'HEAD')
     .replace(/\{verdictRel\}/g, ctx.verdictRel);
 }
 
@@ -192,7 +214,14 @@ const reviewPr: PipelineDef = {
   desc: 'Check out the PR branch and review the real diff; reports ready ✓ or changes-requested.',
   stages: [{ id: 'review', name: 'Review', kind: 'review', brief: PR_REVIEW_BRIEF, edges: [{ when: 'valid', to: STOP }, { when: 'invalid', to: STOP }], x: 60, y: 110 }],
 };
-export const PR_BUILTIN_PIPELINES: PipelineDef[] = [reviewPr];
+// Resolve-conflicts pipeline: the worktree prep merges the base branch in (conflict live), then the agent fixes
+// the conflicts, commits, and pushes. A GATE stage → its verdict reports resolved ✓ or needs-a-human (changes).
+const resolvePr: PipelineDef = {
+  id: 'resolve-pr', name: 'Resolve conflicts', builtin: true,
+  desc: 'Merge the base branch in, then have the agent resolve the conflicts, commit, and push the update.',
+  stages: [{ id: 'resolve', name: 'Resolve', kind: 'resolve', brief: PR_RESOLVE_BRIEF, edges: [{ when: 'valid', to: STOP }, { when: 'invalid', to: STOP }], x: 60, y: 110 }],
+};
+export const PR_BUILTIN_PIPELINES: PipelineDef[] = [reviewPr, resolvePr];
 export function prPipelines(custom?: PipelineDef[]): PipelineDef[] {
   const seen = new Set(PR_BUILTIN_PIPELINES.map((p) => p.id));
   const extra = (custom || []).filter((p) => p && p.id && !seen.has(p.id));

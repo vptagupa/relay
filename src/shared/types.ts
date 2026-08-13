@@ -280,7 +280,7 @@ export interface Issue {
 // A pipeline is a graph of STAGES wired by conditional EDGES. Briefs are TEMPLATE STRINGS (tokens
 // {issue} {number} {title} {closeStep} {verdictRel}) so a user-authored pipeline round-trips through JSON;
 // edges reference a stage by its stable `id` (not its editable name) or the sentinel 'stop'.
-export type StageKind = 'validate' | 'fix' | 'reproduce' | 'test' | 'review' | 'custom';
+export type StageKind = 'validate' | 'fix' | 'reproduce' | 'test' | 'review' | 'resolve' | 'custom';
 export type EdgeWhen = 'valid' | 'invalid' | 'always';
 export interface PipelineEdge { when: EdgeWhen; to: string; } // to = a stage id, or 'stop' (stop & report)
 export interface StageDef {

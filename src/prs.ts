@@ -193,8 +193,8 @@ function ensureHoverEl(): HTMLElement {
       const t = e.target as HTMLElement;
       // ⚡ Review → open the pipeline-assign dialog for this PR (not the provider).
       if (t.closest('.prh-review')) { const pr = hoverPr; if (pr) { hidePrHover(); void openPrAssign(prRefOf(pr), prCtxOf(pr)); } return; }
-      // ⚔ Resolve → open a terminal in a worktree with the conflict live.
-      if (t.closest('.prh-resolve')) { const pr = hoverPr; if (pr) { hidePrHover(); void resolvePr(pr); } return; }
+      // ⚔ Resolve → open the Assign dialog pre-selected with the resolve pipeline (agent fixes the conflict).
+      if (t.closest('.prh-resolve')) { const pr = hoverPr; if (pr) { hidePrHover(); void openPrAssign(prRefOf(pr), prCtxOf(pr), { pipelineId: 'resolve-pr' }); } return; }
       // Only the "open on <provider>" footer opens the PR — clicking the title/body does nothing (so text stays selectable).
       if (!t.closest('.prh-hint')) return;
       const url = detailCache.get(hoverKey)?.url || hoverUrl; if (url) relay.openExternal(url);
@@ -298,34 +298,10 @@ async function sweepMergeStatus(seq: number, retry = 0): Promise<void> {
     window.setTimeout(() => { if (seq === loadSeq) void sweepMergeStatus(seq, retry + 1); }, 2500);
 }
 
-// Open the conflict-resolution stage for a PR: check out its source branch into a worktree with the base merged
-// in (conflict live), then open a terminal there to resolve → commit → push. Needs the base branch (from the
-// cached/fetched detail).
-let resolving = false;   // guards the whole flow (incl. the base fetch) so a double-click can't open two terminals
-async function resolvePr(p: PrItem): Promise<void> {
-  if (resolving) return;
-  resolving = true;
-  try {
-    const prov = prProvider(p), r = prRepo(p), num = p.number, word = PR_WORD[prov];
-    let base = detailCache.get(prKey(p))?.baseBranch || '';
-    if (!base) {   // detail not fetched yet (e.g. clicked before the sweep reached it) → fetch it now for the base branch
-      const d = await relay.providerPrDetail(wsKey(), prov, r, num).catch(() => null);
-      if (d && d.ok && d.detail) { detailCache.set(prKey(p), d.detail as PrDetail); base = d.detail.baseBranch || ''; }
-    }
-    if (!base) { toast(`Couldn't determine the base branch for ${word} #${num}`); return; }
-    toast(`Preparing a conflict worktree for ${word} #${num}…`, true);
-    const res = await relay.prResolveWorktree(prov, r, state.settings.workspace || '', num, p.branch, base).catch(() => ({ ok: false, error: 'Resolve failed' }));
-    if (!res.ok || !res.path) { toast(res.error || `Couldn't prepare the conflict worktree for ${word} #${num}`); return; }
-    deps.openAgentTab({ cwd: res.path, name: `${word} #${num} · resolve`, runCmd: 'git status' });   // surface the conflicted files on open
-    const n = res.conflicts?.length || 0;
-    // The worktree branch is `pr-<n>` but its upstream is origin/<source> — a bare `git push` refuses on the name
-    // mismatch (push.default=simple), so hand the user the explicit refspec that actually updates the PR.
-    const pushCmd = res.pushable ? `git push origin HEAD:${p.branch}` : '';
-    if (res.dirty) toast(`${word} #${num}: worktree has uncommitted changes — opened as-is (didn't merge ${base})`);
-    else if (res.clean) toast(res.pushable ? `${word} #${num}: ${base} merged cleanly — no conflicts. Push to update: ${pushCmd}` : `${word} #${num}: ${base} merged cleanly — no conflicts.`, true);
-    else toast(res.pushable ? `${word} #${num}: ${n} conflicted file${n === 1 ? '' : 's'} — resolve & commit, then: ${pushCmd}` : `${word} #${num}: ${n} conflicted file${n === 1 ? '' : 's'} — resolve & commit (push needs the source repo/fork)`, true);
-  } finally { resolving = false; }
-}
+// The ⚔ resolve action opens the PR Assign dialog pre-selected with the built-in 'resolve-pr' pipeline (see the
+// row/hover handlers). The dialog's runner (pr-review.ts) materializes the conflict (merges the base in) and runs
+// an agent stage that resolves → commits → pushes — so resolution is a proper staged run with a status chip, not
+// a one-off terminal.
 
 /* ----------------------------- repo + author pickers ----------------------------- */
 // The PR rail's OWN repo picker (mirrors the Issues rail menu) — picks from the tracked repos, sets prRepoByWs.
@@ -442,8 +418,8 @@ function render(): void {
     if (asg) asg.onclick = (e) => { e.stopPropagation(); hidePrHover(); if (p) void openPrAssign(prRefOf(p), prCtxOf(p)); };
     const chip = row.querySelector<HTMLElement>('[data-prrun]');
     if (chip) chip.onclick = (e) => { e.stopPropagation(); if (p) onPrChip(prProvider(p), prRepo(p), p.number); };
-    const res = row.querySelector<HTMLElement>('[data-prresolve]');   // ⚔ open the conflict-resolution terminal
-    if (res) res.onclick = (e) => { e.stopPropagation(); hidePrHover(); if (p) void resolvePr(p); };
+    const res = row.querySelector<HTMLElement>('[data-prresolve]');   // ⚔ resolve the conflict via an agent pipeline
+    if (res) res.onclick = (e) => { e.stopPropagation(); hidePrHover(); if (p) void openPrAssign(prRefOf(p), prCtxOf(p), { pipelineId: 'resolve-pr' }); };
   });
 }
 
