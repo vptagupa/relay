@@ -251,6 +251,9 @@ ipcMain.handle('pty:create', async (e, { id, cwd, cols, rows, restore, runCmd, d
     // A pipeline run may reference a saved DB credential template — resolve it HERE (main-only) into env vars
     // for this shell, so the agent can connect without the secret ever touching the renderer or a file on disk.
     const envExtra = typeof dbCredId === 'string' && dbCredId ? await keys.resolveDbCredEnv(dbCredId).catch(() => ({})) : undefined;
+    // Pick up a PATH change since launch (e.g. the user just installed node/git) so this shell — spawned with
+    // {...process.env} — sees the new tools. Throttled/deduped + guarded, so it never blocks or breaks the spawn.
+    await refreshPathFromRegistry().catch(() => false);
     const reattached = createTerm(id, cwd, e.sender, cols, rows, restore, integrate, typeof runCmd === 'string' ? runCmd : undefined, envExtra, useConpty);
     // `alt` lets the renderer restore the live-interactive view for a reattached full-screen TUI (Claude Code).
     return { reattached, alt: isAltScreen(id) };
@@ -296,16 +299,13 @@ ipcMain.handle('sessions:delete', (_e, id) => store.deleteSession(id));
 ipcMain.handle('sessions:reorder', (_e, ids) => store.reorderSessions(ids));
 
 /* -------------------- Claude Code integration -------------------- */
-// Is the Claude Code CLI on PATH? (Detection uses the app's PATH; a GUI-launched app may
-// miss shells' interactive PATH, so this is a hint — the launcher runs `claude` regardless.)
-ipcMain.handle('claude:detect', () =>
-  new Promise<{ installed: boolean; path?: string }>((resolve) => {
-    const cmd = process.platform === 'win32' ? 'where claude' : 'command -v claude';
-    exec(cmd, { timeout: 6000, windowsHide: true }, (err, stdout) => {
-      const out = (stdout || '').trim().split(/\r?\n/)[0];
-      resolve({ installed: !err && !!out, path: out || undefined });
-    });
-  }));
+// Is the Claude Code CLI on PATH? Via resolveBin so it shares the miss-not-cached + registry-PATH-refresh logic:
+// a claude installed AFTER launch (e.g. the "press Enter to install" flow) is detected without an app restart.
+// (Still a hint — a GUI-launched app may miss shells' interactive PATH; the launcher runs `claude` regardless.)
+ipcMain.handle('claude:detect', async () => {
+  const p = await resolveBin('claude');
+  return { installed: !!p, path: p || undefined };
+});
 // Anthropic auth available without a pasted key? (Relay-stored key, or ambient env creds
 // the way Claude Code / the Anthropic SDK resolve them.)
 ipcMain.handle('claude:auth', async () => {
@@ -317,20 +317,72 @@ ipcMain.handle('claude:auth', async () => {
 });
 
 /* -------------------- Issue Agent (Phase 1: read-only GitHub via gh) -------------------- */
-// Resolve an executable's absolute path once. Windows execFile won't PATHEXT-resolve a bare name,
-// so look it up like claude:detect and cache. Names are hardcoded literals, never user input.
-const binCache = new Map<string, string | null>();
-function resolveBin(name: string): Promise<string | null> {
-  if (binCache.has(name)) return Promise.resolve(binCache.get(name)!);
+// Read one registry Environment key's persistent `Path` value (REG_SZ / REG_EXPAND_SZ). '' on any error or if the
+// value is absent. `key` is a fixed literal (no user input); quoted for the space in "Session Manager".
+function regQueryPath(key: string): Promise<string> {
+  return new Promise((resolve) => {
+    exec(`reg query "${key}" /v Path`, { timeout: 6000, windowsHide: true }, (err, stdout) => {
+      if (err || !stdout) return resolve('');
+      const line = stdout.split(/\r?\n/).map((l) => l.trim()).find((l) => /^Path\s+REG_(?:EXPAND_)?SZ/i.test(l));
+      resolve(line ? (line.split(/REG_(?:EXPAND_)?SZ/i)[1] || '').trim() : '');
+    });
+  });
+}
+// A running process keeps the PATH it launched with, so a tool the user installs AFTER launch (git, node/npm, a
+// coding agent) stays invisible until the app restarts — the reported "installed git but it still says missing"
+// bug. Re-read the PERSISTENT PATH (HKLM system + HKCU user) from the registry and fold any NEW directories into
+// this process's PATH. Windows-only; in-flight-deduped (agents:detect probes several bins at once → one read) and
+// throttled. New PTYs spawn with `{...process.env}`, so a refreshed PATH reaches freshly-opened terminals too.
+let lastPathRefresh = 0;
+let pathRefreshInFlight: Promise<boolean> | null = null;
+function refreshPathFromRegistry(): Promise<boolean> {
+  if (process.platform !== 'win32') return Promise.resolve(false);
+  if (pathRefreshInFlight) return pathRefreshInFlight;                     // coalesce concurrent callers onto one read
+  if (Date.now() - lastPathRefresh < 3000) return Promise.resolve(false); // don't re-read the registry more than ~once/3s
+  const work = (async () => {
+    try {
+      const [sys, usr] = await Promise.all([
+        regQueryPath('HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment'),
+        regQueryPath('HKCU\\Environment'),
+      ]);
+      const expand = (s: string) => s.replace(/%([^%]+)%/g, (_m, v) => process.env[v] || `%${v}%`); // REG_EXPAND_SZ vars
+      const fresh = [expand(sys), expand(usr)].filter(Boolean).join(path.delimiter);
+      const cur = process.env.PATH || '';
+      const have = new Set(cur.split(path.delimiter).map((s) => s.trim().toLowerCase()).filter(Boolean));
+      const added = fresh.split(path.delimiter).map((s) => s.trim()).filter(Boolean).filter((d) => !have.has(d.toLowerCase()));
+      if (!added.length) return false;
+      process.env.PATH = cur + path.delimiter + added.join(path.delimiter);
+      logLine(`env: PATH refreshed from registry (+${added.length} new dir${added.length > 1 ? 's' : ''})`);
+      return true;
+    } catch { return false; } finally { lastPathRefresh = Date.now(); pathRefreshInFlight = null; }
+  })();
+  pathRefreshInFlight = work;
+  return work;
+}
+// Resolve an executable's absolute path. Windows execFile won't PATHEXT-resolve a bare name, so look it up.
+// Names are hardcoded literals, never user input. Only SUCCESSES are cached — a miss is NEVER cached (that was
+// the "restart to fix" bug: a cached null persisted after the user installed the tool). On a Windows miss we
+// re-read the PATH from the registry and retry, so a just-installed git/npm/agent is found without a restart.
+const binCache = new Map<string, string>();
+function whereBin(name: string): Promise<string | null> {
   return new Promise((resolve) => {
     const cmd = process.platform === 'win32' ? `where ${name}` : `command -v ${name}`;
     exec(cmd, { timeout: 6000, windowsHide: true }, (err, stdout) => {
       const p = (stdout || '').trim().split(/\r?\n/)[0] || '';
-      const r = !err && p ? p : null;
-      binCache.set(name, r);
-      resolve(r);
+      resolve(!err && p ? p : null);
     });
   });
+}
+async function resolveBin(name: string): Promise<string | null> {
+  const hit = binCache.get(name);
+  if (hit) return hit;                                        // cache holds only hits — never a stale "missing"
+  let r = await whereBin(name);
+  if (!r && process.platform === 'win32') {                   // installed since launch (or since another probe's refresh)?
+    await refreshPathFromRegistry();                          // (deduped/throttled) re-read PATH, then retry with it
+    r = await whereBin(name);
+  }
+  if (r) binCache.set(name, r);
+  return r;
 }
 // Run a resolved binary with an ARG ARRAY (never a shell string — no injection). Resolves to the
 // outcome and never rejects, so callers can compose a sequence of git steps with plain awaits.
