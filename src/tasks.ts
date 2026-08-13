@@ -341,8 +341,9 @@ function openTaskDetails(t: Task): void {
   const inProgress = t.status === 'validating' || t.status === 'authoring' || t.status === 'reviewing'; // a stage is live — don't offer to re-run
   const runLabel = feature ? (t.status === 'draft' ? '🚀 Author spec' : '⟲ Re-author') : (t.status === 'draft' ? '⚡ Validate' : '⟲ Re-validate');
   const resultLabel = feature ? 'Spec / review result' : 'Validation result';
+  const stopWord = feature ? (t.status === 'reviewing' ? 'review' : 'authoring') : 'validating';
   const action = filed ? `<button class="tpl-btn pri" data-open>Open issue #${t.issueNumber} ↗</button>`
-    : inProgress ? `<span class="mut" style="align-self:center;font-size:12px">${esc(STATUS_LABEL[t.status])}</span>`
+    : inProgress ? `<button class="tpl-btn pri" data-stop title="Stop this run and reset the task so you can re-run it">■ Stop ${stopWord}</button>`
     : `<button class="tpl-btn pri" data-run>${runLabel}</button>`;
   const { root, close } = modal(`<div class="tpl-card iss-card">
       <div class="hd"><span class="dot" style="background:var(--accent)"></span><span class="t">${esc(t.title)}<small>${esc(t.repo)} · ${esc(STATUS_LABEL[t.status])}</small></span></div>
@@ -359,6 +360,14 @@ function openTaskDetails(t: Task): void {
   root.querySelector('[data-del]')?.addEventListener('click', () => { close(); deleteTask(t.id); toast('Task deleted'); });
   root.querySelector('[data-edit]')?.addEventListener('click', () => { close(); openTaskForm(t); });
   root.querySelector('[data-run]')?.addEventListener('click', () => { close(); void runValidate(t); });
+  // ■ Stop — cancel a live run (or clear a stuck one whose terminal/app was closed) and reset to draft so the
+  // task is runnable again. The orphaned agent tab, if still open, just finishes into a verdict nobody polls.
+  root.querySelector('[data-stop]')?.addEventListener('click', () => {
+    running.delete(t.id); ensurePoll();
+    const cur = tasksFor(wsKey()).find((x) => x.id === t.id) || t;
+    upsertTask({ ...cur, status: 'draft' });
+    close(); toast('Stopped — task reset to draft');
+  });
   // ⧉ Reopen a terminal in this task's existing worktree (survives a closed tab / crash / quit). Shown only if it exists.
   const termBtn = root.querySelector<HTMLElement>('[data-term]');
   if (termBtn) void relay.worktreesList(t.provider as ProviderId, t.repo, state.settings.workspace || '').then((res: { ok: boolean; list: { branch: string; path: string }[] }) => {
@@ -419,10 +428,28 @@ function openTaskRepoMenu(): void {
 }
 
 /* ----------------------------- wire-up ----------------------------- */
+// On boot the in-memory `running` map is empty, so any task PERSISTED as in-progress has no live run behind it —
+// its agent died with the previous session and its verdict will never arrive, so it would show "validating…"
+// forever with no way forward. Reset those (across all workspaces) to draft so they're runnable again. (Within a
+// session, a killed terminal is handled by the Stop button in Details.)
+function recoverStuckTasks(): void {
+  const wip = (s: Task['status']): boolean => s === 'validating' || s === 'authoring' || s === 'reviewing';
+  const byWs = { ...(state.settings.tasksByWs || {}) };
+  let n = 0, changed = false;
+  for (const [ws, list] of Object.entries(byWs)) {
+    if (!list?.some((t) => wip(t.status))) continue;
+    byWs[ws] = list.map((t) => wip(t.status) ? (n++, { ...t, status: 'draft' as Task['status'] }) : t);
+    changed = true;
+  }
+  if (changed) { state.settings.tasksByWs = byWs; void saveTasks(byWs); }
+  if (n) toast(`Reset ${n} interrupted validation${n > 1 ? 's' : ''} — re-run when ready`);
+}
+
 export function initTasks(d: TasksDeps): void {
   deps = d;
   const nw = $('#taskNew'); if (nw) nw.onclick = () => openTaskForm();
   const rsel = $('#taskRepo'); if (rsel) rsel.onclick = (e) => { e.stopPropagation(); openTaskRepoMenu(); };
+  recoverStuckTasks();   // clear any "validating…" left stuck by a previous session before the first render
   render();
   // Resume filed-issue tracking after a reboot: the persisted status shows immediately; re-sync shortly after.
   ensureTracking();
