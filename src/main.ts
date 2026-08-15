@@ -588,6 +588,19 @@ ipcMain.handle('provider:pr-detail', async (_e, p: { provider: ProviderId; ws: s
   if (!validRepo(p?.repo) || !Number.isInteger(p?.number) || p.number <= 0) return { ok: false, error: 'Invalid request' };
   return a.prDetail(p?.ws, p.repo, p.number);
 });
+// Add / remove a real label ON the provider issue (Issues rail's + / label ×). label is a bounded plain string.
+ipcMain.handle('provider:add-label', async (_e, p: { provider: ProviderId; ws: string; repo: string; number: number; label: string }) => {
+  const a = providerOf(p?.provider); if (!a) return badProvider;
+  const label = typeof p?.label === 'string' ? p.label.trim().slice(0, 50) : '';
+  if (!validRepo(p?.repo) || !Number.isInteger(p?.number) || p.number <= 0 || !label) return { ok: false, error: 'Invalid request' };
+  return a.addLabel(p?.ws, p.repo, p.number, label);
+});
+ipcMain.handle('provider:remove-label', async (_e, p: { provider: ProviderId; ws: string; repo: string; number: number; label: string }) => {
+  const a = providerOf(p?.provider); if (!a) return badProvider;
+  const label = typeof p?.label === 'string' ? p.label.trim() : '';
+  if (!validRepo(p?.repo) || !Number.isInteger(p?.number) || p.number <= 0 || !label) return { ok: false, error: 'Invalid request' };
+  return a.removeLabel(p?.ws, p.repo, p.number, label);
+});
 // Repo members (collaborators) — the PR author-filter list.
 ipcMain.handle('provider:repo-members', async (_e, p: { provider: ProviderId; ws: string; repo: string }) => {
   const a = providerOf(p?.provider); if (!a) return badProvider;

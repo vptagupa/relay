@@ -28,7 +28,8 @@ export interface PrRef { number: number; title?: string; branch: string; url?: s
 export interface PrCtx { provider: ProviderId; repo: string; dir: string; }
 
 export interface PrReviewDeps {
-  openAgentTab: (o: { cwd: string; name: string; runCmd?: string; dbCredId?: string }) => void; // open a terminal tab in the worktree, launching the agent (dbCredId → inject a DB credential template into its env)
+  openAgentTab: (o: { cwd: string; name: string; runCmd?: string; dbCredId?: string }) => Promise<string>; // open a terminal tab in the worktree, launching the agent (dbCredId → inject a DB credential template into its env); resolves to the tab id
+  onAgentTabClosed: (cb: (tabId: string) => void) => void;                    // subscribe to terminal-closed → free the review slot held by that tab
   refresh: () => void;                                                        // re-render the PR rail (a run's status changed)
 }
 let deps: PrReviewDeps;
@@ -81,6 +82,7 @@ interface PrRunInfo {
   source: string;        // source (head) branch — the {source} push target for the resolve stage
   pipeline: PipelineDef; // snapshot at assign time (survives later edits to a custom pipeline)
   stageIdx: number; wt: string; agentId: string; brief0Rel: string;
+  agentTabId?: string;   // the current stage's terminal — closing it frees this review's slot
   awaiting: boolean;     // true while a GATE stage's verdict is being polled
   reason?: string;       // the review summary (shown after a terminal outcome)
 }
@@ -111,7 +113,7 @@ function stageBriefText(p: PipelineDef, idx: number, ctx: { number: number; titl
 async function launchPrStage(key: string, idx: number): Promise<void> {
   const run = prRuns.get(key); if (!run) return;
   const stage = run.pipeline.stages[idx]; if (!stage) return;
-  run.stageIdx = idx; run.awaiting = false; run.reason = undefined; // not awaiting yet — clear the stale verdict FIRST (below)
+  run.stageIdx = idx; run.awaiting = false; run.reason = undefined; run.agentTabId = undefined; // not awaiting yet — clear the stale verdict FIRST (below); tab rebound once it opens
   prRunStatus.set(key, stageToStatus(stage.kind)); // synchronous, so workingCount() is correct before the async prep
   const briefRel = idx === 0 ? run.brief0Rel : `.slayer/stage-${idx}.md`;
   // A referenced DB credential template → injected into this stage's env (every stage is its own shell) and its
@@ -124,7 +126,11 @@ async function launchPrStage(key: string, idx: number): Promise<void> {
   if (!prRuns.has(key)) return;                      // freed/cleared while we prepped
   run.awaiting = !!stage.edges?.length;              // only NOW poll for a verdict — after the stale one is gone (no early stale read)
   const agent = AGENTS.find((a) => a.id === run.agentId);
-  deps.openAgentTab({ cwd: run.wt, name: `PR #${run.number} · ${stage.name.toLowerCase()}`, runCmd: agent ? agent.launch(briefRel) : undefined, dbCredId: dbCredId || undefined });
+  // Bind THIS stage's terminal so closing it frees the review slot; guard on stageIdx so a slow promise from a
+  // prior stage can't overwrite a newer stage's tab.
+  void deps.openAgentTab({ cwd: run.wt, name: `PR #${run.number} · ${stage.name.toLowerCase()}`, runCmd: agent ? agent.launch(briefRel) : undefined, dbCredId: dbCredId || undefined })
+    .then((tabId) => { const r = prRuns.get(key); if (r && r.stageIdx === idx) r.agentTabId = tabId; })
+    .catch(() => { /* nothing to bind */ });
   deps.refresh(); ensureStagePoll();
 }
 
@@ -466,8 +472,22 @@ export async function openPrMap(prs: PrRef[], ctx: PrCtx): Promise<void> {
 }
 
 /* ----------------------------- wire-up ----------------------------- */
+// A terminal closed: if it was the CURRENT stage's tab of an OCCUPYING review, its agent is gone → free the slot
+// so the review queue can drain. A stale/finished-stage tab, or an already-resolved run, is ignored.
+function onAgentTabClosed(tabId: string): void {
+  for (const [key, run] of prRuns) {
+    if (run.agentTabId !== tabId) continue;
+    if (OCCUPYING.includes(prRunStatus.get(key) as PrStatus)) {
+      prRunStatus.delete(key); prRuns.delete(key);
+      toast(`Freed the review slot held by PR #${run.number} — its terminal was closed`);
+      drainQueue(); deps.refresh(); ensureStagePoll();
+    }
+    return;
+  }
+}
 let wsIdFn: () => string = () => 'ws_default';
 const activeWs = () => wsIdFn() || 'ws_default';
 export function initPrReview(d: PrReviewDeps & { activeWsId: () => string }): void {
   deps = d; wsIdFn = d.activeWsId;
+  d.onAgentTabClosed(onAgentTabClosed);   // closing a review terminal frees its slot (queue can't wedge on a dead run)
 }

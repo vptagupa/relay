@@ -21,7 +21,8 @@ import { noteChecks, notesNote, defaultNoteIds } from './brief-notes';
 const relay = (window as any).relay;
 
 export interface IssuesDeps {
-  openAgentTab: (o: { cwd: string; name: string; runCmd?: string; dbCredId?: string }) => void; // open a terminal tab in the issue worktree, launching the agent (dbCredId → inject a DB credential template into its env)
+  openAgentTab: (o: { cwd: string; name: string; runCmd?: string; dbCredId?: string }) => Promise<string>; // open a terminal tab in the issue worktree, launching the agent (dbCredId → inject a DB credential template into its env); resolves to the tab id
+  onAgentTabClosed: (cb: (tabId: string) => void) => void;   // subscribe to terminal-closed events → free the run holding a slot via that tab
   activeWsId: () => string;   // the active workspace id — Issues (tracked repos + active repo) are per-workspace
 }
 let deps: IssuesDeps;
@@ -142,6 +143,7 @@ interface RunInfo {
   stageIdx: number;     // the currently-active stage (or the gate that failed, for `invalid`)
   wt: string;           // the issue's worktree path (where .slayer/ briefs + verdicts live)
   agentId: string;
+  agentTabId?: string;  // the CURRENT stage's terminal tab — closing it frees this run's slot (updated each stage)
   brief0Rel: string;    // stage 0's brief file (written by worktree-add); later stages get their own
   awaiting: boolean;    // true while a GATE stage's verdict is being polled
   reason?: string;      // an `invalid` gate's explanation (shown in Details; drives the override)
@@ -323,14 +325,36 @@ async function removeTag(n: number, t: string, p: ProviderId = provider, r: stri
   activeFilters.delete(t);
   await persist(); render();
 }
+// Add a REAL label to the issue ON the provider (GitHub/GitLab). Reflects the provider's returned label set on
+// the row. Falls back to a private local tag when the provider can't (Bitbucket) or the write fails — so the
+// intent is never silently lost.
+async function addIssueLabel(iss: Issue, raw: string): Promise<void> {
+  const name = raw.trim().slice(0, 50);
+  if (!name) { render(); return; }
+  const p = issP(iss), r = issR(iss);
+  const res = await relay.providerAddLabel(wsKey(), p, r, iss.number, name).catch(() => ({ ok: false, error: 'request failed' }));
+  if (res.ok && res.labels) { iss.labels = res.labels; render(); toast(`Labeled #${iss.number} “${name}”`, true); }
+  else { await addTag(iss.number, name, p, r); toast(res.error ? `${res.error} — kept “${name}” as a local tag` : `Kept “${name}” as a local tag`); }
+}
+// Remove a REAL label from the issue on the provider; reflect the returned set on the row.
+async function removeIssueLabel(iss: Issue, name: string): Promise<void> {
+  const res = await relay.providerRemoveLabel(wsKey(), issP(iss), issR(iss), iss.number, name).catch(() => ({ ok: false, error: 'request failed' }));
+  if (res.ok && res.labels) { iss.labels = res.labels; render(); toast(`Removed “${name}” from #${iss.number}`, true); }
+  else toast(res.error || `Couldn't remove “${name}”`);
+}
 
 const hexColor = (c?: string) => (c && /^[0-9a-fA-F]{6}$/.test(c) ? '#' + c : '');
-function labelHtml(l: { name: string; color?: string }): string {
+function labelHtml(l: { name: string; color?: string }, key?: string): string {
   const c = hexColor(l.color);
-  return `<span class="isr-lab"${c ? ` style="border-color:${c}88;color:${c}"` : ''}>${esc(l.name)}</span>`;
+  // With a row key the label is provider-removable: its × (only) triggers removeIssueLabel; the rest of the chip
+  // stays inert so a stray click can't delete a real label.
+  return `<span class="isr-lab${key ? ' rm' : ''}"${c ? ` style="border-color:${c}88;color:${c}"` : ''}${key ? ` data-key="${esc(key)}" data-lab="${esc(l.name)}"` : ''}>${esc(l.name)}${key ? '<span class="x" title="Remove this label from the issue">×</span>' : ''}</span>`;
 }
 // A PR/MR on the issue-N branch means the run reached review; else the in-session run state; else idle.
-const statusOf = (n: number, p: ProviderId = provider, r: string = repo || ''): RunStatus => (prByBranch[`issue-${n}`] ? 'review' : runStatus.get(rk(n, p, r)) || 'idle');
+// An issue's open PR/MR, if any — keyed per-repo (issue-N branches collide across repos in All-repos scope), so
+// the 'review' status + PR button are consistent whether you're in a single repo or All repos.
+const prOf = (p: ProviderId | string, r: string, n: number) => prByBranch[wtKey(p, r, `issue-${n}`)];
+const statusOf = (n: number, p: ProviderId = provider, r: string = repo || ''): RunStatus => (prOf(p, r, n) ? 'review' : runStatus.get(rk(n, p, r)) || 'idle');
 // Tooltip for a clickable status chip (idle/review chips aren't clickable → no tip).
 const chipTitle = (st: RunStatus): string =>
   st === 'queued' ? 'Click to remove from the queue'
@@ -434,6 +458,7 @@ function render(): void {
     const dp = issP(i), dr = issR(i); const key = keyOf(i);
     const st = statusOf(i.number, dp, dr); const tags = getTags(i.number, dp, dr);
     const wt = wtByBranch.get(wtKey(dp, dr, `issue-${i.number}`));
+    const pr = prOf(dp, dr, i.number);   // per-repo, so the PR button shows in All-repos too
     // Only an idle issue in the OPEN view is assignable; closed / in-progress rows open the details view.
     return `<div class="isr" data-key="${esc(key)}" title="${st === 'idle' && issueState === 'open' ? `Assign #${i.number} to a coding agent` : `View #${i.number} details`}">
       <div class="isr-hash">#${i.number}</div>
@@ -441,14 +466,14 @@ function render(): void {
         <div class="isr-title">${esc(i.title)}</div>
         ${(i.author || dr) ? `<div class="isr-repo"${dr ? ` title="${esc(dr)}"` : ''}>${i.author ? `<span class="isr-author" title="Created by ${esc(i.author)}">✍ ${esc(i.author)}</span>` : ''}${i.author && dr ? ' · ' : ''}${dr ? esc(dr) : ''}</div>` : ''}
         <div class="isr-labs">
-          ${i.labels.map(labelHtml).join('')}
+          ${i.labels.map((l) => labelHtml(l, key)).join('')}
           ${tags.map((t) => `<span class="isr-tag" data-key="${esc(key)}" data-tag="${esc(t)}" title="Remove #${esc(t)}">#${esc(t)}<span class="x">×</span></span>`).join('')}
-          <button class="isr-tagadd" data-key="${esc(key)}" title="Add a private local tag">+</button>
+          <button class="isr-tagadd" data-key="${esc(key)}" title="Add a label to this issue (on the repo)">+</button>
         </div>
       </div>
       <div class="isr-side">
         <span class="isr-st ${st}" data-key="${esc(key)}" title="${chipTitle(st)}">${st}</span>
-        ${prByBranch[`issue-${i.number}`] ? `<button class="isr-pr" data-url="${esc(prByBranch[`issue-${i.number}`].url)}" title="Open pull request">PR ↗</button>` : ''}
+        ${pr ? `<button class="isr-pr" data-url="${esc(pr.url)}" title="Open pull request">PR ↗</button>` : ''}
         ${wt ? `<button class="isr-term" data-wt="${esc(wt)}" data-num="${i.number}" title="Open a terminal in this issue's worktree">⧉</button>` : ''}
         <button class="isr-info" data-key="${esc(key)}" title="View issue details">ⓘ</button>
         <button class="isr-ext" data-url="${esc(i.url)}" title="Open #${i.number} ↗">↗</button>
@@ -485,16 +510,21 @@ function render(): void {
   el.querySelectorAll<HTMLElement>('.isr-tag').forEach((c) => {
     c.onclick = (e) => { e.stopPropagation(); const iss = byKey.get(c.dataset.key!); if (iss) void removeTag(iss.number, c.dataset.tag!, issP(iss), issR(iss)); };
   });
+  // Provider label removal — only the label's × removes it (a stray chip click stays inert / bubbles to the row).
+  el.querySelectorAll<HTMLElement>('.isr-lab.rm').forEach((c) => {
+    c.onclick = (e) => { if (!(e.target as HTMLElement).closest('.x')) return; e.stopPropagation(); const iss = byKey.get(c.dataset.key!); if (iss) void removeIssueLabel(iss, c.dataset.lab!); };
+  });
   el.querySelectorAll<HTMLElement>('.isr-tagadd').forEach((b) => {
     b.onclick = (e) => {
       e.stopPropagation();
       const iss = byKey.get(b.dataset.key!); if (!iss) return;
       const inp = document.createElement('input');
-      inp.className = 'isr-taginput'; inp.placeholder = 'tag'; inp.spellcheck = false; inp.maxLength = 24;
+      inp.className = 'isr-taginput'; inp.placeholder = 'label'; inp.spellcheck = false; inp.maxLength = 50;
       b.replaceWith(inp); inp.focus();
+      let done = false; const commit = (v: string) => { if (done) return; done = true; void addIssueLabel(iss, v); };
       inp.onclick = (ev) => ev.stopPropagation();
-      inp.onkeydown = (ev) => { ev.stopPropagation(); if (ev.key === 'Enter') { ev.preventDefault(); void addTag(iss.number, inp.value, issP(iss), issR(iss)); } else if (ev.key === 'Escape') { render(); } };
-      inp.onblur = () => { if (inp.value.trim()) void addTag(iss.number, inp.value, issP(iss), issR(iss)); else render(); };
+      inp.onkeydown = (ev) => { ev.stopPropagation(); if (ev.key === 'Enter') { ev.preventDefault(); commit(inp.value); } else if (ev.key === 'Escape') { done = true; render(); } };
+      inp.onblur = () => { if (inp.value.trim()) commit(inp.value); else if (!done) render(); };
     };
   });
 }
@@ -521,13 +551,15 @@ async function maybeMigrateProviders(ws: string): Promise<void> {
 // Resolve the active provider+repo (an explicit Sources pick, else inferred from the open folder's remote)
 // → check auth → pull its open issues. Each failure lands on a specific, actionable state.
 // "All repos": one request per tracked repo, tag each issue with its repo/provider, merge. Bounded to the first
-// page per repo (no cross-repo infinite scroll). Per-repo concepts (members, worktrees, review chips, assigned-
-// to-me) don't apply, so they're cleared. Errors surface only if nothing came back.
+// page per repo (no cross-repo infinite scroll). Worktrees (⧉) and review chips/PR buttons DO apply — they fan
+// out per-repo (loadAllWorktrees / loadAllPrs, keyed by provider:repo). Members / assigned-to-me are single-repo
+// only, so they're cleared. Errors surface only if nothing came back.
 async function loadAllRepos(seq: number, ws: string): Promise<void> {
   const tracked = (state.settings.issueReposByWs || {})[ws] || [];
   if (!tracked.length) { phase = 'norepo'; errMsg = 'No repos tracked yet — add some in Sources (⚙).'; render(); return; }
   members = []; membersFor = ''; wtByBranch = new Map(); wtFor = ''; prByBranch = {}; myLogin = '';
   void loadAllWorktrees(seq, tracked);   // ⧉ reopen-terminal icons across every tracked repo (non-blocking)
+  void loadAllPrs(seq, tracked);         // review chips + 'review' status across every tracked repo (non-blocking)
   let anyErr = '';
   const perRepo = await Promise.all(tracked.map(async (id) => {
     const { provider: p, repo: r } = parseRepoId(id);
@@ -583,7 +615,7 @@ export async function loadIssues(): Promise<void> {
   const forProvider = provider, forRepo = repo;
   relay.providerPrs(ws, forProvider, forRepo).then((pr: { ok: boolean; prs?: { branch: string; url: string; draft: boolean }[] }) => {
     if (seq !== loadSeq || !pr.ok || !pr.prs) return;
-    applyPrs(pr.prs); // a pre-existing PR/MR may free a slot for a queued issue
+    applyPrs(forProvider, forRepo, pr.prs); // a pre-existing PR/MR may free a slot for a queued issue
   }).catch(() => { /* PRs/MRs are a nice-to-have; the list still renders without them */ });
 }
 
@@ -630,7 +662,6 @@ async function loadMoreIssues(): Promise<void> {
 // NOT the displayed `issues` list, so an Open↔Closed toggle or a repo switch can't miscount runs whose
 // issue isn't currently pulled (which would over-launch past CAP or tear down the PR poll). A running stage
 // (validating/fixing) holds a slot; reaching review (applyPrs) or invalid frees it.
-const rkPrefix = (): string => `${provider}:${repo || ''}#`;
 // GLOBAL occupancy — the CAP is a total concurrency limit and the queue/drain are cross-repo (each run has its
 // OWN worktree), so count EVERY occupying run. Counting only the active repo let another repo's stuck slot wedge
 // the whole queue: a run stuck 'fixing' (its PR went undetected while rate-limited) would block assigns with no
@@ -640,16 +671,23 @@ const workingCount = (): number => {
   for (const s of runStatus.values()) if (OCCUPYING.includes(s)) c++;
   return c;
 };
-// Apply a fresh PR/MR map: light up review chips, and free the slot of any occupying run whose branch now
-// has a PR (it reached review) — keep the run record so Details still shows its finished graph. Then drain.
-function applyPrs(prs: { branch: string; url: string; draft: boolean }[]): void {
-  const map: Record<string, { url: string; draft: boolean }> = {};
-  for (const p of prs) map[p.branch] = { url: p.url, draft: p.draft };
-  prByBranch = map;
-  const pre = rkPrefix();
-  for (const [k, s] of [...runStatus]) { // a reviewed run's stale validating/fixing entry must not keep holding a slot
-    if (k.startsWith(pre) && OCCUPYING.includes(s) && map[`issue-${k.slice(k.lastIndexOf('#') + 1)}`]) runStatus.delete(k);
+// Free the slot of any occupying run whose branch now has a PR (it reached review) — so its stale
+// validating/fixing entry can't keep holding a slot. Keyed PER-REPO from the run key (`prov:repo#n` →
+// `prov:repo:issue-n`), so a PR in one repo never frees a same-numbered issue's run in another. The run record
+// is kept so Details still shows its finished graph.
+function freeReviewedSlots(map: Record<string, { url: string; draft: boolean }>): void {
+  for (const [k, s] of [...runStatus]) {
+    if (!OCCUPYING.includes(s)) continue;
+    const h = k.lastIndexOf('#');
+    if (map[`${k.slice(0, h)}:issue-${k.slice(h + 1)}`]) runStatus.delete(k);
   }
+}
+// Apply the ACTIVE repo's PR/MR map (specific-repo poll): light up its review chips + free its reviewed slots.
+function applyPrs(prov: ProviderId, rpo: string, prs: { branch: string; url: string; draft: boolean }[]): void {
+  const map: Record<string, { url: string; draft: boolean }> = {};
+  for (const p of prs) map[wtKey(prov, rpo, p.branch)] = { url: p.url, draft: p.draft };
+  prByBranch = map;
+  freeReviewedSlots(map);
   drainQueue(); render();
 }
 
@@ -675,13 +713,29 @@ function drainQueue(): void {
 // Background PR/MR poll — the engine that lets the queue drain while you're away. Runs only while there's
 // something to drive (a queued item or a working agent for this repo), and stops itself otherwise.
 async function pollPrs(): Promise<void> {
-  if (issScope === 'all') return;   // All-repos has no single active repo; PR detection (prByBranch) is per-repo, so skip it (review chips/PR buttons are single-repo only)
+  if (issScope === 'all') return;   // All-repos detects PRs on load (loadAllPrs, per-repo), not on this single-repo timer
   const rl = await relay.providerRateLimit().catch(() => null); if (rl?.limited) return;   // rate-limited → skip
   const forProvider = provider, forRepo = repo, ws = wsKey();
   if (!forRepo) { ensurePolling(); return; }
   const pr = await relay.providerPrs(ws, forProvider, forRepo).catch(() => null);
   if (!pr || !pr.ok || !pr.prs || forProvider !== provider || forRepo !== repo) return; // switched mid-flight → drop
-  applyPrs(pr.prs); // a newly-opened PR/MR may free a slot; also refreshes review chips / PR buttons
+  applyPrs(forProvider, forRepo, pr.prs); // a newly-opened PR/MR may free a slot; also refreshes review chips / PR buttons
+}
+// All-repos: fetch open PRs for EVERY tracked repo (parallel) + apply them per-repo, so the 'review' status +
+// PR button are consistent with specific-repo scope (issue-N branches are namespaced by provider:repo). Runs on
+// LOAD (not a timer), non-blocking, and skips when rate-limited. Also frees any reviewed slot it discovers.
+async function loadAllPrs(seq: number, tracked: string[]): Promise<void> {
+  const rl = await relay.providerRateLimit().catch(() => null); if (rl?.limited) return;
+  const ws = wsKey();
+  const map: Record<string, { url: string; draft: boolean }> = {};
+  await Promise.all(tracked.map(async (id) => {
+    const { provider: p, repo: r } = parseRepoId(id);
+    const pr = await relay.providerPrs(ws, p, r).catch(() => null);
+    if (pr && pr.ok && pr.prs) for (const x of pr.prs) map[wtKey(p, r, x.branch)] = { url: x.url, draft: x.draft };
+  }));
+  if (seq !== loadSeq || issScope !== 'all') return;   // superseded, or scope changed away
+  prByBranch = map; freeReviewedSlots(map);
+  drainQueue(); render();
 }
 function ensurePolling(): void {
   const active = queue.length > 0 || workingCount() > 0;   // any queued item or working agent (any repo) keeps the PR poller alive
@@ -714,7 +768,7 @@ async function launchStage(key: string, idx: number): Promise<void> {
   const stage = run.pipeline.stages[idx]; if (!stage) return;
   // Any stage with outgoing edges signals completion by writing its verdict → we poll for it (a conditional
   // gate AND an `always`-only step both advance this way). No edges → terminal (Fix), completion = its PR.
-  run.stageIdx = idx; run.awaiting = !!stage.edges?.length; run.reason = undefined;
+  run.stageIdx = idx; run.awaiting = !!stage.edges?.length; run.reason = undefined; run.agentTabId = undefined; // rebound below once the new stage's tab opens
   runStatus.set(key, stageStatus(stage.kind)); // set synchronously so workingCount() is correct before the async prep
   const briefRel = idx === 0 ? run.brief0Rel : `.slayer/stage-${idx}.md`;
   // A referenced DB credential template → injected into this stage's env (every stage is its own shell) and its
@@ -731,8 +785,27 @@ async function launchStage(key: string, idx: number): Promise<void> {
     + dbCredNote(dbCredId);
   await relay.pipelinePrep(run.wt, idx === 0 ? null : briefRel, idx === 0 ? null : brief, idx).catch(() => {});
   const agent = AGENTS.find((a) => a.id === run.agentId);
-  deps.openAgentTab({ cwd: run.wt, name: `#${run.number} · ${stage.name.toLowerCase()}`, runCmd: agent ? agent.launch(briefRel) : undefined, dbCredId: dbCredId || undefined });
+  // Remember THIS stage's terminal so closing it frees the slot. Guard on stageIdx so a slow tab-id promise from a
+  // previous stage can't overwrite a newer stage's tab (verdict poll may have already advanced the run).
+  void deps.openAgentTab({ cwd: run.wt, name: `#${run.number} · ${stage.name.toLowerCase()}`, runCmd: agent ? agent.launch(briefRel) : undefined, dbCredId: dbCredId || undefined })
+    .then((tabId) => { const r = runs.get(key); if (r && r.stageIdx === idx) r.agentTabId = tabId; })
+    .catch(() => { /* tab open failed elsewhere; nothing to bind */ });
   render(); ensurePolling(); ensureStagePoll();
+}
+
+// A terminal was closed. If it was the CURRENT stage's tab of an OCCUPYING run, the agent is gone (an unsaved
+// shell is killed on close) → free the slot so the queue can drain. A non-current/stale tab (a finished earlier
+// stage) or an already-freed run (reached review) is ignored, so we never free a still-running next stage.
+function onAgentTabClosed(tabId: string): void {
+  for (const [key, run] of runs) {
+    if (run.agentTabId !== tabId) continue;
+    if (OCCUPYING.includes(runStatus.get(key) as RunStatus)) {
+      runStatus.delete(key); runs.delete(key);
+      toast(`Freed the slot held by #${run.number} — its terminal was closed`);
+      drainQueue(); render(); ensureStagePoll();
+    }
+    return;
+  }
 }
 
 // Record a run and kick it off from stage 0. Called from a fresh Assign and from the auto-drain queue.
@@ -932,7 +1005,7 @@ function openDetails(i: Issue): void {
   const canReassign = issueState === 'open' && (st === 'validating' || st === 'fixing' || st === 'working' || st === 'queued' || st === 'invalid');
   const pc = PROVS[dp];
   const prWord = dp === 'gitlab' ? 'MR' : 'PR';
-  const pr = prByBranch[`issue-${i.number}`];
+  const pr = prOf(dp, dr, i.number);
   const body = (i.body || '').trim();
   const assignees = i.assignees || [];
   const run = runs.get(rk(i.number, dp, dr)); // its pipeline run, if any (drives the graph + invalid reason + override)
@@ -950,7 +1023,7 @@ function openDetails(i: Issue): void {
         <div class="det-row"><span class="isr-st ${st}">${st}</span><span class="det-repo"><span class="src-dot ${pc.dot}"></span> ${esc(dr)}</span>${pr ? `<span class="det-pr">${prWord} open${pr.draft ? ' · draft' : ''}</span>` : ''}</div>
         ${run ? `<div class="det-pipe"><span class="det-k">${esc(run.pipeline.name)}</span></div>${graph}` : ''}
         ${run?.reason ? `<div class="det-invalid">⛔ Not valid<div class="det-reason">${esc(run.reason)}</div></div>` : ''}
-        ${i.labels.length ? `<div class="det-labs">${i.labels.map(labelHtml).join('')}</div>` : ''}
+        ${i.labels.length ? `<div class="det-labs">${i.labels.map((l) => labelHtml(l)).join('')}</div>` : ''}
         ${i.author ? `<div class="det-meta"><span class="det-k">Created by</span>${esc(i.author)}</div>` : ''}
         ${assignees.length ? `<div class="det-meta"><span class="det-k">Assignees</span>${assignees.map((a) => esc(a)).join(', ')}</div>` : ''}
         ${i.milestone ? `<div class="det-meta"><span class="det-k">Milestone</span>${esc(i.milestone)}</div>` : ''}
@@ -1099,7 +1172,7 @@ async function openIssueMap(): Promise<void> {
   const agentOk = AGENTS.some((a) => detected[a.id]);
   const agentId = (state.settings.issueAgent && detected[state.settings.issueAgent]) ? state.settings.issueAgent! : (AGENTS.find((a) => detected[a.id])?.id || '');
   const asgProvider = provider, asgRepo = repo || '';    // pin the target
-  const mappable = issues.filter((i) => statusOf(i.number) === 'idle'); // only idle+open issues can be assigned
+  const mappable = issues.filter((i) => statusOf(i.number, issP(i), issR(i)) === 'idle'); // only idle+open issues can be assigned (per-repo status)
   const pipes = allPipelines(customPipelines());
   // issueNumber → pipelineId, seeded from each issue's own saved (non-default) pipeline so the board reflects it.
   const mapping = new Map<number, string>();
@@ -1517,6 +1590,7 @@ async function openSources(): Promise<void> {
 // section shows the repo's issues without a click (each failure mode still renders its own hint).
 export function initIssues(d: IssuesDeps): void {
   deps = d;
+  deps.onAgentTabClosed(onAgentTabClosed);   // closing a stage's terminal frees that run's slot → the queue can't wedge on a dead run
   const pull = $('#issSidePull'); if (pull) pull.onclick = () => { void loadIssues().then(() => { if (phase === 'ready') toast(`Pulled ${issues.length} issue${issues.length === 1 ? '' : 's'}`, true); }); };
   const s = $('#issSearch') as HTMLInputElement | null; if (s) s.oninput = () => { query = s.value; render(); };
   const rsel = $('#issSideRepo'); if (rsel) rsel.onclick = (e) => { e.stopPropagation(); openRepoMenu(); };

@@ -61,7 +61,7 @@ function paneHtml(g: number): string {
     <div class="pane-tabs"><div class="tabs" id="tabs-${g}"></div><button class="pane-add" data-g="${g}" title="New terminal in this pane"><svg width="15" height="15"><use href="#i-plus"/></svg></button><button class="pane-max" data-g="${g}" title="Maximize / restore pane"><svg width="14" height="14"><use href="#i-max"/></svg></button>${close}</div>
     <div class="pane-body">
       <div class="term-host" id="host-${g}">${empty}</div>
-      <div class="blocks-view" id="blocks-${g}"><div class="bv-scroll" id="scroll-${g}"></div><div class="bv-input"><span class="bv-prompt" id="prompt-${g}">❯</span><textarea class="bv-cmd" id="cmd-${g}" rows="1" placeholder="type a command — Enter runs · Shift+Enter new line · ↑ recalls" spellcheck="false" autocomplete="off"></textarea></div></div>
+      <div class="blocks-view" id="blocks-${g}"><div class="bv-scroll" id="scroll-${g}"></div><div class="bv-input"><span class="bv-prompt" id="prompt-${g}">❯</span><textarea class="bv-cmd" id="cmd-${g}" rows="1" placeholder="type a command — Enter runs · Tab completes paths · Shift+Enter new line · ↑ recalls" spellcheck="false" autocomplete="off"></textarea></div></div>
     </div>
   </div>`;
 }
@@ -154,11 +154,21 @@ async function newTab(seed?: Partial<OpenTab> & { libId?: string; runCmd?: strin
   // handled by the selection pill and Ctrl+Shift+C. term.paste() routes through xterm so bracketed-paste
   // works for TUIs (Claude Code, vim). Reads the Electron clipboard (relay.readText) — navigator.clipboard
   // needs focus/permission and fails silently in the terminal, which is why right-click paste "didn't work".
+  let pasteViaMenu = false;   // set right before our menu-paste; used to swallow the OS's trailing native paste
   el.addEventListener('contextmenu', (e) => {
     e.preventDefault();
     const text = relay.readText();
-    if (text) { term.focus(); term.paste(text); }
+    if (!text) return;
+    // On Windows the right-click also fires a NATIVE paste into the (now-focused) xterm textarea — a SECOND
+    // insert. Flag it so the capture-phase listener below swallows that native paste, keeping it to one.
+    pasteViaMenu = true; setTimeout(() => { pasteViaMenu = false; }, 150);
+    term.focus(); term.paste(text);
   });
+  // Capture phase so this runs BEFORE xterm's own textarea paste handler: after a right-click paste, cancel the
+  // trailing native paste event (no-op for Ctrl+V, which never sets the flag → normal paste still works).
+  el.addEventListener('paste', (e) => {
+    if (pasteViaMenu) { pasteViaMenu = false; e.stopImmediatePropagation(); e.preventDefault(); }
+  }, true);
   // Shift+Enter → send a literal newline so multiline TUIs (e.g. Claude Code) insert a line instead
   // of submitting; xterm otherwise emits the same \r as plain Enter. Plain Enter is unchanged.
   term.attachCustomKeyEventHandler((e) => {
@@ -408,6 +418,9 @@ function closeConfirm(v: boolean) {
   if (!$('#settings').classList.contains('show') && !$('#palette').classList.contains('show')) $('#scrim').classList.remove('show');
   const r = confirmResolve; confirmResolve = null; r?.(v);
 }
+// Feature rails (Issues/PRs/Tasks) subscribe here to learn when a terminal closed — an agent tab closing means
+// its run is over, so they can free the concurrency slot / reset the status instead of leaving it stuck.
+const agentTabCloseSubs: ((tabId: string) => void)[] = [];
 async function closeTab(id: string, skipConfirm = false) {
   const t0 = state.tabs.find((x) => x.id === id); if (!t0) return;
   if (!skipConfirm) {
@@ -425,6 +438,7 @@ async function closeTab(id: string, skipConfirm = false) {
   const resumable = t.libId || state.library.some((s) => s.termId === t.id);
   if (resumable) relay.ptyDetach(id); else relay.ptyKill(id);
   t.term.dispose(); t.el.remove();
+  for (const cb of agentTabCloseSubs) { try { cb(id); } catch { /* a subscriber must never break tab teardown */ } }
   // Replace the visible tab of any pane that was showing the closed tab, then drop the pane if it emptied.
   for (const g of leaves(state.layout)) if (state.gv[g] === id) state.gv[g] = groupTabs(g)[0]?.id || '';
   collapseIfEmpty(t.group);
@@ -1118,7 +1132,7 @@ function bvKeydown(g: number, ev: KeyboardEvent) {
   else if (ev.key === 'ArrowDown' && t && t.cmdHistory.length && !inp.value.slice(inp.selectionEnd).includes('\n')) { ev.preventDefault(); t.histIdx = Math.min(t.cmdHistory.length, t.histIdx + 1); inp.value = t.cmdHistory[t.histIdx] || ''; bvGrow(inp); }
   // Ctrl+C interrupts the shell only when nothing is selected; with a selection, let the browser copy it.
   else if (ev.ctrlKey && ev.key.toLowerCase() === 'c') { if (t && inp.selectionStart === inp.selectionEnd) { relay.ptyWrite(t.id, '\x03'); inp.value = ''; bvGrow(inp); } }
-  else if (ev.key === 'Tab') { ev.preventDefault(); updateCdPop(g); } // Tab on a `cd …` line opens directory completion
+  else if (ev.key === 'Tab') { ev.preventDefault(); void updateCdPop(g, true); } // Tab → path/file completion (any command); a lone match completes immediately
 }
 
 /* ---- cd directory autocomplete (blocks-view command bar) --------------------------------------
@@ -1126,19 +1140,39 @@ function bvKeydown(g: number, ev: KeyboardEvent) {
    (the tab's live cwd + any path already typed). Auto-shows while typing; Tab opens/drills; ↑/↓
    navigate; Enter/click fill; Esc dismisses. Only the bv-cmd input is Relay-owned, so this lives
    here — the classic xterm relies on the shell's own Tab completion. */
-const cdc = { g: -1, items: [] as string[], sel: 0, dirPart: '', namePart: '', token: 0 };
+const cdc = { g: -1, items: [] as { name: string; isDir: boolean }[], sel: 0, dirPart: '', namePart: '', tokenStart: 0, onlyDirs: false, token: 0 };
 let cdCache: { dir: string; entries: { name: string; isDir: boolean }[] } = { dir: '', entries: [] };
 const CD_FI = `<svg class="fi" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M3 7a1 1 0 0 1 1-1h4.7l1.7 1.8H20a1 1 0 0 1 1 1V18a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1z"/></svg>`;
+const CD_FILE = `<svg class="fi file" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M14 3H6a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8z"/><path d="M14 3v5h5"/></svg>`;
 
-// Split a `cd <arg>` line into the directory part (up to the last separator) and the name prefix.
-function cdParse(val: string): { dirPart: string; namePart: string } | null {
-  const m = /^\s*cd\s+(.*)$/i.exec(val);
-  if (!m) return null;
-  let arg = m[1];
-  if (arg.includes('\n')) return null;
+// The last whitespace-delimited token of the line + where it starts. Quotes protect embedded spaces, so a path
+// like "my docs" is one token. A trailing space means a fresh (empty) token → complete the cwd.
+function lastToken(val: string): { token: string; start: number } {
+  let inQ = '', start = 0;
+  for (let i = 0; i < val.length; i++) {
+    const c = val[i];
+    if (inQ) { if (c === inQ) inQ = ''; }
+    else if (c === '"' || c === "'") inQ = c;
+    else if (c === ' ' || c === '\t') start = i + 1;
+  }
+  return { token: val.slice(start), start };
+}
+// Parse the command line for path completion: split the token being typed into its directory part (up to the
+// last separator) + name prefix, note whether the command is `cd` (dirs only), whether the token is path-like
+// (→ auto-open; otherwise only Tab opens it), and where the token starts (to splice the accepted path back in).
+function argParse(val: string): { onlyDirs: boolean; pathish: boolean; dirPart: string; namePart: string; tokenStart: number } | null {
+  if (val.includes('\n')) return null;
+  const cmd = (/^\s*(\S+)/.exec(val)?.[1] || '').toLowerCase();
+  const wsLen = (/^\s*/.exec(val)?.[0].length) || 0;
+  const { token, start } = lastToken(val);
+  let arg = token;
   if (arg[0] === '"' || arg[0] === "'") arg = arg.slice(1).replace(/["']$/, ''); // unwrap a quoted path
   const sep = Math.max(arg.lastIndexOf('/'), arg.lastIndexOf('\\'));
-  return { dirPart: sep >= 0 ? arg.slice(0, sep + 1) : '', namePart: sep >= 0 ? arg.slice(sep + 1) : arg };
+  const startsRel = /^(\.\.?|~)/.test(arg);
+  // The FIRST word is the command — only path-complete it when it's explicitly a path (./ ../ ~/ or has a sep);
+  // otherwise leave command-name completion to the shell (Tab on a bare command word does nothing here).
+  if (start <= wsLen && sep < 0 && !startsRel) return null;
+  return { onlyDirs: cmd === 'cd', pathish: sep >= 0 || startsRel, dirPart: sep >= 0 ? arg.slice(0, sep + 1) : '', namePart: sep >= 0 ? arg.slice(sep + 1) : arg, tokenStart: start };
 }
 // The directory to list: an absolute path as-is, otherwise the tab's cwd joined with the typed part.
 function cdResolveDir(base: string, dirPart: string): string {
@@ -1146,10 +1180,13 @@ function cdResolveDir(base: string, dirPart: string): string {
   if (/^([a-zA-Z]:[\\/]|[\\/]{2}|[\\/])/.test(dirPart)) return dirPart; // C:\  \\unc  /abs
   return base.replace(/[\\/]+$/, '') + '/' + dirPart; // main's fs.resolve normalizes mixed separators + ..
 }
-async function updateCdPop(g: number) {
+// viaTab: the user pressed Tab (vs. it firing live on input). On Tab we complete even a bare argument (no
+// separator) and, if there's exactly one match, accept it immediately — shell-style. On live input we only
+// auto-open for a `cd` or a path-like token, so a plain arg like `git status` doesn't pop a file list.
+async function updateCdPop(g: number, viaTab = false) {
   const t = gTab(g); const inp = E(P_CMD[g]) as HTMLTextAreaElement;
-  const p = t && t.cwd ? cdParse(inp.value) : null;
-  if (!p || !t) { hideCdPop(); return; }
+  const p = t && t.cwd ? argParse(inp.value) : null;
+  if (!p || !t || (!viaTab && !p.onlyDirs && !p.pathish)) { hideCdPop(); return; }
   const dir = cdResolveDir(t.cwd, p.dirPart);
   let entries: { name: string; isDir: boolean }[];
   if (cdCache.dir === dir) entries = cdCache.entries; // still the same folder — re-filter without a new IPC
@@ -1161,16 +1198,20 @@ async function updateCdPop(g: number) {
     entries = res.entries; cdCache = { dir, entries };
   }
   const q = p.namePart.toLowerCase();
-  const dirs = entries.filter((e) => e.isDir && e.name.toLowerCase().startsWith(q)).map((e) => e.name).slice(0, 200);
-  if (!dirs.length) { hideCdPop(); return; }
-  cdc.g = g; cdc.items = dirs; cdc.sel = 0; cdc.dirPart = p.dirPart; cdc.namePart = p.namePart;
+  const matches = entries
+    .filter((e) => (p.onlyDirs ? e.isDir : true) && e.name.toLowerCase().startsWith(q))
+    .sort((a, b) => (a.isDir === b.isDir ? a.name.localeCompare(b.name) : a.isDir ? -1 : 1)) // dirs first, then files
+    .slice(0, 200);
+  if (!matches.length) { hideCdPop(); return; }
+  cdc.g = g; cdc.items = matches; cdc.sel = 0; cdc.dirPart = p.dirPart; cdc.namePart = p.namePart; cdc.tokenStart = p.tokenStart; cdc.onlyDirs = p.onlyDirs;
   renderCdPop(); positionCdPop(g); $('#cdPop').classList.add('show');
+  if (viaTab && matches.length === 1) cdAccept(g, true);   // unambiguous → complete it now (drill into a dir)
 }
 function renderCdPop() {
   const n = cdc.namePart.length;
-  $('#cdList').innerHTML = cdc.items.map((name, i) => {
-    const label = n ? `<b>${esc(name.slice(0, n))}</b>${esc(name.slice(n))}` : esc(name); // bold the matched prefix
-    return `<div class="cd-item${i === cdc.sel ? ' sel' : ''}" data-i="${i}">${CD_FI}<span class="cd-nm">${label}</span></div>`;
+  $('#cdList').innerHTML = cdc.items.map((it, i) => {
+    const label = n ? `<b>${esc(it.name.slice(0, n))}</b>${esc(it.name.slice(n))}` : esc(it.name); // bold the matched prefix
+    return `<div class="cd-item${i === cdc.sel ? ' sel' : ''}" data-i="${i}">${it.isDir ? CD_FI : CD_FILE}<span class="cd-nm">${label}${it.isDir ? '<span class="cd-sep">/</span>' : ''}</span></div>`;
   }).join('');
   ($('#cdList').querySelector('.cd-item.sel') as HTMLElement | null)?.scrollIntoView({ block: 'nearest' });
 }
@@ -1192,16 +1233,20 @@ function cdQuote(s: string): string {
   const esc = relay.platform === 'win32' ? s.replace(/'/g, "''") : s.replace(/'/g, "'\\''");
   return `'${esc}'`;
 }
-// Fill the selected directory into the command; `drill` appends a separator and re-lists to go deeper.
+// Splice the selected entry into the command line (replacing just the token being typed, keeping the command +
+// earlier args). A directory gets a trailing separator so you can keep drilling (`drill` re-lists it); a file
+// gets a trailing space (that argument is done). Only the completed token is quoted, not the whole line.
 function cdAccept(g: number, drill: boolean) {
   if (cdc.g !== g || !cdc.items.length) return;
   const inp = E(P_CMD[g]) as HTMLTextAreaElement;
-  let body = cdc.dirPart + cdc.items[cdc.sel];
-  if (drill) body += '/';
-  inp.value = 'cd ' + cdQuote(body);
-  const caret = inp.value.endsWith("'") ? inp.value.length - 1 : inp.value.length; // stay inside the quotes so typing keeps filtering
+  const item = cdc.items[cdc.sel];
+  const before = inp.value.slice(0, cdc.tokenStart);   // command + earlier args, untouched
+  const body = cdc.dirPart + item.name + (item.isDir ? '/' : '');
+  inp.value = before + cdQuote(body) + (item.isDir ? '' : ' ');
+  // For a drilled dir, keep the caret inside the closing quote (if any) so typing keeps filtering; else caret at end.
+  const caret = (item.isDir && inp.value.endsWith("'")) ? inp.value.length - 1 : inp.value.length;
   inp.setSelectionRange(caret, caret); bvGrow(inp);
-  if (drill) updateCdPop(g); else hideCdPop();
+  if (item.isDir && drill) updateCdPop(g); else hideCdPop();   // drill into a dir; a file (or Enter on a dir) closes
 }
 // Block→text helpers and session export (ExFmt/realBlock/cmdText/cmdRaw/buildExport) live in
 // ./blocks-text — imported above. sendCommand stays here: it writes to the pty via relay.
@@ -1503,11 +1548,11 @@ document.addEventListener('selectionchange', () => { if (!$('#bkmPop').contains(
 document.addEventListener('mousemove', (e) => { lastMouse = { x: (e as MouseEvent).clientX, y: (e as MouseEvent).clientY }; });
 document.addEventListener('mouseup', (e) => { const m = e as MouseEvent; const inTerm = !!(m.target as HTMLElement)?.closest?.('.xterm, .term-host'); setTimeout(() => refreshPill(m.clientX, m.clientY, inTerm), 0); });
 document.addEventListener('mousedown', (e) => { if (!(e.target as HTMLElement).closest('#bkmPop')) hideBkmPop(); });
-// cd autocomplete popup: keep the command input focused on mousedown, accept the clicked directory.
+// Completion popup: keep the command input focused on mousedown, complete the clicked entry (drilling a dir).
 $('#cdPop').addEventListener('mousedown', (e) => e.preventDefault());
 $('#cdPop').addEventListener('click', (e) => {
   const it = (e.target as HTMLElement).closest('.cd-item') as HTMLElement | null;
-  if (it && cdc.g >= 0) { cdc.sel = +it.dataset.i!; cdAccept(cdc.g, false); }
+  if (it && cdc.g >= 0) { cdc.sel = +it.dataset.i!; cdAccept(cdc.g, true); }
 });
 $('#bkmAddGroup').onclick = addBookmarkGroup;
 $('#bkmNew').onclick = addBookmarkManual;
@@ -2040,17 +2085,22 @@ new ResizeObserver(() => { clearTimeout(_roT); _roT = setTimeout(() => { fitPane
   state.settings = await relay.getSettings();
   state.library = await relay.listSessions();
   initWorkspaces({ newTab, snapshotTabs, reconcilePanes, fitPanes, renderTabs, updateStatus, reflectModel, renderChat, updateMainView, reflectSettings, persistWorkspace, applyTheme, blocksMode, confirmDialog, shortCwd, sendCommand, renderLibrary, reloadIssues: () => { void loadIssues(); if (state.settings.sidebarView === 'prs') void loadPrs(); renderTasks(); renderBell(); }, pcmd: P_CMD });
+  // openAgentTab returns the new tab's id so a rail can tie a run to its terminal and free the slot when that
+  // terminal is closed. onAgentTabClosed lets the rail subscribe to that close event.
+  const openAgentTab = async (o: { cwd: string; name: string; runCmd?: string; dbCredId?: string }): Promise<string> => (await newTab({ cwd: o.cwd, name: o.name, runCmd: o.runCmd, dbCredId: o.dbCredId })).id;
+  const onAgentTabClosed = (cb: (tabId: string) => void): void => { agentTabCloseSubs.push(cb); };
   initIssues({
     // Assign → open a fresh terminal tab rooted in the issue's worktree, seeded to launch the agent.
     // dbCredId (optional) → main injects a referenced DB credential template into the run's env.
-    openAgentTab: (o) => { void newTab({ cwd: o.cwd, name: o.name, runCmd: o.runCmd, dbCredId: o.dbCredId }); },
+    openAgentTab,
+    onAgentTabClosed,          // closing a stage's terminal frees that run's slot (queue can't wedge on a dead run)
     activeWsId: getActiveWsId, // Issues (tracked repos + active repo) are scoped per workspace
   });
   // PR rail — shares the Issues rail's active repo; clicking its repo chip jumps to Issues to change it.
   // openAgentTab powers PR review pipelines (an agent tab rooted in the PR's checked-out worktree).
-  initPrs({ activeWsId: getActiveWsId, focusIssues: () => switchSidebarView('issues'), openAgentTab: (o) => { void newTab({ cwd: o.cwd, name: o.name, runCmd: o.runCmd, dbCredId: o.dbCredId }); } });
+  initPrs({ activeWsId: getActiveWsId, focusIssues: () => switchSidebarView('issues'), openAgentTab, onAgentTabClosed });
   // Tasks rail — draft/validate a proposed issue, file it only if valid. Its own validate worktree + agent tab.
-  initTasks({ activeWsId: getActiveWsId, openAgentTab: (o) => { void newTab({ cwd: o.cwd, name: o.name, runCmd: o.runCmd, dbCredId: o.dbCredId }); } });
+  initTasks({ activeWsId: getActiveWsId, openAgentTab, onAgentTabClosed });
   if ((state.settings.sidebarView || 'library') === 'prs') void loadPrs(); // restore-on-boot when PR was the last view
   // Notifications — background poller (all workspaces) + the per-workspace header bell.
   initNotifications({ activeWsId: getActiveWsId, wsName: wsNameOf });

@@ -98,10 +98,25 @@ async function apiPost(host: string, pathname: string, headers: Record<string, s
   let json: unknown = null; try { json = JSON.parse(r.text); } catch { /* non-json error body */ }
   return { ok: r.status >= 200 && r.status < 300, status: r.status, json };
 }
+// PUT / DELETE for label writes (apiPost covers POST). A DELETE has no body; a PUT may carry query params ± a body.
+async function apiSend(method: 'PUT' | 'DELETE', host: string, pathname: string, headers: Record<string, string>, bodyObj?: unknown): Promise<ApiResult> {
+  const bodyStr = bodyObj === undefined ? undefined : JSON.stringify(bodyObj);
+  const h = bodyStr !== undefined ? { ...headers, 'Content-Type': 'application/json', 'Content-Length': String(Buffer.byteLength(bodyStr)) } : headers;
+  const r = await httpsReq(host, pathname, method, h, bodyStr);
+  let json: unknown = null; try { json = JSON.parse(r.text); } catch { /* non-json error body */ }
+  return { ok: r.status >= 200 && r.status < 300, status: r.status, json };
+}
 const asObj = (x: unknown): Record<string, unknown> => (x && typeof x === 'object' ? x as Record<string, unknown> : {});
 const asArr = (x: unknown): Array<Record<string, unknown>> => (Array.isArray(x) ? x as Array<Record<string, unknown>> : []);
 const str = (x: unknown): string => (x == null ? '' : String(x));
 type Raw = Array<Record<string, unknown>>;
+// A label's normalized shape (matches Issue.labels) + a stable default colour for a NEW GitHub label (GitHub
+// requires a colour when creating one; the user can recolour it later on the provider).
+export type Lbl = { name: string; color?: string };
+const LABEL_PALETTE = ['0e8a16', '1d76db', '5319e7', 'b60205', 'd93f0b', 'fbca04', '0052cc', '006b75', 'e99695', 'c5def5', 'bfdadc', 'd4c5f9'];
+function labelColor(name: string): string { let h = 0; for (let i = 0; i < name.length; i++) h = (Math.imul(h, 31) + name.charCodeAt(i)) >>> 0; return LABEL_PALETTE[h % LABEL_PALETTE.length]; }
+const ghLabels = (x: unknown): Lbl[] => asArr(x).map((l) => ({ name: str(l.name), color: l.color ? str(l.color) : undefined }));
+const glLabels = (x: unknown): Lbl[] => (Array.isArray(asObj(x).labels) ? asObj(x).labels as unknown[] : []).map((l) => ({ name: str(l) }));
 
 // Server-side author filtering. Where the provider's list endpoint takes a native author param (GitHub issues
 // `creator=`, GitLab `author_username=`) we fan out one request per selected author IN PARALLEL and merge — the
@@ -149,6 +164,21 @@ const github = {
     const r = await ghApi(ws, `/repos/${repo}/issues/${number}`);
     if (!r.ok || !r.json || typeof r.json !== 'object') return { ok: false, error: `HTTP ${r.status}` };
     return { ok: true, state: str(asObj(r.json).state) === 'closed' ? 'closed' : 'open' };
+  },
+  // Add a label to an issue ON the repo (Issues rail's + button). A brand-new name is created in the repo first
+  // (an existing one 422s → ignored), then attached; returns the issue's full updated label set.
+  async addLabel(ws: string, repo: string, number: number, label: string): Promise<{ ok: boolean; labels?: Lbl[]; error?: string }> {
+    const h = await ghHeaders(ws); if (!h) return { ok: false, error: 'Not connected to GitHub' };
+    await apiPost('api.github.com', `/repos/${repo}/labels`, h, { name: label, color: labelColor(label) }); // create if missing
+    const r = await apiPost('api.github.com', `/repos/${repo}/issues/${number}/labels`, h, { labels: [label] });
+    if (!r.ok) return { ok: false, error: `${str(asObj(r.json).message) || 'Could not add label'} (HTTP ${r.status})` };
+    return { ok: true, labels: ghLabels(r.json) };
+  },
+  async removeLabel(ws: string, repo: string, number: number, label: string): Promise<{ ok: boolean; labels?: Lbl[]; error?: string }> {
+    const h = await ghHeaders(ws); if (!h) return { ok: false, error: 'Not connected to GitHub' };
+    const r = await apiSend('DELETE', 'api.github.com', `/repos/${repo}/issues/${number}/labels/${encodeURIComponent(label)}`, h);
+    if (!r.ok) return { ok: false, error: `${str(asObj(r.json).message) || 'Could not remove label'} (HTTP ${r.status})` };
+    return { ok: true, labels: ghLabels(r.json) };
   },
   // One page (100) of issues, for infinite scroll. hasMore = the raw page was full (issues + PRs, before the
   // PR filter), so another page likely exists.
@@ -277,6 +307,20 @@ const gitlab = {
     const r = await glApi(ws, `/projects/${enc(repo)}/issues/${number}`);
     if (!r.ok || !r.json || typeof r.json !== 'object') return { ok: false, error: `HTTP ${r.status}` };
     return { ok: true, state: str(asObj(r.json).state) === 'closed' ? 'closed' : 'open' };   // GitLab: 'opened' | 'closed'
+  },
+  // GitLab add_labels/remove_labels on the issue update endpoint (auto-creates an unknown label). Returns the
+  // MR/issue's full label set (names; the basic response has no colours).
+  async addLabel(ws: string, repo: string, number: number, label: string): Promise<{ ok: boolean; labels?: Lbl[]; error?: string }> {
+    const h = await glHeaders(ws); if (!h) return { ok: false, error: 'Not connected to GitLab' };
+    const r = await apiSend('PUT', await glHost(ws), `/api/v4/projects/${enc(repo)}/issues/${number}?add_labels=${encodeURIComponent(label)}`, h, {});
+    if (!r.ok) return { ok: false, error: `${str(asObj(r.json).message) || 'Could not add label'} (HTTP ${r.status})` };
+    return { ok: true, labels: glLabels(r.json) };
+  },
+  async removeLabel(ws: string, repo: string, number: number, label: string): Promise<{ ok: boolean; labels?: Lbl[]; error?: string }> {
+    const h = await glHeaders(ws); if (!h) return { ok: false, error: 'Not connected to GitLab' };
+    const r = await apiSend('PUT', await glHost(ws), `/api/v4/projects/${enc(repo)}/issues/${number}?remove_labels=${encodeURIComponent(label)}`, h, {});
+    if (!r.ok) return { ok: false, error: `${str(asObj(r.json).message) || 'Could not remove label'} (HTTP ${r.status})` };
+    return { ok: true, labels: glLabels(r.json) };
   },
   // One page (100) of issues, for infinite scroll. hasMore = the page came back full.
   async issues(ws: string, repo: string, state: IssueState = 'open', page = 1, authors?: string[]): Promise<{ ok: boolean; issues?: Issue[]; hasMore?: boolean; error?: string }> {
@@ -483,6 +527,9 @@ const bitbucket = {
     const st = str(asObj(r.json).state).toLowerCase();   // new|open|on hold|resolved|closed|invalid|duplicate|wontfix
     return { ok: true, state: ['resolved', 'closed', 'invalid', 'duplicate', 'wontfix'].includes(st) ? 'closed' : 'open' };
   },
+  // Bitbucket Cloud issues have no arbitrary-label concept (only kind/priority/component/milestone) → unsupported.
+  async addLabel(): Promise<{ ok: boolean; labels?: Lbl[]; error?: string }> { return { ok: false, error: 'Bitbucket issues don’t support labels' }; },
+  async removeLabel(): Promise<{ ok: boolean; labels?: Lbl[]; error?: string }> { return { ok: false, error: 'Bitbucket issues don’t support labels' }; },
   // One page (50) of issues, for infinite scroll. Bitbucket has no state= filter, so we page raw and filter
   // client-side; hasMore uses the response's `next` link (more raw pages to scan).
   async issues(ws: string, repo: string, state: IssueState = 'open', page = 1, authors?: string[]): Promise<{ ok: boolean; issues?: Issue[]; hasMore?: boolean; error?: string }> {
@@ -634,6 +681,8 @@ export interface Adapter {
   prDetail(ws: string, repo: string, number: number): Promise<{ ok: boolean; detail?: PrDetail; error?: string }>;
   createIssue(ws: string, repo: string, title: string, body: string): Promise<{ ok: boolean; number?: number; url?: string; error?: string }>;
   issueState(ws: string, repo: string, number: number): Promise<{ ok: boolean; state?: 'open' | 'closed'; error?: string }>;
+  addLabel(ws: string, repo: string, number: number, label: string): Promise<{ ok: boolean; labels?: Lbl[]; error?: string }>;
+  removeLabel(ws: string, repo: string, number: number, label: string): Promise<{ ok: boolean; labels?: Lbl[]; error?: string }>;
   repoFromRemote(url: string): string | null;
   cloneUrl(repo: string): Promise<string>;
   cli?: string;

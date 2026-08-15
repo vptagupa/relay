@@ -27,7 +27,8 @@ const needsSync = (t: Task): boolean => !!t.issueNumber && (t.status === 'open' 
 
 export interface TasksDeps {
   activeWsId: () => string;                                                     // active workspace (tasks are per-workspace)
-  openAgentTab: (o: { cwd: string; name: string; runCmd?: string; dbCredId?: string }) => void;    // open the validate run in a worktree tab (dbCredId → inject a DB credential template into its env)
+  openAgentTab: (o: { cwd: string; name: string; runCmd?: string; dbCredId?: string }) => Promise<string>;    // open the validate run in a worktree tab (dbCredId → inject a DB credential template into its env); resolves to the tab id
+  onAgentTabClosed: (cb: (tabId: string) => void) => void;                      // subscribe to terminal-closed → auto-stop the run whose terminal that was
 }
 let deps: TasksDeps;
 const wsKey = () => deps.activeWsId() || 'ws_default';
@@ -70,7 +71,7 @@ function deleteTask(id: string): void {
 /* ----------------------------- validate run + verdict poll ----------------------------- */
 // A live run. `validate` = single stage 0 (bug/enhancement). `feature` = New Feature: stage 0 author → stage 1
 // review; `stage` tracks which one is being polled. agentId/dbCredId are needed to launch the review stage.
-interface Running { wt: string; ws: string; provider: ProviderId; repo: string; kind: 'validate' | 'feature'; stage: number; agentId: string; dbCredId?: string; }
+interface Running { wt: string; ws: string; provider: ProviderId; repo: string; kind: 'validate' | 'feature'; stage: number; agentId: string; dbCredId?: string; agentTabId?: string; }
 const running = new Map<string, Running>();   // taskId → its live run (in-memory; a restart drops it, re-run to resume)
 const taskHead = (t: Task): string => `# ${t.title}\n\n${(t.body || '').trim() || '_(no description provided)_'}`;
 // The validate brief for a task: {issue} = the proposed issue head; the agent writes its verdict to stage-0.json.
@@ -121,10 +122,11 @@ async function poll(): Promise<void> {
           if (!v.passed) { running.delete(id); upsertTask({ ...t, status: 'error', result: summary || 'Could not author the spec.', ranAt: Date.now() }, r.ws, false); toast('Spec authoring failed'); continue; }
           const reviewRel = '.slayer/stage-1.md';
           await relay.pipelinePrep(r.wt, reviewRel, reviewBrief(t), 1).catch(() => {}); // write the review brief + clear its stale verdict
-          r.stage = 1; running.set(id, r);
+          r.stage = 1; r.agentTabId = undefined; running.set(id, r);   // rebound once the review tab opens
           upsertTask({ ...t, status: 'reviewing', result: summary || 'Spec authored.', ranAt: Date.now() }, r.ws, false);
           const agent = AGENTS.find((a) => a.id === r.agentId);
-          deps.openAgentTab({ cwd: r.wt, name: `review: ${t.title.slice(0, 20)}`, runCmd: agent ? agent.launch(reviewRel) : undefined, dbCredId: r.dbCredId });
+          void deps.openAgentTab({ cwd: r.wt, name: `review: ${t.title.slice(0, 20)}`, runCmd: agent ? agent.launch(reviewRel) : undefined, dbCredId: r.dbCredId })
+            .then((tid) => { const rr = running.get(id); if (rr && rr.stage === 1) rr.agentTabId = tid; }).catch(() => {});
           toast('Spec authored → reviewing…', true);
           continue;
         }
@@ -329,7 +331,8 @@ async function runValidate(t: Task): Promise<void> {
     const runningStatus: Task['status'] = feature ? 'authoring' : 'validating';
     upsertTask({ ...t, status: (agentOk && agent) ? runningStatus : t.status, agentId, deps: depIds, dbCredId: selectedDbCred || undefined });
     if (agentOk && agent) { running.set(t.id, { wt: res.path!, ws: wsKey(), provider: t.provider as ProviderId, repo: t.repo, kind: feature ? 'feature' : 'validate', stage: 0, agentId, dbCredId: selectedDbCred || undefined }); ensurePoll(); }
-    deps.openAgentTab({ cwd: res.path!, name: `${feature ? 'spec' : 'task'}: ${t.title.slice(0, 20)}`, runCmd: agent ? agent.launch(briefRel) : undefined, dbCredId: selectedDbCred || undefined });
+    void deps.openAgentTab({ cwd: res.path!, name: `${feature ? 'spec' : 'task'}: ${t.title.slice(0, 20)}`, runCmd: agent ? agent.launch(briefRel) : undefined, dbCredId: selectedDbCred || undefined })
+      .then((tid) => { const r = running.get(t.id); if (r && r.stage === 0) r.agentTabId = tid; }).catch(() => {});
     close();
     toast((agentOk && agent) ? (feature ? 'Authoring feature spec…' : 'Validating task…') : 'Worktree ready', true);
   });
@@ -445,8 +448,22 @@ function recoverStuckTasks(): void {
   if (n) toast(`Reset ${n} interrupted validation${n > 1 ? 's' : ''} — re-run when ready`);
 }
 
+// A terminal closed: if it was a live run's tab, the agent is gone (an unsaved shell is killed on close) → reset
+// the task to draft so it doesn't sit stuck at "validating…" and is runnable again. (The Details ■ Stop button
+// still covers a run whose tab you kept open.)
+function onAgentTabClosed(tabId: string): void {
+  for (const [id, r] of running) {
+    if (r.agentTabId !== tabId) continue;
+    running.delete(id); ensurePoll();
+    const t = tasksFor(r.ws).find((x) => x.id === id);
+    if (t) { upsertTask({ ...t, status: 'draft' }, r.ws, false); toast(`Stopped “${t.title.slice(0, 24)}” — its terminal was closed`); }
+    return;
+  }
+}
+
 export function initTasks(d: TasksDeps): void {
   deps = d;
+  deps.onAgentTabClosed(onAgentTabClosed);   // closing a validate/author terminal auto-resets the task to draft
   const nw = $('#taskNew'); if (nw) nw.onclick = () => openTaskForm();
   const rsel = $('#taskRepo'); if (rsel) rsel.onclick = (e) => { e.stopPropagation(); openTaskRepoMenu(); };
   recoverStuckTasks();   // clear any "validating…" left stuck by a previous session before the first render
