@@ -96,12 +96,28 @@ function ensurePoll(): void {
   if (running.size && pollTimer == null) pollTimer = window.setInterval(() => void poll(), 4000);
   else if (!running.size && pollTimer != null) { clearInterval(pollTimer); pollTimer = null; }
 }
+// Human names for a task's type tags: for the issue BODY, and the real provider LABELS applied to the new issue.
+const TYPE_NAME: Record<string, string> = { bug: 'Bug', enhancement: 'Enhancement', [FEATURE_TAG]: 'New Feature' };
+const LABEL_NAME: Record<string, string> = { bug: 'bug', enhancement: 'enhancement', [FEATURE_TAG]: 'feature' };
+// A "Task details" block appended to the filed issue's body so the issue records the task's type + context.
+function taskDetailsBlock(t: Task): string {
+  const types = (t.tags || []).map((tg) => TYPE_NAME[tg]).filter(Boolean);
+  const rows: string[] = [];
+  if (types.length) rows.push(`- **Type:** ${types.join(', ')}`);
+  if (t.deps && t.deps.length) rows.push(`- **Related repositories:** ${t.deps.map((d) => `\`${d}\``).join(', ')}`);
+  return rows.length ? `\n\n---\n### Task details\n${rows.join('\n')}` : '';
+}
+
 // File an issue for a passed task and reflect the outcome (shared by validate + feature). Deletes-before-await
-// happened in the caller; here we only createIssue + upsert.
+// happened in the caller; here we createIssue, apply the task's type as real labels (best-effort), + upsert.
 async function fileIssueFor(t: Task, r: Running, body: string, resultSummary: string): Promise<void> {
   const res = await relay.providerCreateIssue(r.ws, r.provider, r.repo, t.title, body).catch(() => ({ ok: false, error: 'request failed' }));
-  if (res.ok) { upsertTask({ ...t, status: 'open', result: resultSummary, issueNumber: res.number, issueUrl: res.url, ranAt: Date.now() }, r.ws, false); toast(`Filed issue #${res.number} (open)`, true); ensureTracking(); }
-  else { upsertTask({ ...t, status: 'error', result: `Approved ✓ but filing the issue failed: ${res.error || 'unknown'}\n\n${resultSummary}`, ranAt: Date.now() }, r.ws, false); toast(`Couldn't file the issue: ${res.error || ''}`); }
+  if (res.ok) {
+    upsertTask({ ...t, status: 'open', result: resultSummary, issueNumber: res.number, issueUrl: res.url, ranAt: Date.now() }, r.ws, false);
+    // Tag the new issue with its type on the provider (best-effort — a label failure must never unfile the issue).
+    if (res.number) for (const tg of t.tags || []) { const name = LABEL_NAME[tg]; if (name) void relay.providerAddLabel(r.ws, r.provider, r.repo, res.number, name).catch(() => {}); }
+    toast(`Filed issue #${res.number} (open)`, true); ensureTracking();
+  } else { upsertTask({ ...t, status: 'error', result: `Approved ✓ but filing the issue failed: ${res.error || 'unknown'}\n\n${resultSummary}`, ranAt: Date.now() }, r.ws, false); toast(`Couldn't file the issue: ${res.error || ''}`); }
 }
 
 let polling = false;
@@ -133,7 +149,7 @@ async function poll(): Promise<void> {
         // Review stage finished.
         running.delete(id);
         if (!t) continue;
-        if (v.passed) await fileIssueFor(t, r, featureIssueBody(t, summary || 'Reviewed and approved.'), summary || 'Spec reviewed ✓ — correct, complete, concrete, consistent, aligned.');
+        if (v.passed) await fileIssueFor(t, r, featureIssueBody(t, summary || 'Reviewed and approved.') + taskDetailsBlock(t), summary || 'Spec reviewed ✓ — correct, complete, concrete, consistent, aligned.');
         else { upsertTask({ ...t, status: 'revise', result: summary || 'Review found gaps — revise the spec and re-run.', ranAt: Date.now() }, r.ws, false); toast('Spec needs revision'); }
         continue;
       }
@@ -142,7 +158,7 @@ async function poll(): Promise<void> {
       running.delete(id);
       if (!t) continue;
       const vsum = summary || (v.passed ? 'Validated as real.' : 'Judged not valid.');
-      if (v.passed) await fileIssueFor(t, r, `${(t.body || '').trim()}\n\n---\n**Validated by Slayer T** — confirmed against the codebase before filing:\n\n${vsum}`, vsum);
+      if (v.passed) await fileIssueFor(t, r, `${(t.body || '').trim()}${taskDetailsBlock(t)}\n\n---\n**Validated by Slayer T** — confirmed against the codebase before filing:\n\n${vsum}`, vsum);
       else { upsertTask({ ...t, status: 'invalid', result: vsum, ranAt: Date.now() }, r.ws, false); toast('Task not valid — no issue filed'); }
     }
   } finally { polling = false; ensurePoll(); }
