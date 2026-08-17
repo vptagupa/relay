@@ -601,6 +601,13 @@ ipcMain.handle('provider:remove-label', async (_e, p: { provider: ProviderId; ws
   if (!validRepo(p?.repo) || !Number.isInteger(p?.number) || p.number <= 0 || !label) return { ok: false, error: 'Invalid request' };
   return a.removeLabel(p?.ws, p.repo, p.number, label);
 });
+// Post a comment on a PR/MR. body is a bounded plain string (provider caps are ~64k; we trim well under).
+ipcMain.handle('provider:pr-comment', async (_e, p: { provider: ProviderId; ws: string; repo: string; number: number; body: string }) => {
+  const a = providerOf(p?.provider); if (!a) return badProvider;
+  const body = typeof p?.body === 'string' ? p.body.trim() : '';
+  if (!validRepo(p?.repo) || !Number.isInteger(p?.number) || p.number <= 0 || !body) return { ok: false, error: 'Invalid request' };
+  return a.prComment(p?.ws, p.repo, p.number, body.slice(0, 60000));
+});
 // Repo members (collaborators) — the PR author-filter list.
 ipcMain.handle('provider:repo-members', async (_e, p: { provider: ProviderId; ws: string; repo: string }) => {
   const a = providerOf(p?.provider); if (!a) return badProvider;

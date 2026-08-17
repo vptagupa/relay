@@ -192,6 +192,8 @@ function ensureHoverEl(): HTMLElement {
     hoverEl.addEventListener('mouseleave', scheduleHidePrHover);
     hoverEl.addEventListener('click', (e) => {
       const t = e.target as HTMLElement;
+      // 💬 Comment → open the comment composer for this PR/MR.
+      if (t.closest('.prh-comment')) { const pr = hoverPr; if (pr) { hidePrHover(); openPrComment(pr); } return; }
       // ⚡ Review → open the pipeline-assign dialog for this PR (not the provider).
       if (t.closest('.prh-review')) { const pr = hoverPr; if (pr) { hidePrHover(); void openPrAssign(prRefOf(pr), prCtxOf(pr)); } return; }
       // ⚔ Resolve → open the Assign dialog pre-selected with the resolve pipeline (agent fixes the conflict).
@@ -226,7 +228,7 @@ function hoverHtml(p: PrItem, d?: PrDetail, failed = false): string {
     ? (d.body.trim() ? `<div class="prh-body">${esc(d.body)}</div>` : '<div class="prh-body empty">No description.</div>')
     : failed ? '<div class="prh-body empty">Couldn’t load the description.</div>'
     : '<div class="prh-body loading"><span class="isr-mspin"></span> loading details…</div>';
-  return `<div class="prh-top"><span class="prh-num">#${p.number}</span><span class="pr-badge st ${esc(st)}">${esc(st)}</span>${(d?.draft ?? p.draft) ? '<span class="pr-badge draft">draft</span>' : ''}<button class="prh-review" data-prreview="1" title="Review this ${pp === 'gitlab' ? 'MR' : 'PR'} with a pipeline">⚡ Review</button>${(d?.mergeState === 'conflict' && st === 'open') ? '<button class="prh-resolve" data-prresolve="1" title="Resolve the merge conflict in a terminal">⚔ Resolve</button>' : ''}</div>
+  return `<div class="prh-top"><span class="prh-num">#${p.number}</span><span class="pr-badge st ${esc(st)}">${esc(st)}</span>${(d?.draft ?? p.draft) ? '<span class="pr-badge draft">draft</span>' : ''}<button class="prh-review" data-prreview="1" title="Review this ${pp === 'gitlab' ? 'MR' : 'PR'} with a pipeline">⚡ Review</button>${(d?.mergeState === 'conflict' && st === 'open') ? '<button class="prh-resolve" data-prresolve="1" title="Resolve the merge conflict in a terminal">⚔ Resolve</button>' : ''}<button class="prh-comment" data-prcomment="1" title="Add a comment to this ${pp === 'gitlab' ? 'MR' : 'PR'}">💬 Comment</button></div>
     <div class="prh-title">${esc(d?.title || p.title || '(no title)')}</div>
     <div class="prh-meta">${meta.join('')}</div>
     ${labels}${revs}${body}
@@ -263,6 +265,44 @@ const prProvider = (p: PrItem): ProviderId => p.provider || provider;
 const prRepo = (p: PrItem): string => p.repo || repo || '';
 const prRefOf = (p: PrItem): PrRef => ({ number: p.number, title: p.title, branch: p.branch, url: p.url, provider: prProvider(p), repo: prRepo(p) });
 const prCtxOf = (p: PrItem): PrCtx => ({ provider: prProvider(p), repo: prRepo(p), dir: state.settings.workspace || '' });
+
+/* ----------------------------- comment composer ----------------------------- */
+// Compose + post a comment on the PR/MR conversation (the 💬 button on the hover card).
+let posting = false;
+function openPrComment(p: PrItem): void {
+  const prov = prProvider(p), r = prRepo(p), num = p.number, word = PR_WORD[prov];
+  const root = document.createElement('div'); root.className = 'tpl-modal';
+  root.innerHTML = `<div class="tpl-sc"></div><div class="tpl-card">
+      <div class="hd"><span class="dot" style="background:var(--accent)"></span><span class="t">Comment on ${word} #${num}<small>${esc(p.title || p.branch)}</small></span></div>
+      <div class="bd">
+        <textarea class="iss-brief" id="prcBody" rows="7" spellcheck="true" placeholder="Write a comment… (Markdown supported)"></textarea>
+        <div class="iss-wt">Posts to the ${word} conversation on ${esc(PROV_NAME[prov])} as you. <span class="mut">⌘/Ctrl+Enter to post</span></div>
+      </div>
+      <div class="ft"><span class="hint"></span><span class="r"><button class="tpl-btn ghost" data-x>Cancel</button><button class="tpl-btn pri" data-ok>Post comment</button></span></div>
+    </div>`;
+  document.body.appendChild(root);
+  const ta = root.querySelector('#prcBody') as HTMLTextAreaElement;
+  const okBtn = root.querySelector('[data-ok]') as HTMLButtonElement;
+  const close = () => { root.remove(); document.removeEventListener('keydown', onKey); };
+  const onKey = (e: KeyboardEvent) => {
+    if (e.key === 'Escape') { e.preventDefault(); close(); }
+    else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); void post(); }
+  };
+  document.addEventListener('keydown', onKey);
+  root.querySelector('[data-x]')?.addEventListener('click', close);
+  okBtn.addEventListener('click', () => void post());
+  setTimeout(() => ta.focus(), 30);
+  async function post(): Promise<void> {
+    if (posting) return;
+    const body = ta.value.trim();
+    if (!body) { toast('Write a comment first'); return; }
+    posting = true; okBtn.disabled = true; okBtn.textContent = 'Posting…';
+    const res = await relay.providerPrComment(wsKey(), prov, r, num, body).catch(() => ({ ok: false, error: 'request failed' }));
+    posting = false;
+    if (!res.ok) { okBtn.disabled = false; okBtn.textContent = 'Post comment'; toast(res.error || 'Could not post the comment'); return; }
+    close(); toast(`Commented on ${word} #${num}`, true);
+  }
+}
 
 /* ----------------------------- conflict detection + resolve stage ----------------------------- */
 const SWEEP_CAP = 30;          // cap the per-load detail burst; PRs past it fill in on hover

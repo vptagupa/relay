@@ -128,6 +128,8 @@ const api = {
   // Add / remove a REAL label on the provider issue — returns the issue's full updated label set (name + colour).
   providerAddLabel: (ws: string, provider: ProviderId, repo: string, number: number, label: string): Promise<{ ok: boolean; labels?: { name: string; color?: string }[]; error?: string }> => ipcRenderer.invoke('provider:add-label', { ws, provider, repo, number, label }),
   providerRemoveLabel: (ws: string, provider: ProviderId, repo: string, number: number, label: string): Promise<{ ok: boolean; labels?: { name: string; color?: string }[]; error?: string }> => ipcRenderer.invoke('provider:remove-label', { ws, provider, repo, number, label }),
+  // Post a comment on a PR/MR — returns the comment's url when the provider gives one.
+  providerPrComment: (ws: string, provider: ProviderId, repo: string, number: number, body: string): Promise<{ ok: boolean; url?: string; error?: string }> => ipcRenderer.invoke('provider:pr-comment', { ws, provider, repo, number, body }),
   // API rate-limit state — pollers skip a cycle while `limited` is true (until the window resets).
   providerRateLimit: (): Promise<{ remaining: number; resetMs: number; backoffUntil: number; limited: boolean }> => ipcRenderer.invoke('provider:rate-limit'),
   // Real-time notifications via a local webhook receiver: start/stop it, and subscribe to parsed issue/PR events.

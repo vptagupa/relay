@@ -1060,6 +1060,8 @@ body.tabdrag .dz{display:block;pointer-events:auto}
 .prh-review:hover{background:var(--surface-2);border-color:var(--accent)}
 .prh-resolve{margin-left:6px;border:1px solid #da363366;background:transparent;color:#f85149;cursor:pointer;font:11px/1 var(--mono);padding:4px 9px;border-radius:7px;white-space:nowrap}
 .prh-resolve:hover{background:var(--surface-2);border-color:#f85149}
+.prh-comment{margin-left:6px;border:1px solid var(--border-strong);background:transparent;color:var(--text-dim);cursor:pointer;font:11px/1 var(--mono);padding:4px 9px;border-radius:7px;white-space:nowrap}
+.prh-comment:hover{background:var(--surface-2);border-color:var(--accent-2);color:var(--accent-2)}
 .prh-conflict{color:#f85149}
 .prh-clean{color:#3fb950}
 /* open/closed state toggle (segmented) */

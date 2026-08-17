@@ -180,6 +180,13 @@ const github = {
     if (!r.ok) return { ok: false, error: `${str(asObj(r.json).message) || 'Could not remove label'} (HTTP ${r.status})` };
     return { ok: true, labels: ghLabels(r.json) };
   },
+  // Post a comment on a PR (its conversation thread = the shared issues-comments endpoint).
+  async prComment(ws: string, repo: string, number: number, body: string): Promise<{ ok: boolean; url?: string; error?: string }> {
+    const h = await ghHeaders(ws); if (!h) return { ok: false, error: 'Not connected to GitHub' };
+    const r = await apiPost('api.github.com', `/repos/${repo}/issues/${number}/comments`, h, { body });
+    if (!r.ok) return { ok: false, error: `${str(asObj(r.json).message) || 'Could not post comment'} (HTTP ${r.status})` };
+    return { ok: true, url: str(asObj(r.json).html_url) };
+  },
   // One page (100) of issues, for infinite scroll. hasMore = the raw page was full (issues + PRs, before the
   // PR filter), so another page likely exists.
   async issues(ws: string, repo: string, state: IssueState = 'open', page = 1, authors?: string[]): Promise<{ ok: boolean; issues?: Issue[]; hasMore?: boolean; error?: string }> {
@@ -321,6 +328,13 @@ const gitlab = {
     const r = await apiSend('PUT', await glHost(ws), `/api/v4/projects/${enc(repo)}/issues/${number}?remove_labels=${encodeURIComponent(label)}`, h, {});
     if (!r.ok) return { ok: false, error: `${str(asObj(r.json).message) || 'Could not remove label'} (HTTP ${r.status})` };
     return { ok: true, labels: glLabels(r.json) };
+  },
+  // Post a note (comment) on a merge request.
+  async prComment(ws: string, repo: string, number: number, body: string): Promise<{ ok: boolean; url?: string; error?: string }> {
+    const h = await glHeaders(ws); if (!h) return { ok: false, error: 'Not connected to GitLab' };
+    const r = await apiPost(await glHost(ws), `/api/v4/projects/${enc(repo)}/merge_requests/${number}/notes`, h, { body });
+    if (!r.ok) return { ok: false, error: `${str(asObj(r.json).message) || 'Could not post comment'} (HTTP ${r.status})` };
+    return { ok: true };
   },
   // One page (100) of issues, for infinite scroll. hasMore = the page came back full.
   async issues(ws: string, repo: string, state: IssueState = 'open', page = 1, authors?: string[]): Promise<{ ok: boolean; issues?: Issue[]; hasMore?: boolean; error?: string }> {
@@ -530,6 +544,14 @@ const bitbucket = {
   // Bitbucket Cloud issues have no arbitrary-label concept (only kind/priority/component/milestone) → unsupported.
   async addLabel(): Promise<{ ok: boolean; labels?: Lbl[]; error?: string }> { return { ok: false, error: 'Bitbucket issues don’t support labels' }; },
   async removeLabel(): Promise<{ ok: boolean; labels?: Lbl[]; error?: string }> { return { ok: false, error: 'Bitbucket issues don’t support labels' }; },
+  async prComment(ws: string, repo: string, number: number, body: string): Promise<{ ok: boolean; url?: string; error?: string }> {
+    let h = await bbHeaders(ws); if (!h) return { ok: false, error: 'Not connected to Bitbucket' };
+    const path = `/2.0/repositories/${repo}/pullrequests/${number}/comments`;
+    let r = await apiPost('api.bitbucket.org', path, h, { content: { raw: body } });
+    if (r.status === 401 && (await bbRefresh(ws))) { h = await bbHeaders(ws); if (h) r = await apiPost('api.bitbucket.org', path, h, { content: { raw: body } }); } // token stale → refresh + retry
+    if (!r.ok) return { ok: false, error: `${str(asObj(asObj(r.json).error).message) || 'Could not post comment'} (HTTP ${r.status})` };
+    return { ok: true, url: str(asObj(asObj(asObj(r.json).links).html).href) };
+  },
   // One page (50) of issues, for infinite scroll. Bitbucket has no state= filter, so we page raw and filter
   // client-side; hasMore uses the response's `next` link (more raw pages to scan).
   async issues(ws: string, repo: string, state: IssueState = 'open', page = 1, authors?: string[]): Promise<{ ok: boolean; issues?: Issue[]; hasMore?: boolean; error?: string }> {
@@ -683,6 +705,7 @@ export interface Adapter {
   issueState(ws: string, repo: string, number: number): Promise<{ ok: boolean; state?: 'open' | 'closed'; error?: string }>;
   addLabel(ws: string, repo: string, number: number, label: string): Promise<{ ok: boolean; labels?: Lbl[]; error?: string }>;
   removeLabel(ws: string, repo: string, number: number, label: string): Promise<{ ok: boolean; labels?: Lbl[]; error?: string }>;
+  prComment(ws: string, repo: string, number: number, body: string): Promise<{ ok: boolean; url?: string; error?: string }>;
   repoFromRemote(url: string): string | null;
   cloneUrl(repo: string): Promise<string>;
   cli?: string;
