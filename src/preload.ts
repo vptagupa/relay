@@ -130,6 +130,13 @@ const api = {
   providerRemoveLabel: (ws: string, provider: ProviderId, repo: string, number: number, label: string): Promise<{ ok: boolean; labels?: { name: string; color?: string }[]; error?: string }> => ipcRenderer.invoke('provider:remove-label', { ws, provider, repo, number, label }),
   // Post a comment on a PR/MR — returns the comment's url when the provider gives one.
   providerPrComment: (ws: string, provider: ProviderId, repo: string, number: number, body: string): Promise<{ ok: boolean; url?: string; error?: string }> => ipcRenderer.invoke('provider:pr-comment', { ws, provider, repo, number, body }),
+  // ---- Lane 1: read the thread + PR/issue lifecycle. `kind` selects the PR vs issue endpoint. ----
+  providerComments: (ws: string, provider: ProviderId, repo: string, number: number, kind: 'pr' | 'issue'): Promise<{ ok: boolean; comments?: { author: string; body: string; createdAt: number; url?: string }[]; error?: string }> => ipcRenderer.invoke('provider:comments', { ws, provider, repo, number, kind }),
+  providerIssueComment: (ws: string, provider: ProviderId, repo: string, number: number, body: string): Promise<{ ok: boolean; url?: string; error?: string }> => ipcRenderer.invoke('provider:pr-comment', { ws, provider, repo, number, body, kind: 'issue' }),
+  providerPrMerge: (ws: string, provider: ProviderId, repo: string, number: number, method?: 'merge' | 'squash' | 'rebase'): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke('provider:pr-merge', { ws, provider, repo, number, method }),
+  providerSetState: (ws: string, provider: ProviderId, repo: string, number: number, state: 'open' | 'closed', kind: 'pr' | 'issue'): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke('provider:set-state', { ws, provider, repo, number, state, kind }),
+  providerPrReview: (ws: string, provider: ProviderId, repo: string, number: number, event: 'approve' | 'request_changes' | 'comment', body?: string): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke('provider:pr-review', { ws, provider, repo, number, event, body }),
+  providerSetAssignees: (ws: string, provider: ProviderId, repo: string, number: number, logins: string[], kind: 'pr' | 'issue'): Promise<{ ok: boolean; assignees?: string[]; error?: string }> => ipcRenderer.invoke('provider:set-assignees', { ws, provider, repo, number, logins, kind }),
   // API rate-limit state — pollers skip a cycle while `limited` is true (until the window resets).
   providerRateLimit: (): Promise<{ remaining: number; resetMs: number; backoffUntil: number; limited: boolean }> => ipcRenderer.invoke('provider:rate-limit'),
   // Real-time notifications via a local webhook receiver: start/stop it, and subscribe to parsed issue/PR events.

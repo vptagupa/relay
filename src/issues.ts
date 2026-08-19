@@ -992,9 +992,19 @@ function pipeMini(p: PipelineDef): string {
   return `<div class="sg-wrap"><div class="sg">${out.join('')}</div></div>`;
 }
 
-// Read-only issue details — usable at any time, including while the issue is being worked on (its row
-// opens this instead of re-assigning). Shows the description + metadata + run status + PR/MR, and links
-// out; an idle issue also gets an Assign… shortcut.
+// Compact "how long ago" for the conversation timestamps (Date.now() is fine in the renderer).
+function relTime(ms?: number): string {
+  if (!ms) return '';
+  const s = Math.max(0, Math.floor((Date.now() - ms) / 1000));
+  if (s < 60) return 'just now';
+  const m = Math.floor(s / 60); if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60); if (h < 24) return `${h}h ago`;
+  const d = Math.floor(h / 24); if (d < 30) return `${d}d ago`;
+  const mo = Math.floor(d / 30); if (mo < 12) return `${mo}mo ago`;
+  return `${Math.floor(mo / 12)}y ago`;
+}
+// Issue details — description + metadata + run status + PR/MR + the conversation thread, and actions: comment,
+// assign (GitHub), close/reopen. An idle issue also gets an Assign… shortcut.
 function openDetails(i: Issue): void {
   const dp = issP(i), dr = issR(i);   // the issue's OWN provider/repo (its own in All-repos scope, else the active repo)
   const st = statusOf(i.number, dp, dr);
@@ -1025,11 +1035,14 @@ function openDetails(i: Issue): void {
         ${run?.reason ? `<div class="det-invalid">⛔ Not valid<div class="det-reason">${esc(run.reason)}</div></div>` : ''}
         ${i.labels.length ? `<div class="det-labs">${i.labels.map((l) => labelHtml(l)).join('')}</div>` : ''}
         ${i.author ? `<div class="det-meta"><span class="det-k">Created by</span>${esc(i.author)}</div>` : ''}
-        ${assignees.length ? `<div class="det-meta"><span class="det-k">Assignees</span>${assignees.map((a) => esc(a)).join(', ')}</div>` : ''}
+        ${(assignees.length || dp === 'github') ? `<div class="det-meta det-assign"><span class="det-k">Assignees</span><span class="det-asv">${assignees.length ? assignees.map((a) => esc(a)).join(', ') : '<span class="mut">none</span>'}</span>${dp === 'github' ? '<button class="det-edit" data-assignedit title="Change assignees">✎</button>' : ''}</div>` : ''}
         ${i.milestone ? `<div class="det-meta"><span class="det-k">Milestone</span>${esc(i.milestone)}</div>` : ''}
         <div class="det-body">${body ? esc(body) : '<span class="mut">No description provided.</span>'}</div>
+        <label class="iss-lbl det-convo-lbl">Conversation</label>
+        <div class="prc-thread det-thread" id="detThread"><div class="prc-msg"><span class="isr-mspin"></span> loading…</div></div>
+        <div class="det-compose"><textarea class="iss-brief det-comment" id="detComment" rows="3" spellcheck="true" placeholder="Comment on this issue… ⌘/Ctrl+Enter to post"></textarea><button class="tpl-btn ghost det-post" data-postcomment>Post comment</button></div>
       </div>
-      <div class="ft"><span class="hint">${foot}</span><span class="r">${pr ? `<button class="tpl-btn ghost" data-pr>Open ${prWord} ↗</button>` : ''}<button class="tpl-btn ghost" data-ext>Open on ${esc(pc.name)} ↗</button>${st === 'invalid' && run ? '<button class="tpl-btn pri" data-override>▶ Run Fix anyway</button>' : ''}${canReassign ? `<button class="tpl-btn ${st === 'invalid' ? 'ghost' : 'pri'}" data-reassign>${st === 'queued' ? '⟲ Cancel & re-assign' : '⟲ Stop & re-assign'}</button>` : ''}${canAssign ? '<button class="tpl-btn pri" data-assign>⚡ Assign…</button>' : ''}<button class="tpl-btn ${canAssign || canReassign ? 'ghost' : 'pri'}" data-x>${canAssign || canReassign ? 'Close' : 'Done'}</button></span></div>
+      <div class="ft"><span class="hint">${foot}</span><span class="r">${pr ? `<button class="tpl-btn ghost" data-pr>Open ${prWord} ↗</button>` : ''}<button class="tpl-btn ghost" data-ext>Open on ${esc(pc.name)} ↗</button><button class="tpl-btn ghost" data-issuestate>${i.state === 'closed' ? '↺ Reopen' : '🗙 Close issue'}</button>${st === 'invalid' && run ? '<button class="tpl-btn pri" data-override>▶ Run Fix anyway</button>' : ''}${canReassign ? `<button class="tpl-btn ${st === 'invalid' ? 'ghost' : 'pri'}" data-reassign>${st === 'queued' ? '⟲ Cancel & re-assign' : '⟲ Stop & re-assign'}</button>` : ''}${canAssign ? '<button class="tpl-btn pri" data-assign>⚡ Assign…</button>' : ''}<button class="tpl-btn ${canAssign || canReassign ? 'ghost' : 'pri'}" data-x>${canAssign || canReassign ? 'Close' : 'Done'}</button></span></div>
     </div>`);
   root.querySelector('[data-x]')?.addEventListener('click', close);
   root.querySelector('[data-ext]')?.addEventListener('click', () => relay.openExternal(i.url));
@@ -1038,6 +1051,66 @@ function openDetails(i: Issue): void {
   // Stop the stranded run (free its slot / drop it from the queue), then open a fresh Assign for the issue.
   root.querySelector('[data-reassign]')?.addEventListener('click', () => { close(); if (st === 'queued') cancelQueued(i.number, dp, dr); else freeSlot(i.number, dp, dr); void openAssign(i); });
   root.querySelector('[data-override]')?.addEventListener('click', () => { close(); overrideInvalid(rk(i.number, dp, dr)); });
+
+  // ---- Lane 1: conversation, assignees, close/reopen ----
+  const threadEl = root.querySelector('#detThread');
+  const loadThread = async (): Promise<void> => {
+    const res = await relay.providerComments(wsKey(), dp, dr, i.number, 'issue').catch(() => null);
+    if (!threadEl) return;
+    if (!res || !res.ok || !res.comments) { threadEl.innerHTML = `<div class="prc-msg">Couldn’t load the conversation.</div>`; return; }
+    if (!res.comments.length) { threadEl.innerHTML = `<div class="prc-msg">No comments yet.</div>`; return; }
+    threadEl.innerHTML = res.comments.map((c: { author: string; body: string; createdAt: number }) => `<div class="prc-c"><div class="prc-ch"><b>${esc(c.author || 'someone')}</b><span class="prc-ct">${esc(relTime(c.createdAt))}</span></div><div class="prc-cb">${esc(c.body)}</div></div>`).join('');
+    threadEl.scrollTop = threadEl.scrollHeight;
+  };
+  void loadThread();
+
+  const cta = root.querySelector('#detComment') as HTMLTextAreaElement | null;
+  const postBtn = root.querySelector('[data-postcomment]') as HTMLButtonElement | null;
+  let iposting = false;
+  const postComment = async (): Promise<void> => {
+    if (iposting || !cta) return; const b = cta.value.trim(); if (!b) { toast('Write a comment first'); return; }
+    iposting = true; if (postBtn) { postBtn.disabled = true; postBtn.textContent = 'Posting…'; }
+    const res = await relay.providerIssueComment(wsKey(), dp, dr, i.number, b).catch(() => ({ ok: false, error: 'request failed' }));
+    iposting = false; if (postBtn) { postBtn.disabled = false; postBtn.textContent = 'Post comment'; }
+    if (!res.ok) { toast(res.error || 'Could not post the comment'); return; }
+    cta.value = ''; toast(`Commented on #${i.number}`, true); void loadThread();
+  };
+  postBtn?.addEventListener('click', () => void postComment());
+  cta?.addEventListener('keydown', (e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); void postComment(); } });
+
+  // Assignees (GitHub): member multi-select applied — debounced — as you toggle.
+  const aEdit = root.querySelector('[data-assignedit]') as HTMLElement | null;
+  if (aEdit) {
+    let assignT: number | null = null;
+    aEdit.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const mem = await relay.providerRepoMembers(wsKey(), dp, dr).catch(() => ({ ok: false } as { ok: boolean; members?: string[] }));
+      const opts = [...new Set([...(mem.ok && mem.members ? mem.members : []), ...(i.assignees || [])])].sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
+      if (!opts.length) { toast('No members found to assign'); return; }
+      const sel = new Set(i.assignees || []);
+      openAuthorFilter(aEdit, opts, sel, () => {
+        if (assignT) clearTimeout(assignT);
+        assignT = window.setTimeout(async () => {
+          const res = await relay.providerSetAssignees(wsKey(), dp, dr, i.number, [...sel], 'issue').catch(() => ({ ok: false, error: 'request failed' }));
+          if (!res.ok) { toast(res.error || 'Could not set assignees'); return; }
+          const now: string[] = res.assignees || [...sel];
+          i.assignees = now;
+          const av = root.querySelector('.det-asv'); if (av) av.innerHTML = now.length ? now.map((a) => esc(a)).join(', ') : '<span class="mut">none</span>';
+          render();
+        }, 350);
+      }, 'detAssignMenu');
+    });
+  }
+
+  // Close / reopen the issue on the provider.
+  root.querySelector('[data-issuestate]')?.addEventListener('click', async (e) => {
+    const btn = e.currentTarget as HTMLButtonElement; const next: 'open' | 'closed' = i.state === 'closed' ? 'open' : 'closed';
+    btn.disabled = true; const orig = btn.textContent; btn.textContent = '…';
+    const res = await relay.providerSetState(wsKey(), dp, dr, i.number, next, 'issue').catch(() => ({ ok: false, error: 'request failed' }));
+    if (!res.ok) { btn.disabled = false; btn.textContent = orig || ''; toast(res.error || 'Could not update the issue'); return; }
+    toast(next === 'closed' ? `Closed #${i.number}` : `Reopened #${i.number}`, true);
+    close(); void loadIssues();
+  });
 }
 
 let assigning = false; // guard the whole create-worktree round-trip against a double submit

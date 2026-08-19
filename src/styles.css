@@ -953,8 +953,18 @@ body.tabdrag .dz{display:block;pointer-events:auto}
 .iss-det .det-labs{display:flex;flex-wrap:wrap;gap:4px;margin-bottom:10px}
 .iss-det .det-meta{font:11.5px/1.5 var(--sans);color:var(--text-dim);margin-bottom:4px}
 .iss-det .det-meta .det-k{font-weight:600;color:var(--muted);margin-right:6px}
-.iss-det .det-body{margin-top:8px;max-height:44vh;overflow:auto;white-space:pre-wrap;word-break:break-word;font:12px/1.6 var(--mono);color:var(--text-dim);background:var(--surface-2);border:1px solid var(--border);border-radius:8px;padding:11px 12px}
+.iss-det .det-body{margin-top:8px;max-height:26vh;overflow:auto;white-space:pre-wrap;word-break:break-word;font:12px/1.6 var(--mono);color:var(--text-dim);background:var(--surface-2);border:1px solid var(--border);border-radius:8px;padding:11px 12px}
 .iss-det .mut{color:var(--muted)}
+/* Lane 1: editable assignees + conversation inside issue details */
+.iss-det .det-assign{display:flex;align-items:center;gap:7px}
+.iss-det .det-assign .det-asv{flex:1;min-width:0}
+.iss-det .det-edit{flex:none;border:1px solid var(--border-strong);background:transparent;color:var(--muted);cursor:pointer;font-size:11px;line-height:1;padding:3px 7px;border-radius:6px}
+.iss-det .det-edit:hover{color:var(--accent-2);border-color:var(--accent-line)}
+.iss-det .det-convo-lbl{display:block;margin:14px 0 6px}
+.iss-det .det-thread{max-height:min(30vh,240px)}
+.iss-det .det-compose{display:flex;flex-direction:column;gap:8px;margin-top:10px}
+.iss-det .det-comment{min-height:58px}
+.iss-det .det-post{align-self:flex-end;font:11.5px/1 var(--mono);padding:6px 11px}
 /* pipeline run summary in Details: the pipeline name, the live sequence graph, then (if a gate closed) the reason */
 .iss-det .det-pipe{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:7px}
 .iss-det .det-pipe .det-k{font:600 11px/1 var(--sans);color:var(--muted)}
@@ -1062,6 +1072,25 @@ body.tabdrag .dz{display:block;pointer-events:auto}
 .prh-resolve:hover{background:var(--surface-2);border-color:#f85149}
 .prh-comment{margin-left:6px;border:1px solid var(--border-strong);background:transparent;color:var(--text-dim);cursor:pointer;font:11px/1 var(--mono);padding:4px 9px;border-radius:7px;white-space:nowrap}
 .prh-comment:hover{background:var(--surface-2);border-color:var(--accent-2);color:var(--accent-2)}
+/* PR conversation + actions modal (💬) */
+.prc-card{width:min(560px,94vw)}
+.prc-actions{display:flex; align-items:center; gap:8px; flex-wrap:wrap; padding-bottom:14px; margin-bottom:6px; border-bottom:1px solid var(--border)}
+.prc-actions .prc-sp{flex:1}
+.prc-mm{font:11px/1 var(--mono); background:var(--surface); border:1px solid var(--border-strong); color:var(--text); border-radius:6px; padding:5px 6px}
+.prc-actions .tpl-btn{font:11.5px/1 var(--mono); padding:6px 10px}
+.prc-actions .act-danger{color:#f85149; border-color:#da363355}
+.prc-actions .act-danger:hover{background:var(--surface-2); border-color:#f85149}
+.prc-actions .act-danger.armed{background:#da36331f; border-color:#f85149; color:#ff8b84}
+.prc-actions [data-act="approve"]{color:#3fb950; border-color:#2ea04355}
+.prc-actions [data-act="approve"]:hover{border-color:#3fb950; background:var(--surface-2)}
+.prc-closed{padding:9px 12px; border-radius:8px; background:var(--surface-2); border:1px solid var(--border); color:var(--muted); font-size:12.5px; margin-bottom:12px}
+.prc-thread{max-height:min(46vh,340px); overflow-y:auto; display:flex; flex-direction:column; gap:12px; padding:4px 2px 2px}
+.prc-msg{color:var(--muted); font-size:12.5px; padding:14px 4px; display:flex; align-items:center; gap:8px}
+.prc-c{border:1px solid var(--border); border-radius:9px; background:var(--surface-2); padding:9px 11px}
+.prc-ch{display:flex; align-items:baseline; gap:8px; margin-bottom:5px}
+.prc-ch b{font:600 12.5px/1 var(--sans); color:var(--text)}
+.prc-ct{font:10.5px/1 var(--mono); color:var(--faint)}
+.prc-cb{font-size:13px; line-height:1.5; color:var(--text-dim); white-space:pre-wrap; word-break:break-word}
 .prh-conflict{color:#f85149}
 .prh-clean{color:#3fb950}
 /* open/closed state toggle (segmented) */

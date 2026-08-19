@@ -98,8 +98,8 @@ async function apiPost(host: string, pathname: string, headers: Record<string, s
   let json: unknown = null; try { json = JSON.parse(r.text); } catch { /* non-json error body */ }
   return { ok: r.status >= 200 && r.status < 300, status: r.status, json };
 }
-// PUT / DELETE for label writes (apiPost covers POST). A DELETE has no body; a PUT may carry query params ± a body.
-async function apiSend(method: 'PUT' | 'DELETE', host: string, pathname: string, headers: Record<string, string>, bodyObj?: unknown): Promise<ApiResult> {
+// PUT / PATCH / DELETE for writes (apiPost covers POST). A DELETE has no body; PUT/PATCH may carry a body ± query.
+async function apiSend(method: 'PUT' | 'PATCH' | 'DELETE', host: string, pathname: string, headers: Record<string, string>, bodyObj?: unknown): Promise<ApiResult> {
   const bodyStr = bodyObj === undefined ? undefined : JSON.stringify(bodyObj);
   const h = bodyStr !== undefined ? { ...headers, 'Content-Type': 'application/json', 'Content-Length': String(Buffer.byteLength(bodyStr)) } : headers;
   const r = await httpsReq(host, pathname, method, h, bodyStr);
@@ -113,6 +113,9 @@ type Raw = Array<Record<string, unknown>>;
 // A label's normalized shape (matches Issue.labels) + a stable default colour for a NEW GitHub label (GitHub
 // requires a colour when creating one; the user can recolour it later on the provider).
 export type Lbl = { name: string; color?: string };
+// A single comment/note on the shared PR/issue conversation (for the in-app thread view).
+export type Comment = { author: string; body: string; createdAt: number; url?: string };
+export type ItemKind = 'pr' | 'issue';
 const LABEL_PALETTE = ['0e8a16', '1d76db', '5319e7', 'b60205', 'd93f0b', 'fbca04', '0052cc', '006b75', 'e99695', 'c5def5', 'bfdadc', 'd4c5f9'];
 function labelColor(name: string): string { let h = 0; for (let i = 0; i < name.length; i++) h = (Math.imul(h, 31) + name.charCodeAt(i)) >>> 0; return LABEL_PALETTE[h % LABEL_PALETTE.length]; }
 const ghLabels = (x: unknown): Lbl[] => asArr(x).map((l) => ({ name: str(l.name), color: l.color ? str(l.color) : undefined }));
@@ -180,12 +183,45 @@ const github = {
     if (!r.ok) return { ok: false, error: `${str(asObj(r.json).message) || 'Could not remove label'} (HTTP ${r.status})` };
     return { ok: true, labels: ghLabels(r.json) };
   },
-  // Post a comment on a PR (its conversation thread = the shared issues-comments endpoint).
-  async prComment(ws: string, repo: string, number: number, body: string): Promise<{ ok: boolean; url?: string; error?: string }> {
+  // The conversation thread — GitHub uses the shared issues-comments endpoint for BOTH PRs and issues.
+  async comments(ws: string, repo: string, number: number, _kind: ItemKind): Promise<{ ok: boolean; comments?: Comment[]; error?: string }> {
+    const r = await ghApi(ws, `/repos/${repo}/issues/${number}/comments?per_page=100`);
+    if (!r.ok || !Array.isArray(r.json)) return { ok: false, error: `Could not load comments (HTTP ${r.status})` };
+    return { ok: true, comments: asArr(r.json).map((c) => ({ author: str(asObj(c.user).login), body: str(c.body), createdAt: Date.parse(str(c.created_at)) || 0, url: str(c.html_url) || undefined })) };
+  },
+  // Post a comment (PR conversation = the same issues-comments endpoint).
+  async postComment(ws: string, repo: string, number: number, body: string, _kind: ItemKind): Promise<{ ok: boolean; url?: string; error?: string }> {
     const h = await ghHeaders(ws); if (!h) return { ok: false, error: 'Not connected to GitHub' };
     const r = await apiPost('api.github.com', `/repos/${repo}/issues/${number}/comments`, h, { body });
     if (!r.ok) return { ok: false, error: `${str(asObj(r.json).message) || 'Could not post comment'} (HTTP ${r.status})` };
     return { ok: true, url: str(asObj(r.json).html_url) };
+  },
+  async prMerge(ws: string, repo: string, number: number, method?: string): Promise<{ ok: boolean; error?: string }> {
+    const h = await ghHeaders(ws); if (!h) return { ok: false, error: 'Not connected to GitHub' };
+    const r = await apiSend('PUT', 'api.github.com', `/repos/${repo}/pulls/${number}/merge`, h, { merge_method: method === 'squash' || method === 'rebase' ? method : 'merge' });
+    if (!r.ok) return { ok: false, error: `${str(asObj(r.json).message) || 'Could not merge'} (HTTP ${r.status})` };
+    return { ok: true };
+  },
+  async setState(ws: string, repo: string, number: number, state: 'open' | 'closed', kind: ItemKind): Promise<{ ok: boolean; error?: string }> {
+    const h = await ghHeaders(ws); if (!h) return { ok: false, error: 'Not connected to GitHub' };
+    const r = await apiSend('PATCH', 'api.github.com', `/repos/${repo}/${kind === 'pr' ? 'pulls' : 'issues'}/${number}`, h, { state });
+    if (!r.ok) return { ok: false, error: `${str(asObj(r.json).message) || 'Could not update state'} (HTTP ${r.status})` };
+    return { ok: true };
+  },
+  // Review verdict on a PR: approve | request_changes | comment.
+  async prReview(ws: string, repo: string, number: number, event: 'approve' | 'request_changes' | 'comment', body?: string): Promise<{ ok: boolean; error?: string }> {
+    const h = await ghHeaders(ws); if (!h) return { ok: false, error: 'Not connected to GitHub' };
+    const ev = event === 'approve' ? 'APPROVE' : event === 'request_changes' ? 'REQUEST_CHANGES' : 'COMMENT';
+    const r = await apiPost('api.github.com', `/repos/${repo}/pulls/${number}/reviews`, h, { event: ev, body: body || '' });
+    if (!r.ok) return { ok: false, error: `${str(asObj(r.json).message) || 'Could not submit review'} (HTTP ${r.status})` };
+    return { ok: true };
+  },
+  // Replace the FULL assignee list (logins); a PR is an issue on GitHub, so one endpoint serves both.
+  async setAssignees(ws: string, repo: string, number: number, logins: string[], _kind: ItemKind): Promise<{ ok: boolean; assignees?: string[]; error?: string }> {
+    const h = await ghHeaders(ws); if (!h) return { ok: false, error: 'Not connected to GitHub' };
+    const r = await apiSend('PATCH', 'api.github.com', `/repos/${repo}/issues/${number}`, h, { assignees: logins });
+    if (!r.ok) return { ok: false, error: `${str(asObj(r.json).message) || 'Could not set assignees'} (HTTP ${r.status})` };
+    return { ok: true, assignees: asArr(asObj(r.json).assignees).map((a) => str(a.login)).filter(Boolean) };
   },
   // One page (100) of issues, for infinite scroll. hasMore = the raw page was full (issues + PRs, before the
   // PR filter), so another page likely exists.
@@ -329,12 +365,44 @@ const gitlab = {
     if (!r.ok) return { ok: false, error: `${str(asObj(r.json).message) || 'Could not remove label'} (HTTP ${r.status})` };
     return { ok: true, labels: glLabels(r.json) };
   },
-  // Post a note (comment) on a merge request.
-  async prComment(ws: string, repo: string, number: number, body: string): Promise<{ ok: boolean; url?: string; error?: string }> {
+  async comments(ws: string, repo: string, number: number, kind: ItemKind): Promise<{ ok: boolean; comments?: Comment[]; error?: string }> {
+    const seg = kind === 'pr' ? 'merge_requests' : 'issues';
+    const r = await glApi(ws, `/projects/${enc(repo)}/${seg}/${number}/notes?per_page=100&sort=asc`);
+    if (!r.ok || !Array.isArray(r.json)) return { ok: false, error: `Could not load comments (HTTP ${r.status})` };
+    return { ok: true, comments: asArr(r.json).filter((n) => !n.system).map((n) => ({ author: str(asObj(n.author).username), body: str(n.body), createdAt: Date.parse(str(n.created_at)) || 0 })) };
+  },
+  async postComment(ws: string, repo: string, number: number, body: string, kind: ItemKind): Promise<{ ok: boolean; url?: string; error?: string }> {
     const h = await glHeaders(ws); if (!h) return { ok: false, error: 'Not connected to GitLab' };
-    const r = await apiPost(await glHost(ws), `/api/v4/projects/${enc(repo)}/merge_requests/${number}/notes`, h, { body });
+    const seg = kind === 'pr' ? 'merge_requests' : 'issues';
+    const r = await apiPost(await glHost(ws), `/api/v4/projects/${enc(repo)}/${seg}/${number}/notes`, h, { body });
     if (!r.ok) return { ok: false, error: `${str(asObj(r.json).message) || 'Could not post comment'} (HTTP ${r.status})` };
     return { ok: true };
+  },
+  async prMerge(ws: string, repo: string, number: number, _method?: string): Promise<{ ok: boolean; error?: string }> {
+    const h = await glHeaders(ws); if (!h) return { ok: false, error: 'Not connected to GitLab' };
+    const r = await apiSend('PUT', await glHost(ws), `/api/v4/projects/${enc(repo)}/merge_requests/${number}/merge`, h, {});
+    if (!r.ok) return { ok: false, error: `${str(asObj(r.json).message) || 'Could not merge'} (HTTP ${r.status})` };
+    return { ok: true };
+  },
+  async setState(ws: string, repo: string, number: number, state: 'open' | 'closed', kind: ItemKind): Promise<{ ok: boolean; error?: string }> {
+    const h = await glHeaders(ws); if (!h) return { ok: false, error: 'Not connected to GitLab' };
+    const seg = kind === 'pr' ? 'merge_requests' : 'issues';
+    const r = await apiSend('PUT', await glHost(ws), `/api/v4/projects/${enc(repo)}/${seg}/${number}?state_event=${state === 'closed' ? 'close' : 'reopen'}`, h, {});
+    if (!r.ok) return { ok: false, error: `${str(asObj(r.json).message) || 'Could not update state'} (HTTP ${r.status})` };
+    return { ok: true };
+  },
+  async prReview(ws: string, repo: string, number: number, event: 'approve' | 'request_changes' | 'comment', body?: string): Promise<{ ok: boolean; error?: string }> {
+    const h = await glHeaders(ws); if (!h) return { ok: false, error: 'Not connected to GitLab' };
+    if (event === 'approve') {
+      const r = await apiPost(await glHost(ws), `/api/v4/projects/${enc(repo)}/merge_requests/${number}/approve`, h, {});
+      if (!r.ok) return { ok: false, error: `${str(asObj(r.json).message) || 'Could not approve'} (HTTP ${r.status})` };
+      return { ok: true };
+    }
+    // GitLab has no native "request changes" — record it as a note.
+    return this.postComment(ws, repo, number, event === 'request_changes' ? `**Changes requested.**${body ? `\n\n${body}` : ''}` : (body || ''), 'pr');
+  },
+  async setAssignees(_ws: string, _repo: string, _number: number, _logins: string[], _kind: ItemKind): Promise<{ ok: boolean; assignees?: string[]; error?: string }> {
+    return { ok: false, error: 'Assignees aren’t settable from Slayer T on GitLab yet' };
   },
   // One page (100) of issues, for infinite scroll. hasMore = the page came back full.
   async issues(ws: string, repo: string, state: IssueState = 'open', page = 1, authors?: string[]): Promise<{ ok: boolean; issues?: Issue[]; hasMore?: boolean; error?: string }> {
@@ -544,13 +612,56 @@ const bitbucket = {
   // Bitbucket Cloud issues have no arbitrary-label concept (only kind/priority/component/milestone) → unsupported.
   async addLabel(): Promise<{ ok: boolean; labels?: Lbl[]; error?: string }> { return { ok: false, error: 'Bitbucket issues don’t support labels' }; },
   async removeLabel(): Promise<{ ok: boolean; labels?: Lbl[]; error?: string }> { return { ok: false, error: 'Bitbucket issues don’t support labels' }; },
-  async prComment(ws: string, repo: string, number: number, body: string): Promise<{ ok: boolean; url?: string; error?: string }> {
+  async comments(ws: string, repo: string, number: number, kind: ItemKind): Promise<{ ok: boolean; comments?: Comment[]; error?: string }> {
+    const seg = kind === 'pr' ? 'pullrequests' : 'issues';
+    const r = await bbApi(ws, `/2.0/repositories/${repo}/${seg}/${number}/comments?pagelen=100&sort=created_on`);
+    if (!r.ok || !r.json) return { ok: false, error: `Could not load comments (HTTP ${r.status})` };
+    return { ok: true, comments: asArr(asObj(r.json).values).filter((c) => !c.deleted).map((c) => ({ author: str(asObj(c.user).display_name || asObj(c.user).nickname), body: str(asObj(c.content).raw), createdAt: Date.parse(str(c.created_on)) || 0, url: str(asObj(asObj(asObj(c.links).html).href)) || undefined })) };
+  },
+  async postComment(ws: string, repo: string, number: number, body: string, kind: ItemKind): Promise<{ ok: boolean; url?: string; error?: string }> {
     let h = await bbHeaders(ws); if (!h) return { ok: false, error: 'Not connected to Bitbucket' };
-    const path = `/2.0/repositories/${repo}/pullrequests/${number}/comments`;
+    const path = `/2.0/repositories/${repo}/${kind === 'pr' ? 'pullrequests' : 'issues'}/${number}/comments`;
     let r = await apiPost('api.bitbucket.org', path, h, { content: { raw: body } });
     if (r.status === 401 && (await bbRefresh(ws))) { h = await bbHeaders(ws); if (h) r = await apiPost('api.bitbucket.org', path, h, { content: { raw: body } }); } // token stale → refresh + retry
     if (!r.ok) return { ok: false, error: `${str(asObj(asObj(r.json).error).message) || 'Could not post comment'} (HTTP ${r.status})` };
     return { ok: true, url: str(asObj(asObj(asObj(r.json).links).html).href) };
+  },
+  async prMerge(ws: string, repo: string, number: number, _method?: string): Promise<{ ok: boolean; error?: string }> {
+    let h = await bbHeaders(ws); if (!h) return { ok: false, error: 'Not connected to Bitbucket' };
+    const path = `/2.0/repositories/${repo}/pullrequests/${number}/merge`;
+    let r = await apiPost('api.bitbucket.org', path, h, {});
+    if (r.status === 401 && (await bbRefresh(ws))) { h = await bbHeaders(ws); if (h) r = await apiPost('api.bitbucket.org', path, h, {}); }
+    if (!r.ok) return { ok: false, error: `${str(asObj(asObj(r.json).error).message) || 'Could not merge'} (HTTP ${r.status})` };
+    return { ok: true };
+  },
+  async setState(ws: string, repo: string, number: number, state: 'open' | 'closed', kind: ItemKind): Promise<{ ok: boolean; error?: string }> {
+    let h = await bbHeaders(ws); if (!h) return { ok: false, error: 'Not connected to Bitbucket' };
+    if (kind === 'pr') {
+      if (state !== 'closed') return { ok: false, error: 'Reopening a declined PR isn’t supported on Bitbucket' };
+      const path = `/2.0/repositories/${repo}/pullrequests/${number}/decline`;
+      let r = await apiPost('api.bitbucket.org', path, h, {});
+      if (r.status === 401 && (await bbRefresh(ws))) { h = await bbHeaders(ws); if (h) r = await apiPost('api.bitbucket.org', path, h, {}); }
+      if (!r.ok) return { ok: false, error: `${str(asObj(asObj(r.json).error).message) || 'Could not decline'} (HTTP ${r.status})` };
+      return { ok: true };
+    }
+    const path = `/2.0/repositories/${repo}/issues/${number}`; const payload = { state: state === 'closed' ? 'closed' : 'open' };
+    let r = await apiSend('PUT', 'api.bitbucket.org', path, h, payload);
+    if (r.status === 401 && (await bbRefresh(ws))) { h = await bbHeaders(ws); if (h) r = await apiSend('PUT', 'api.bitbucket.org', path, h, payload); }
+    if (!r.ok) return { ok: false, error: `${str(asObj(asObj(r.json).error).message) || 'Could not update state'} (HTTP ${r.status})` };
+    return { ok: true };
+  },
+  async prReview(ws: string, repo: string, number: number, event: 'approve' | 'request_changes' | 'comment', body?: string): Promise<{ ok: boolean; error?: string }> {
+    if (event === 'comment') return this.postComment(ws, repo, number, body || '', 'pr');
+    let h = await bbHeaders(ws); if (!h) return { ok: false, error: 'Not connected to Bitbucket' };
+    const path = `/2.0/repositories/${repo}/pullrequests/${number}/${event === 'approve' ? 'approve' : 'request-changes'}`;
+    let r = await apiPost('api.bitbucket.org', path, h, {});
+    if (r.status === 401 && (await bbRefresh(ws))) { h = await bbHeaders(ws); if (h) r = await apiPost('api.bitbucket.org', path, h, {}); }
+    if (!r.ok) return { ok: false, error: `${str(asObj(asObj(r.json).error).message) || 'Could not submit review'} (HTTP ${r.status})` };
+    if (body && event === 'request_changes') await this.postComment(ws, repo, number, body, 'pr').catch(() => {});
+    return { ok: true };
+  },
+  async setAssignees(_ws: string, _repo: string, _number: number, _logins: string[], _kind: ItemKind): Promise<{ ok: boolean; assignees?: string[]; error?: string }> {
+    return { ok: false, error: 'Assignees aren’t settable from Slayer T on Bitbucket yet' };
   },
   // One page (50) of issues, for infinite scroll. Bitbucket has no state= filter, so we page raw and filter
   // client-side; hasMore uses the response's `next` link (more raw pages to scan).
@@ -705,7 +816,12 @@ export interface Adapter {
   issueState(ws: string, repo: string, number: number): Promise<{ ok: boolean; state?: 'open' | 'closed'; error?: string }>;
   addLabel(ws: string, repo: string, number: number, label: string): Promise<{ ok: boolean; labels?: Lbl[]; error?: string }>;
   removeLabel(ws: string, repo: string, number: number, label: string): Promise<{ ok: boolean; labels?: Lbl[]; error?: string }>;
-  prComment(ws: string, repo: string, number: number, body: string): Promise<{ ok: boolean; url?: string; error?: string }>;
+  comments(ws: string, repo: string, number: number, kind: ItemKind): Promise<{ ok: boolean; comments?: Comment[]; error?: string }>;
+  postComment(ws: string, repo: string, number: number, body: string, kind: ItemKind): Promise<{ ok: boolean; url?: string; error?: string }>;
+  prMerge(ws: string, repo: string, number: number, method?: string): Promise<{ ok: boolean; error?: string }>;
+  setState(ws: string, repo: string, number: number, state: 'open' | 'closed', kind: ItemKind): Promise<{ ok: boolean; error?: string }>;
+  prReview(ws: string, repo: string, number: number, event: 'approve' | 'request_changes' | 'comment', body?: string): Promise<{ ok: boolean; error?: string }>;
+  setAssignees(ws: string, repo: string, number: number, logins: string[], kind: ItemKind): Promise<{ ok: boolean; assignees?: string[]; error?: string }>;
   repoFromRemote(url: string): string | null;
   cloneUrl(repo: string): Promise<string>;
   cli?: string;

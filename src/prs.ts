@@ -124,6 +124,7 @@ async function loadAllRepos(seq: number, ws: string): Promise<void> {
   prsPage = 1; prsHasMore = false; loadingMore = false;           // cross-repo view isn't paged
   if (!prs.length && anyErr) { phase = 'error'; errMsg = anyErr; render(); return; }
   phase = 'ready'; render();
+  void sweepMergeStatus(seq);   // detect conflicts across every tracked repo too → ⚠ badge + ⚔ resolve in All-repos
 }
 
 // Re-render but keep scroll position (innerHTML replacement otherwise jumps to top) — used when appending pages.
@@ -266,19 +267,30 @@ const prRepo = (p: PrItem): string => p.repo || repo || '';
 const prRefOf = (p: PrItem): PrRef => ({ number: p.number, title: p.title, branch: p.branch, url: p.url, provider: prProvider(p), repo: prRepo(p) });
 const prCtxOf = (p: PrItem): PrCtx => ({ provider: prProvider(p), repo: prRepo(p), dir: state.settings.workspace || '' });
 
-/* ----------------------------- comment composer ----------------------------- */
-// Compose + post a comment on the PR/MR conversation (the 💬 button on the hover card).
+/* ----------------------------- conversation + actions (💬 button) ----------------------------- */
+// The full PR/MR surface: read the thread, post a comment, and act on it — approve / request changes / merge /
+// close. Merge + close are destructive, so they two-step ("click again to confirm").
 let posting = false;
 function openPrComment(p: PrItem): void {
   const prov = prProvider(p), r = prRepo(p), num = p.number, word = PR_WORD[prov];
+  const st = (p.state || 'open').toLowerCase(); const isOpen = st === 'open' || st === 'opened';
   const root = document.createElement('div'); root.className = 'tpl-modal';
-  root.innerHTML = `<div class="tpl-sc"></div><div class="tpl-card">
-      <div class="hd"><span class="dot" style="background:var(--accent)"></span><span class="t">Comment on ${word} #${num}<small>${esc(p.title || p.branch)}</small></span></div>
+  root.innerHTML = `<div class="tpl-sc"></div><div class="tpl-card prc-card">
+      <div class="hd"><span class="dot" style="background:var(--accent)"></span><span class="t">${word} #${num}<small>${esc(p.title || p.branch)}</small></span></div>
       <div class="bd">
-        <textarea class="iss-brief" id="prcBody" rows="7" spellcheck="true" placeholder="Write a comment… (Markdown supported)"></textarea>
-        <div class="iss-wt">Posts to the ${word} conversation on ${esc(PROV_NAME[prov])} as you. <span class="mut">⌘/Ctrl+Enter to post</span></div>
+        ${isOpen ? `<div class="prc-actions" id="prcActions">
+          <button class="tpl-btn ghost" data-act="approve" title="Approve this ${word}">✓ Approve</button>
+          <button class="tpl-btn ghost" data-act="request" title="Request changes (uses the comment box as the note)">✎ Request changes</button>
+          <span class="prc-sp"></span>
+          <select class="prc-mm" id="prcMethod" title="Merge method">${prov === 'github' ? '<option value="merge">Merge commit</option><option value="squash">Squash</option><option value="rebase">Rebase</option>' : '<option value="merge">Merge</option>'}</select>
+          <button class="tpl-btn ghost act-danger" data-act="merge">⛙ Merge</button>
+          <button class="tpl-btn ghost act-danger" data-act="close">Close</button>
+        </div>` : `<div class="prc-closed">This ${word} is <b>${esc(st)}</b>.</div>`}
+        <div class="prc-thread" id="prcThread"><div class="prc-msg"><span class="isr-mspin"></span> loading conversation…</div></div>
+        <label class="iss-lbl" style="margin-top:6px">Comment <span class="mut">— Markdown · ⌘/Ctrl+Enter to post</span></label>
+        <textarea class="iss-brief" id="prcBody" rows="4" spellcheck="true" placeholder="Write a comment…"></textarea>
       </div>
-      <div class="ft"><span class="hint"></span><span class="r"><button class="tpl-btn ghost" data-x>Cancel</button><button class="tpl-btn pri" data-ok>Post comment</button></span></div>
+      <div class="ft"><span class="hint">${esc(PROV_NAME[prov])}</span><span class="r"><button class="tpl-btn ghost" data-x>Close</button><button class="tpl-btn pri" data-ok>Post comment</button></span></div>
     </div>`;
   document.body.appendChild(root);
   const ta = root.querySelector('#prcBody') as HTMLTextAreaElement;
@@ -292,15 +304,59 @@ function openPrComment(p: PrItem): void {
   root.querySelector('[data-x]')?.addEventListener('click', close);
   okBtn.addEventListener('click', () => void post());
   setTimeout(() => ta.focus(), 30);
+  void loadThread();
+
+  async function loadThread(): Promise<void> {
+    const res = await relay.providerComments(wsKey(), prov, r, num, 'pr').catch(() => null);
+    const el = root.querySelector('#prcThread'); if (!el) return;
+    if (!res || !res.ok || !res.comments) { el.innerHTML = `<div class="prc-msg">Couldn’t load the conversation.</div>`; return; }
+    if (!res.comments.length) { el.innerHTML = `<div class="prc-msg">No comments yet — start the conversation below.</div>`; return; }
+    el.innerHTML = res.comments.map((c: { author: string; body: string; createdAt: number }) =>
+      `<div class="prc-c"><div class="prc-ch"><b>${esc(c.author || 'someone')}</b><span class="prc-ct">${esc(relTime(c.createdAt))}</span></div><div class="prc-cb">${esc(c.body)}</div></div>`).join('');
+    el.scrollTop = el.scrollHeight;
+  }
   async function post(): Promise<void> {
     if (posting) return;
     const body = ta.value.trim();
     if (!body) { toast('Write a comment first'); return; }
     posting = true; okBtn.disabled = true; okBtn.textContent = 'Posting…';
     const res = await relay.providerPrComment(wsKey(), prov, r, num, body).catch(() => ({ ok: false, error: 'request failed' }));
-    posting = false;
-    if (!res.ok) { okBtn.disabled = false; okBtn.textContent = 'Post comment'; toast(res.error || 'Could not post the comment'); return; }
-    close(); toast(`Commented on ${word} #${num}`, true);
+    posting = false; okBtn.disabled = false; okBtn.textContent = 'Post comment';
+    if (!res.ok) { toast(res.error || 'Could not post the comment'); return; }
+    ta.value = ''; toast(`Commented on ${word} #${num}`, true); void loadThread();
+  }
+
+  const actions = root.querySelector('#prcActions');
+  if (actions) {
+    let armedBtn: HTMLButtonElement | null = null; let armT: number | null = null;
+    const baseText = (b: HTMLButtonElement) => b.dataset.act === 'merge' ? '⛙ Merge' : 'Close';
+    // Reset whatever destructive button is currently armed back to its base label.
+    const disarm = () => { if (armT) { clearTimeout(armT); armT = null; } if (armedBtn) { armedBtn.textContent = baseText(armedBtn); armedBtn.classList.remove('armed'); armedBtn = null; } };
+    actions.querySelectorAll<HTMLButtonElement>('[data-act]').forEach((b) => {
+      b.onclick = async () => {
+        const act = b.dataset.act!;
+        // "Request changes" must carry a note (GitHub rejects an empty-body REQUEST_CHANGES; and it's the point).
+        if (act === 'request' && !ta.value.trim()) { toast('Write the requested changes in the comment box first'); ta.focus(); return; }
+        if ((act === 'merge' || act === 'close') && armedBtn !== b) {   // destructive → arm first (clears any other armed button)
+          disarm();
+          armedBtn = b; b.textContent = act === 'merge' ? '⛙ Confirm merge' : 'Confirm close'; b.classList.add('armed');
+          armT = window.setTimeout(disarm, 3500); return;
+        }
+        disarm();   // executing (or a non-destructive action) → clear the armed state + restore labels
+        b.disabled = true; const orig = act === 'merge' || act === 'close' ? baseText(b) : b.textContent; b.textContent = '…';
+        let res: { ok: boolean; error?: string };
+        if (act === 'merge') res = await relay.providerPrMerge(wsKey(), prov, r, num, (root.querySelector('#prcMethod') as HTMLSelectElement | null)?.value).catch(() => ({ ok: false, error: 'request failed' }));
+        else if (act === 'close') res = await relay.providerSetState(wsKey(), prov, r, num, 'closed', 'pr').catch(() => ({ ok: false, error: 'request failed' }));
+        else if (act === 'approve') res = await relay.providerPrReview(wsKey(), prov, r, num, 'approve').catch(() => ({ ok: false, error: 'request failed' }));
+        else res = await relay.providerPrReview(wsKey(), prov, r, num, 'request_changes', ta.value.trim() || undefined).catch(() => ({ ok: false, error: 'request failed' }));
+        b.disabled = false; b.textContent = orig || '';
+        if (!res.ok) { toast(res.error || `Couldn’t ${act === 'request' ? 'request changes' : act}`); return; }
+        toast(act === 'merge' ? `Merged ${word} #${num}` : act === 'close' ? `Closed ${word} #${num}` : act === 'approve' ? `Approved ${word} #${num}` : `Requested changes on ${word} #${num}`, true);
+        if (act === 'request') ta.value = '';
+        if (act === 'merge' || act === 'close') { close(); void loadPrs(); }   // reflect the new state in the list
+        else void loadThread();
+      };
+    });
   }
 }
 
@@ -314,10 +370,11 @@ const SWEEP_CAP = 30;          // cap the per-load detail burst; PRs past it fil
 // No overlap guard needed: it's seq-guarded (a stale sweep stops + won't render) and cache-guarded (`needs`), and
 // a duplicate fetch is a free 304 — a hard "one at a time" flag would instead SKIP a rapid second load's sweep.
 async function sweepMergeStatus(seq: number, retry = 0): Promise<void> {
-  if (prScope === 'all' || prState !== 'open' || !repo || provider === 'bitbucket') return;
+  if (prState !== 'open') return;   // conflicts only matter for open PRs. Runs in BOTH single-repo AND All-repos.
+  const prov = (p: PrItem) => p.provider || provider;   // each PR's own provider/repo (they're tagged in All-repos)
   // Re-check anything not confirmed 'clean' (missing / unknown / conflict) so a resolved conflict clears its badge
-  // and a still-computing PR resolves; keep 'clean' PRs (the bulk) cached. An unchanged re-check is a free 304.
-  const needs = (p: PrItem): boolean => { const d = detailCache.get(prKey(p)); return !d || d.mergeState !== 'clean'; };
+  // and a still-computing PR resolves; keep 'clean' PRs cached; skip Bitbucket (it has no mergeable flag).
+  const needs = (p: PrItem): boolean => { if (prov(p) === 'bitbucket') return false; const d = detailCache.get(prKey(p)); return !d || d.mergeState !== 'clean'; };
   const targets = prs.filter(needs).slice(0, SWEEP_CAP);
   if (!targets.length) return;
   const rl = await relay.providerRateLimit().catch(() => null); if (rl?.limited) return;   // don't pile detail calls onto a rate-limited token
@@ -326,7 +383,7 @@ async function sweepMergeStatus(seq: number, retry = 0): Promise<void> {
   const worker = async (): Promise<void> => {
     while (i < targets.length && seq === loadSeq) {
       const p = targets[i++]; const key = prKey(p);
-      const res = await relay.providerPrDetail(ws, p.provider || provider, p.repo || repo!, p.number).catch(() => null);
+      const res = await relay.providerPrDetail(ws, prov(p), p.repo || repo || '', p.number).catch(() => null);
       if (res && res.ok && res.detail) { detailCache.set(key, res.detail as PrDetail); got = true; }
     }
   };
@@ -335,7 +392,7 @@ async function sweepMergeStatus(seq: number, retry = 0): Promise<void> {
   if (got && phase === 'ready') render();                       // reveal the freshly-detected conflict badges
   // GitHub computes mergeability lazily, so a first fetch can return 'unknown'. Retry ONCE after a beat so
   // conflicts surface without the user reloading (conditional requests keep the retry a cheap 304).
-  if (retry < 1 && provider === 'github' && prs.some((p) => detailCache.get(prKey(p))?.mergeState === 'unknown'))
+  if (retry < 1 && prs.some((p) => prov(p) === 'github' && detailCache.get(prKey(p))?.mergeState === 'unknown'))
     window.setTimeout(() => { if (seq === loadSeq) void sweepMergeStatus(seq, retry + 1); }, 2500);
 }
 

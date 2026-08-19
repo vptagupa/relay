@@ -601,12 +601,47 @@ ipcMain.handle('provider:remove-label', async (_e, p: { provider: ProviderId; ws
   if (!validRepo(p?.repo) || !Number.isInteger(p?.number) || p.number <= 0 || !label) return { ok: false, error: 'Invalid request' };
   return a.removeLabel(p?.ws, p.repo, p.number, label);
 });
-// Post a comment on a PR/MR. body is a bounded plain string (provider caps are ~64k; we trim well under).
-ipcMain.handle('provider:pr-comment', async (_e, p: { provider: ProviderId; ws: string; repo: string; number: number; body: string }) => {
+// ---- PR/issue conversation + lifecycle (Lane 1). `kind` picks the PR vs issue endpoint per provider. ----
+const okKind = (k: unknown): k is 'pr' | 'issue' => k === 'pr' || k === 'issue';
+const badReq = { ok: false, error: 'Invalid request' } as const;
+const validNum = (p: { repo?: unknown; number?: unknown }) => validRepo(p?.repo) && Number.isInteger(p?.number) && (p.number as number) > 0;
+// Read the comment thread.
+ipcMain.handle('provider:comments', async (_e, p: { provider: ProviderId; ws: string; repo: string; number: number; kind: 'pr' | 'issue' }) => {
+  const a = providerOf(p?.provider); if (!a) return badProvider;
+  if (!validNum(p) || !okKind(p?.kind)) return badReq;
+  return a.comments(p?.ws, p.repo, p.number, p.kind);
+});
+// Post a comment. body is a bounded plain string (provider caps are ~64k; we trim well under).
+ipcMain.handle('provider:pr-comment', async (_e, p: { provider: ProviderId; ws: string; repo: string; number: number; body: string; kind?: 'pr' | 'issue' }) => {
   const a = providerOf(p?.provider); if (!a) return badProvider;
   const body = typeof p?.body === 'string' ? p.body.trim() : '';
-  if (!validRepo(p?.repo) || !Number.isInteger(p?.number) || p.number <= 0 || !body) return { ok: false, error: 'Invalid request' };
-  return a.prComment(p?.ws, p.repo, p.number, body.slice(0, 60000));
+  if (!validNum(p) || !body) return badReq;
+  return a.postComment(p?.ws, p.repo, p.number, body.slice(0, 60000), okKind(p?.kind) ? p.kind : 'pr');
+});
+// Merge a PR.
+ipcMain.handle('provider:pr-merge', async (_e, p: { provider: ProviderId; ws: string; repo: string; number: number; method?: string }) => {
+  const a = providerOf(p?.provider); if (!a) return badProvider;
+  if (!validNum(p)) return badReq;
+  return a.prMerge(p?.ws, p.repo, p.number, typeof p?.method === 'string' ? p.method : undefined);
+});
+// Close / reopen a PR or issue.
+ipcMain.handle('provider:set-state', async (_e, p: { provider: ProviderId; ws: string; repo: string; number: number; state: 'open' | 'closed'; kind: 'pr' | 'issue' }) => {
+  const a = providerOf(p?.provider); if (!a) return badProvider;
+  if (!validNum(p) || !okKind(p?.kind) || (p?.state !== 'open' && p?.state !== 'closed')) return badReq;
+  return a.setState(p?.ws, p.repo, p.number, p.state, p.kind);
+});
+// Submit a PR review verdict.
+ipcMain.handle('provider:pr-review', async (_e, p: { provider: ProviderId; ws: string; repo: string; number: number; event: 'approve' | 'request_changes' | 'comment'; body?: string }) => {
+  const a = providerOf(p?.provider); if (!a) return badProvider;
+  const ev = p?.event; if (!validNum(p) || (ev !== 'approve' && ev !== 'request_changes' && ev !== 'comment')) return badReq;
+  return a.prReview(p?.ws, p.repo, p.number, ev, typeof p?.body === 'string' ? p.body.trim().slice(0, 60000) : undefined);
+});
+// Set the full assignee list (logins).
+ipcMain.handle('provider:set-assignees', async (_e, p: { provider: ProviderId; ws: string; repo: string; number: number; logins: string[]; kind: 'pr' | 'issue' }) => {
+  const a = providerOf(p?.provider); if (!a) return badProvider;
+  const logins = Array.isArray(p?.logins) ? p.logins.filter((x) => typeof x === 'string' && x).map((x) => x.slice(0, 100)).slice(0, 25) : null;
+  if (!validNum(p) || !okKind(p?.kind) || !logins) return badReq;
+  return a.setAssignees(p?.ws, p.repo, p.number, logins, p.kind);
 });
 // Repo members (collaborators) — the PR author-filter list.
 ipcMain.handle('provider:repo-members', async (_e, p: { provider: ProviderId; ws: string; repo: string }) => {
