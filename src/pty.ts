@@ -1,6 +1,6 @@
 import * as os from 'node:os';
 import * as fsync from 'node:fs';
-import type { WebContents } from 'electron';
+import { BrowserWindow, type WebContents } from 'electron';
 import * as pty from 'node-pty';
 import { createShellParser, shellIntegrationInit, type BlockEvent } from './blocks';
 
@@ -17,6 +17,7 @@ interface Term {
   pending: Map<string, BlockEvent>; // block/cwd events emitted while detached (wc null); flushed on reattach
   alt: boolean;                   // shell is in the alternate screen — a full-screen TUI (Claude Code, vim, top…) owns the display
   touchedAt: number;              // last activity (create / attach / data / input) — LRU key for the over-cap reaper
+  owner: number;                  // the window (BrowserWindow.id) that created this shell — killed when that window closes
 }
 // Enter / leave the alternate screen (DEC private modes 1049 / 1047 / 47). Whichever appears LAST in a
 // chunk wins, so we track the current mode across output.
@@ -76,6 +77,7 @@ export function createTerm(id: string, cwd: string, wc: WebContents, cols = 80, 
   if (existing) {
     // Same-run resume: the shell is still alive. (restore ignored.)
     existing.wc = wc;
+    existing.owner = BrowserWindow.fromWebContents(wc)?.id ?? existing.owner; // ownership follows the window now showing it (multi-window: a workspace adopted into another window)
     existing.touchedAt = Date.now();   // reattached → most-recently-used, so the reaper spares it
 
     try { existing.proc.resize(cols, rows); } catch { /* pty may have exited */ }
@@ -133,7 +135,7 @@ export function createTerm(id: string, cwd: string, wc: WebContents, cols = 80, 
     env,
     useConpty, // win32 only (ignored elsewhere): false → legacy winpty backend, the ConPTY fallback for PCs where ConPTY is broken
   } as import('node-pty').IWindowsPtyForkOptions);
-  const term: Term = { proc, buf: '', wc, parser: null, pending: new Map(), alt: false, touchedAt: Date.now() };
+  const term: Term = { proc, buf: '', wc, parser: null, pending: new Map(), alt: false, touchedAt: Date.now(), owner: BrowserWindow.fromWebContents(wc)?.id ?? 0 };
   terms.set(id, term);
 
   // Shell integration: the parser turns the shell's OSC markers into structured command
@@ -258,4 +260,18 @@ export function killTerm(id: string): void {
 
 export function killAll(): void {
   for (const id of [...terms.keys()]) killTerm(id);
+}
+// Renderer-driven kill (tab close / warm-workspace eviction), scoped to the requesting window: only kill a
+// shell that window OWNS, or an orphan whose owning window is gone. Guards the multi-window case where one
+// window keeps a workspace warm and ANOTHER later adopts it — the first window's eviction must not kill the
+// shells the second is now driving. (Owner follows the window on reattach; requester 0 = unknown → owner-match only.)
+export function killTermFor(id: string, requester: number): void {
+  const t = terms.get(id);
+  if (!t) return;
+  const ownerWin = BrowserWindow.fromId(t.owner);
+  if (t.owner === requester || !ownerWin || ownerWin.isDestroyed()) killTerm(id);
+}
+// Kill every shell OWNED by a window (created there) — called when that window closes so its shells don't leak.
+export function killWindowTerms(winId: number): void {
+  for (const [id, t] of [...terms]) if (t.owner === winId) killTerm(id);
 }

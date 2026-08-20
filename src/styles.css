@@ -92,6 +92,8 @@ button{font-family:inherit;color:inherit;cursor:pointer;border:none;background:n
 .ws-item{display:flex;align-items:center;gap:10px;padding:8px 9px;border-radius:8px;cursor:pointer}
 .ws-item:hover{background:var(--surface-2)}
 .ws-item.on{background:var(--accent-ghost)}
+.ws-item.elsewhere .ws-nm{opacity:.6}                        /* open in another window — its row focuses that window instead of switching here */
+.ws-item.elsewhere .ws-pth{color:var(--accent)}
 .ws-col{display:flex;flex-direction:column;min-width:0;flex:1}
 .ws-nm{font:600 12.5px/1.2 var(--sans);color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .ws-pth{font:11px/1.3 var(--mono);color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}

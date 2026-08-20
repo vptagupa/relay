@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { providerOf, modelById } from '../shared/models';
 import type { AgentEvent, ApprovalRequest, ChatTurn } from '../shared/types';
-import { getSettings, getActiveWorkspaceDef } from '../store';
+import { getSettings, getActiveWorkspaceDef, getWorkspaceDefById } from '../store';
 import { getKey } from '../keys';
 import type { ToolContext } from './tools';
 import { runAnthropic, runOpenAI, runGoogle, type RunArgs } from './providers';
@@ -14,6 +14,7 @@ export interface OrchestrateArgs {
   model: string;
   history: ChatTurn[];
   userMessage: string;
+  wsId?: string; // the sender window's workspace — resolves its OWN root + trust (multi-window); absent = global active
   approve: (req: ApprovalRequest) => Promise<boolean>;
   emit: (e: AgentEvent) => void;
 }
@@ -23,7 +24,15 @@ export async function runAgent(args: OrchestrateArgs): Promise<void> {
   const provider = providerOf(args.model);
   const apiKey = await getKey(provider);
 
-  if (!settings.workspace) return args.emit({ type: 'error', message: 'Open a project folder first (the agent works inside it).' });
+  // Per-WINDOW workspace: resolve root + trust from the id the sender window supplied (each window shows its
+  // own workspace, so the global "active" isn't authoritative). Fall back to the global active when no id is
+  // given (single-window / legacy). Root + trust both come from the STORED def — never a renderer-supplied
+  // string — so a renderer can't point the agent at another folder or forge the trust flag.
+  const wsDef = args.wsId ? await getWorkspaceDefById(args.wsId) : await getActiveWorkspaceDef();
+  const workspace = wsDef?.root ?? (args.wsId ? '' : settings.workspace); // an unknown/rootless id must NOT fall back to another workspace's folder
+  const trusted = wsDef?.trusted !== false;
+
+  if (!workspace) return args.emit({ type: 'error', message: 'Open a project folder first (the agent works inside it).' });
   // Anthropic can run on ambient credentials (your Claude Code / Claude subscription login,
   // or an ANTHROPIC_API_KEY/ANTHROPIC_AUTH_TOKEN in the environment), so a pasted key is
   // optional there. Other providers still need a stored key.
@@ -32,11 +41,8 @@ export async function runAgent(args: OrchestrateArgs): Promise<void> {
   // Per-workspace agent trust: an untrusted workspace forces approvals even when global auto-approve is
   // on (undefined trusted = trusted, so migrated/default workspaces are unaffected). Enforced here in the
   // main process so the renderer can't bypass the gate. See ToolContext.autoApprove.
-  const wsDef = await getActiveWorkspaceDef();
-  const trusted = wsDef?.trusted !== false;
-
   const ctx: ToolContext = {
-    workspace: settings.workspace,
+    workspace,
     autoApprove: settings.autoApprove && trusted,
     approve: args.approve,
     newId: () => randomUUID(),

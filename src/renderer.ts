@@ -857,7 +857,7 @@ async function sendAgent() {
     else if (e.type === 'error') { if (live) addTool('error', false, e.message); }
     else if (e.type === 'done') { if (assistantText) { targetChat().push({ role: 'assistant', content: assistantText }); persistWorkspace(); } if (showing()) renderChat(); }
   });
-  try { await relay.agentSend({ model, history: targetChat().slice(0, -1), userMessage: text }); }
+  try { await relay.agentSend({ model, history: targetChat().slice(0, -1), userMessage: text, wsId: getActiveWsId() }); } // this window's workspace → its own root + trust (multi-window)
   finally { off(); agentBusy = false; }
 }
 
@@ -2141,7 +2141,7 @@ new ResizeObserver(() => { clearTimeout(_roT); _roT = setTimeout(() => { fitPane
   ($('#storeText') as HTMLElement).textContent = 'Saved on this machine';
   tickClock(); setInterval(tickClock, 20000);
 
-  const ws = await relay.getWorkspace(); // the active workspace's tab snapshot
+  const ws = await relay.getWorkspaceSnapshot(getActiveWsId()); // this window's workspace tab snapshot (== the global active for the main window; the ?ws= target for a spawned one)
   try {
     await restoreWorkspaceSnapshot(ws);
     renderFiles(); // populate the Files section even if no terminal is active yet

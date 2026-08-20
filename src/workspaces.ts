@@ -45,6 +45,7 @@ let deps: WsDeps;
 // --- module state: the renderer's mirror of the store's workspace definitions + active id ---
 let wsDefs: WorkspaceDef[] = [];
 let wsActiveId = '';
+let wsOpenElsewhere = new Set<string>(); // ids currently shown in OTHER windows — refreshed each time the switcher opens
 const WS_COLORS = ['#6e7bff', '#f2a93b', '#4ec46a', '#ff2e97', '#22d3ee', '#a78bfa', '#f0616a'];
 const nextWsColor = () => WS_COLORS[wsDefs.length % WS_COLORS.length];
 const activeWsDef = (): WorkspaceDef | undefined => wsDefs.find((w) => w.id === wsActiveId);
@@ -127,6 +128,12 @@ export async function switchWorkspace(id: string): Promise<void> {
   closeWsMenu();
   if (state.booting || id === wsActiveId || !wsDefs.some((w) => w.id === id)) return; // a switch/boot in flight — ignore
 
+  // Multi-window guard: one workspace per window. If the target is already open in another window, focus THAT
+  // window instead of stealing its live session in here (two windows must never drive the same snapshot). On
+  // success main transfers ownership of `id` to this window (and drops this window's claim on `from`).
+  const claim = await relay.claimWorkspace(id);
+  if (!claim.ok) { if (claim.openElsewhere) toast('Already open in another window — focused it', true); return; }
+
   const from = wsActiveId;
   const def = wsDefs.find((w) => w.id === id)!;
   // Save the current workspace's snapshot so switching back restores it (scrollback serialized here).
@@ -170,17 +177,19 @@ function renderWorkspaceChip(): void {
 function renderWsMenu(): void {
   $('#wsMenu').innerHTML = wsDefs.map((w) => {
     const trusted = wsTrusted(w);
-    const sub = (w.root ? deps.shortCwd(w.root) : 'no folder') + (trusted ? '' : '  ·  🔒 untrusted');
-    return `<div class="ws-item${w.id === wsActiveId ? ' on' : ''}" data-ws="${w.id}">
+    const elsewhere = wsOpenElsewhere.has(w.id); // shown in another window right now
+    const sub = (w.root ? deps.shortCwd(w.root) : 'no folder') + (trusted ? '' : '  ·  🔒 untrusted') + (elsewhere ? '  ·  ⊞ in another window' : '');
+    return `<div class="ws-item${w.id === wsActiveId ? ' on' : ''}${elsewhere ? ' elsewhere' : ''}" data-ws="${w.id}">
       <span class="ws-dot" data-wsrecolor="${w.id}" title="Cycle color" style="background:${esc(w.color)}"></span>
       <span class="ws-col"><span class="ws-nm" data-wsname="${w.id}">${esc(w.name)}</span><span class="ws-pth">${esc(sub)}</span></span>
       ${w.id === wsActiveId ? '<span class="ws-chk">✓</span>' : ''}
-      <span class="ws-acts"><button data-wstrust="${w.id}" title="${trusted ? 'Trusted — click to require agent approvals' : 'Untrusted — click to trust'}">${trusted ? '🔓' : '🔒'}</button><button data-wsdup="${w.id}" title="Duplicate">⧉</button><button data-wsexport="${w.id}" title="Export…">⤓</button><button data-wslink="${w.id}" title="Copy slayert:// link">🔗</button><button data-wsrename="${w.id}" title="Rename">✎</button><button data-wsdel="${w.id}" title="Delete">✕</button></span>
+      <span class="ws-acts">${w.id === wsActiveId ? '' : `<button data-wsopenwin="${w.id}" title="${elsewhere ? 'Focus its window' : 'Open in a new window'}">⊞</button>`}<button data-wstrust="${w.id}" title="${trusted ? 'Trusted — click to require agent approvals' : 'Untrusted — click to trust'}">${trusted ? '🔓' : '🔒'}</button><button data-wsdup="${w.id}" title="Duplicate">⧉</button><button data-wsexport="${w.id}" title="Export…">⤓</button><button data-wslink="${w.id}" title="Copy slayert:// link">🔗</button><button data-wsrename="${w.id}" title="Rename">✎</button><button data-wsdel="${w.id}" title="Delete">✕</button></span>
     </div>`;
   }).join('')
     + `<div class="ws-sep"></div><div class="ws-act" data-wsnew><span class="g">＋</span> New workspace</div><div class="ws-act" data-wstpl><span class="g">▤</span> Templates…</div><div class="ws-act" data-wsimport><span class="g">⤒</span> Import workspace…</div>`;
 }
-export function openWsMenu(): void {
+export async function openWsMenu(): Promise<void> {
+  try { wsOpenElsewhere = new Set(await relay.workspacesOpenElsewhere()); } catch { wsOpenElsewhere = new Set(); } // best-effort: the switch itself is still guarded server-side
   renderWsMenu();
   const r = $('#wsChip').getBoundingClientRect(); const m = $('#wsMenu');
   m.style.left = r.left + 'px'; m.style.top = (r.bottom + 6) + 'px'; m.classList.add('show');
@@ -319,6 +328,9 @@ export async function deleteWorkspace(id: string): Promise<void> {
   if (state.booting) return; // a switch/boot in flight
   if (wsDefs.length <= 1) { toast('Can’t delete the only workspace'); return; }
   const def = wsDefs.find((w) => w.id === id); if (!def) return;
+  // Multi-window: never delete a workspace another window is showing (it would yank the def + snapshot out from
+  // under a live session). The switcher already marks these; guard here too in case the mark is stale.
+  if (id !== wsActiveId) { const elsewhere = new Set(await relay.workspacesOpenElsewhere()); if (elsewhere.has(id)) { toast('Open in another window — close that window first', true); return; } }
   if (!(await deps.confirmDialog('Delete workspace?', `“${def.name}” and its saved terminals will be removed — this can’t be undone.`, 'Delete'))) return;
   if (id === wsActiveId) {
     // Drop the active session WITHOUT saving its snapshot (it's being deleted), then open the first remaining one.
@@ -383,7 +395,13 @@ export function copyWorkspaceLink(id: string): void {
 // Load persisted workspace definitions + blueprints on boot, and mirror the active workspace's env.
 export async function loadWorkspaceMeta(): Promise<void> {
   const meta = await relay.getWorkspaceMeta();
-  wsDefs = meta.workspaces; wsActiveId = meta.activeWorkspaceId; renderWorkspaceChip();
+  wsDefs = meta.workspaces; wsActiveId = meta.activeWorkspaceId;
+  // Multi-window: a window launched for a specific workspace (?ws=<id>) shows THAT one, not the persisted
+  // global active. Honor the query only if it names a real workspace; else fall back to the active.
+  const target = new URLSearchParams(location.search).get('ws');
+  if (target && wsDefs.some((w) => w.id === target)) wsActiveId = target;
+  void relay.claimWorkspace(wsActiveId); // register this window as the owner of its workspace (boot can't bounce — the launcher already deduped)
+  renderWorkspaceChip();
   await loadBlueprints();
   syncEffectiveFromActiveWs(); // mirror the active workspace's folder + theme into settings before first paint
 }
@@ -395,9 +413,18 @@ export function initWorkspaces(d: WsDeps): void {
   if (wired) return;
   wired = true;
   initBlueprints({ switchWorkspace, addWorkspaceDef, activeWorkspaceDef: activeWsDef, uniqueWsName, nextWsColor, sendCommand: d.sendCommand, confirmDialog: d.confirmDialog, shortCwd: d.shortCwd, isBooting: () => state.booting });
-  $('#wsChip').onclick = () => ($('#wsMenu').classList.contains('show') ? closeWsMenu() : openWsMenu());
+  // Multi-window live-sync: another window changed the definition list — adopt it so our next save doesn't
+  // clobber their create/rename/recolor/trust/delete. We keep OUR own active id + live session untouched.
+  relay.onWorkspacesMeta((meta: { workspaces: WorkspaceDef[]; activeWorkspaceId: string }) => {
+    if (state.booting) return; // don't mutate defs mid-switch/boot; the menu re-fetches on next open anyway
+    wsDefs = meta.workspaces;
+    renderWorkspaceChip();
+    if ($('#wsMenu').classList.contains('show')) renderWsMenu();
+  });
+  $('#wsChip').onclick = () => ($('#wsMenu').classList.contains('show') ? closeWsMenu() : void openWsMenu());
   $('#wsMenu').addEventListener('click', (e) => {
     const t = e.target as HTMLElement;
+    const ow = t.closest('[data-wsopenwin]') as HTMLElement | null; if (ow) { closeWsMenu(); void relay.openWorkspaceWindow(ow.dataset.wsopenwin!); return; } // open (or focus) in its own window
     const rc = t.closest('[data-wsrecolor]') as HTMLElement | null; if (rc) { recolorWorkspace(rc.dataset.wsrecolor!); return; }
     const rn = t.closest('[data-wsrename]') as HTMLElement | null; if (rn) { startRenameWorkspace(rn.dataset.wsrename!); return; }
     const tr = t.closest('[data-wstrust]') as HTMLElement | null; if (tr) { toggleTrust(tr.dataset.wstrust!); return; }

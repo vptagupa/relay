@@ -91,6 +91,13 @@ const api = {
   getWorkspaceMeta: (): Promise<{ workspaces: WorkspaceDef[]; activeWorkspaceId: string }> => ipcRenderer.invoke('workspaces:meta'),
   saveWorkspaceMeta: (workspaces: WorkspaceDef[], activeWorkspaceId: string) => ipcRenderer.send('workspaces:save-meta', { workspaces, activeWorkspaceId }),
   getWorkspaceSnapshot: (id: string): Promise<Workspace> => ipcRenderer.invoke('workspace:get-snapshot', id),
+  // Multi-window: open a workspace in its own window (focuses an existing one instead of duplicating); claim the
+  // workspace this window shows (refused + the owner focused if it's open elsewhere); list ids open in OTHER windows.
+  openWorkspaceWindow: (id: string): Promise<{ ok: boolean; focusedExisting?: boolean }> => ipcRenderer.invoke('window:open-workspace', id),
+  claimWorkspace: (id: string): Promise<{ ok: boolean; openElsewhere?: boolean }> => ipcRenderer.invoke('window:claim-workspace', id),
+  workspacesOpenElsewhere: (): Promise<string[]> => ipcRenderer.invoke('window:open-workspaces'),
+  // Another window changed the workspace definition list (create/rename/recolor/trust/delete) — refresh our mirror.
+  onWorkspacesMeta: (cb: (meta: { workspaces: WorkspaceDef[]; activeWorkspaceId: string }) => void): void => { ipcRenderer.on('workspaces:meta-changed', (_e, meta) => cb(meta)); },
   saveWorkspaceSnapshot: (id: string, ws: Workspace) => ipcRenderer.send('workspace:save-snapshot', { id, ws }),
 
   // --- Issue Agent — multi-provider (GitHub / GitLab / Bitbucket) ---
@@ -203,7 +210,7 @@ const api = {
   revealPath: (cwd: string, target: string): Promise<{ ok: boolean; method?: string }> => ipcRenderer.invoke('fs:open-rel', { cwd, target }),
 
   // --- agent ---
-  agentSend: (payload: { model: string; history: ChatTurn[]; userMessage: string }): Promise<void> =>
+  agentSend: (payload: { model: string; history: ChatTurn[]; userMessage: string; wsId?: string }): Promise<void> =>
     ipcRenderer.invoke('agent:send', payload),
   onAgentEvent: (cb: (e: AgentEvent) => void) => {
     const h = (_: unknown, e: AgentEvent) => cb(e);

@@ -223,6 +223,13 @@ export async function getActiveWorkspaceDef(): Promise<WorkspaceDef | undefined>
   return db.workspaces.find((w) => w.id === db.activeWorkspaceId);
 }
 
+// A specific workspace's definition — the agent resolves per-WINDOW root + trust from the id the sender
+// window supplies (multi-window: each window shows its own workspace; the global "active" isn't authoritative).
+export async function getWorkspaceDefById(id: string): Promise<WorkspaceDef | undefined> {
+  const db = await load();
+  return db.workspaces.find((w) => w.id === id);
+}
+
 // --- workspace blueprints (reusable "Templates") ---
 export async function getBlueprints(): Promise<WorkspaceBlueprint[]> {
   return (await load()).blueprints;

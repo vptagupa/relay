@@ -6,7 +6,7 @@ import { exec, execFile } from 'node:child_process';
 import http from 'node:http';
 import { createHash, randomBytes } from 'node:crypto';
 import { httpsReq, PROVIDERS, providerOf, providerFromRemote, bitbucketExchangeCode, bitbucketAuthorizeUrl, bbOAuthConfigured, BB_OAUTH_PORT, BB_REDIRECT_URI, getOAuthApp, setOAuthApp, githubClientId, migrateGlobalSecretsToWs, rateLimitStatus, type ProviderId } from './providers';
-import { createTerm, writeTerm, resizeTerm, detachTerm, killTerm, killAll, isAltScreen, termStats, setReapLogger } from './pty';
+import { createTerm, writeTerm, resizeTerm, detachTerm, killTermFor, killAll, killWindowTerms, isAltScreen, termStats, setReapLogger } from './pty';
 import { startWebhookServer, stopWebhookServer, webhookRunning } from './webhooks';
 import * as store from './store';
 import * as keys from './keys';
@@ -128,7 +128,14 @@ process.on('unhandledRejection', (reason) => logFatal('unhandledRejection', reas
 declare const MAIN_WINDOW_VITE_DEV_SERVER_URL: string | undefined;
 declare const MAIN_WINDOW_VITE_NAME: string;
 
+// `win` is the FOCUSED (or last-focused) window — dialogs, deeplinks, and legacy single-window callers target it;
+// in single-window use it's simply the one window. `windows` holds every open window; `wsWindow` maps a workspace
+// id → the window showing it (one workspace per window, so two windows never fight over the same tab snapshot).
 let win: BrowserWindow | null = null;
+const windows = new Set<BrowserWindow>();
+const wsWindow = new Map<string, BrowserWindow>();
+const senderWin = (e: { sender: Electron.WebContents }): BrowserWindow | null => BrowserWindow.fromWebContents(e.sender) || win;
+const broadcast = (channel: string, ...args: unknown[]): void => { for (const w of windows) if (!w.isDestroyed()) w.webContents.send(channel, ...args); };
 
 // --- slayert:// deeplinks: slayert://<kind>/<name>, e.g. slayert://workspace/agent-t ---
 // Scheme is "slayert" (not "slayer") to stay namespaced to this app — other Slayer projects keep their own.
@@ -152,9 +159,11 @@ function routeDeeplink(url: string | null): void {
 // minimal app menu (OS requirement), which lives in the top screen bar, not the window.
 Menu.setApplicationMenu(null);
 
-function createWindow(): void {
+// Create a window. `wsId` (optional) opens a SPECIFIC workspace in this window (multi-window "open in new window");
+// omitted → the renderer restores the persisted active workspace (the normal single-window boot, unchanged).
+function createWindow(wsId?: string): BrowserWindow {
   const isMac = process.platform === 'darwin';
-  win = new BrowserWindow({
+  const w = new BrowserWindow({
     width: 1200,
     height: 780,
     minWidth: 780,
@@ -174,37 +183,72 @@ function createWindow(): void {
       sandbox: false, // preload needs Node to use ipcRenderer
     },
   });
+  windows.add(w); win = w;
+  if (wsId) wsWindow.set(wsId, w);   // claim the workspace for this window
 
   // TEMP DIAG: mirror renderer console errors/warnings into slayert-error.log so we can
   // diagnose init crashes that leave the UI unresponsive (no main-process exception fires).
-  win.webContents.on('console-message', (_e, level, message, line, sourceId) => {
+  w.webContents.on('console-message', (_e, level, message, line, sourceId) => {
     if (level >= 2) void logRenderer(`${message}  (${sourceId}:${line})`);
   });
   // If the renderer dies or reloads, release any in-flight approval promises so the agent loop
   // (and its provider request) can't leak and wedge the agent panel for the rest of the session.
-  win.webContents.on('render-process-gone', (_e, d) => { logFatal('render-process-gone', JSON.stringify(d)); clearPendingApprovals(); });
-  win.webContents.on('did-start-navigation', (_e, _url, isInPlace, isMainFrame) => { if (isMainFrame && !isInPlace) clearPendingApprovals(); });
-  win.webContents.on('did-fail-load', (_e, code, desc, url) => logFatal('did-fail-load', `${code} ${desc} ${url}`));
+  w.webContents.on('render-process-gone', (_e, d) => { logFatal('render-process-gone', JSON.stringify(d)); clearPendingApprovals(); });
+  w.webContents.on('did-start-navigation', (_e, _url, isInPlace, isMainFrame) => { if (isMainFrame && !isInPlace) clearPendingApprovals(); });
+  w.webContents.on('did-fail-load', (_e, code, desc, url) => logFatal('did-fail-load', `${code} ${desc} ${url}`));
   // A slayert:// link this instance launched with is routed once the renderer has loaded (it buffers the
   // intent until its own boot finishes). Cleared after the first delivery so a reload can't refire it.
-  win.webContents.on('did-finish-load', () => { if (bootDeeplink) { routeDeeplink(bootDeeplink); bootDeeplink = null; } });
-  win.on('closed', () => { win = null; }); // drop the ref so stale window handlers / late IPC can't hit a destroyed window
+  w.webContents.on('did-finish-load', () => { if (bootDeeplink) { routeDeeplink(bootDeeplink); bootDeeplink = null; } });
+  w.on('focus', () => { win = w; });   // dialogs/deeplinks follow the focused window
+  w.on('closed', () => {
+    windows.delete(w);
+    for (const [id, ww] of [...wsWindow]) if (ww === w) wsWindow.delete(id);  // release its workspace claims
+    killWindowTerms(w.id);                                                    // kill the shells this window owned (no leak)
+    if (win === w) win = [...windows].pop() || null;                         // hand the focused ref to a surviving window
+  });
 
   const loaded = MAIN_WINDOW_VITE_DEV_SERVER_URL
-    ? win.loadURL(MAIN_WINDOW_VITE_DEV_SERVER_URL)
-    : win.loadFile(path.join(__dirname, `../renderer/${MAIN_WINDOW_VITE_NAME}/index.html`));
+    ? w.loadURL(MAIN_WINDOW_VITE_DEV_SERVER_URL + (wsId ? `?ws=${encodeURIComponent(wsId)}` : ''))
+    : w.loadFile(path.join(__dirname, `../renderer/${MAIN_WINDOW_VITE_NAME}/index.html`), wsId ? { query: { ws: wsId } } : undefined);
   loaded.catch((err) => logFatal('window-load', err)); // otherwise a load failure is a blank window + unhandled rejection
 
-  // Keep the custom maximize/restore icon in sync with the real window state.
-  win.on('maximize', () => win?.webContents.send('win:state', true));
-  win.on('unmaximize', () => win?.webContents.send('win:state', false));
+  // Keep the custom maximize/restore icon in sync with the real window state — for THIS window.
+  w.on('maximize', () => { if (!w.isDestroyed()) w.webContents.send('win:state', true); });
+  w.on('unmaximize', () => { if (!w.isDestroyed()) w.webContents.send('win:state', false); });
+  return w;
 }
 
 /* -------------------- custom window controls -------------------- */
-ipcMain.on('win:minimize', () => win?.minimize());
-ipcMain.on('win:maximize', () => { if (win) win.isMaximized() ? win.unmaximize() : win.maximize(); });
-ipcMain.on('win:close', () => win?.close());
+ipcMain.on('win:minimize', (e) => senderWin(e)?.minimize());
+ipcMain.on('win:maximize', (e) => { const w = senderWin(e); if (w) w.isMaximized() ? w.unmaximize() : w.maximize(); });
+ipcMain.on('win:close', (e) => senderWin(e)?.close());
 ipcMain.on('win:focus', () => { if (win) { if (win.isMinimized()) win.restore(); win.show(); win.focus(); } });
+
+/* -------------------- multi-window workspaces -------------------- */
+// Open a workspace in its OWN window. If it's already open somewhere, focus that window (never duplicate — two
+// windows must never share one workspace's snapshot). Returns whether an existing window was focused.
+ipcMain.handle('window:open-workspace', (_e, id: string) => {
+  if (typeof id !== 'string' || !id) return { ok: false };
+  const existing = wsWindow.get(id);
+  if (existing && !existing.isDestroyed()) { if (existing.isMinimized()) existing.restore(); existing.show(); existing.focus(); return { ok: true, focusedExisting: true }; }
+  createWindow(id);
+  return { ok: true };
+});
+// The renderer claims the workspace its window is showing (on boot + on each internal switch). If the target is
+// open in ANOTHER window we refuse + focus that window, so the renderer bounces back to its previous workspace.
+ipcMain.handle('window:claim-workspace', (e, id: string) => {
+  const me = senderWin(e); if (!me || typeof id !== 'string' || !id) return { ok: false };
+  const owner = wsWindow.get(id);
+  if (owner && owner !== me && !owner.isDestroyed()) { if (owner.isMinimized()) owner.restore(); owner.show(); owner.focus(); return { ok: false, openElsewhere: true }; }
+  for (const [wid, w] of [...wsWindow]) if (w === me) wsWindow.delete(wid);   // this window now shows only `id`
+  wsWindow.set(id, me);
+  return { ok: true };
+});
+// Which workspace ids are open in OTHER windows (so the switcher can mark them "open in another window").
+ipcMain.handle('window:open-workspaces', (e) => {
+  const me = senderWin(e);
+  return [...wsWindow.entries()].filter(([, w]) => w !== me && !w.isDestroyed()).map(([id]) => id);
+});
 
 // Only boot the real app when this isn't a Squirrel maintenance run (see isSquirrel above).
 if (!isSquirrel) {
@@ -262,20 +306,20 @@ ipcMain.handle('pty:create', async (e, { id, cwd, cols, rows, restore, runCmd, d
 ipcMain.on('pty:write', (_e, { id, data }) => writeTerm(id, data));
 ipcMain.on('pty:resize', (_e, { id, cols, rows }) => resizeTerm(id, cols, rows));
 ipcMain.on('pty:detach', (_e, { id }) => detachTerm(id));
-ipcMain.on('pty:kill', (_e, { id }) => killTerm(id));
+ipcMain.on('pty:kill', (e, { id }) => killTermFor(id, senderWin(e)?.id ?? 0)); // owner-scoped: don't let one window's eviction kill a shell another window adopted
 
 /* -------------------- settings / workspace -------------------- */
 ipcMain.handle('settings:get', async () => ({ ...(await store.getSettings()), hasKey: await keys.hasKeys() }));
 ipcMain.handle('settings:patch', async (_e, patch) => ({ ...(await store.patchSettings(patch)), hasKey: await keys.hasKeys() }));
-ipcMain.handle('workspace:open', async () => {
-  const r = await dialog.showOpenDialog(win!, { properties: ['openDirectory'] });
+ipcMain.handle('workspace:open', async (e) => {
+  const r = await dialog.showOpenDialog(senderWin(e)!, { properties: ['openDirectory'] }); // parent the picker to the calling window
   if (!r.canceled && r.filePaths[0]) await store.patchSettings({ workspace: r.filePaths[0] });
   return { ...(await store.getSettings()), hasKey: await keys.hasKeys() };
 });
 // Pick a folder and return its path (null if cancelled). No side effects — the caller
 // decides what to do with it (e.g. open a terminal there).
-ipcMain.handle('dialog:pick-folder', async () => {
-  const r = await dialog.showOpenDialog(win!, { properties: ['openDirectory'] });
+ipcMain.handle('dialog:pick-folder', async (e) => {
+  const r = await dialog.showOpenDialog(senderWin(e)!, { properties: ['openDirectory'] });
   return { path: !r.canceled && r.filePaths[0] ? r.filePaths[0] : null };
 });
 
@@ -670,7 +714,7 @@ ipcMain.handle('provider:issue-state', async (_e, p: { provider: ProviderId; ws:
 // issue/PR events are pushed back to the renderer, which routes them into the per-workspace notification bell.
 ipcMain.handle('webhook:control', async (_e, p: { enabled: boolean; port?: number; secret?: string }) => {
   if (!p?.enabled) { stopWebhookServer(); return { ok: true, running: false }; }
-  const res = await startWebhookServer(Math.max(1, Math.min(65535, Number(p?.port) || 47824)), String(p?.secret || ''), (ev) => { if (win && !win.isDestroyed()) win.webContents.send('webhook:event', ev); });
+  const res = await startWebhookServer(Math.max(1, Math.min(65535, Number(p?.port) || 47824)), String(p?.secret || ''), (ev) => broadcast('webhook:event', ev));
   return { ok: res.ok, running: webhookRunning(), error: res.error };
 });
 ipcMain.handle('webhook:status', () => ({ running: webhookRunning() }));
@@ -1225,9 +1269,9 @@ ipcMain.handle('pipeline:verdict', async (_e, p: { wt: string; stage: number }) 
 });
 
 /* -------------------- session export -------------------- */
-ipcMain.handle('session:export', async (_e, { name, content, ext }: { name: string; content: string; ext: string }) => {
+ipcMain.handle('session:export', async (ev, { name, content, ext }: { name: string; content: string; ext: string }) => {
   const safe = (name || 'session').replace(/[^\w.-]+/g, '_');
-  const r = await dialog.showSaveDialog(win!, {
+  const r = await dialog.showSaveDialog(senderWin(ev)!, {
     defaultPath: `${safe}.${ext}`,
     filters: [{ name: ext.toUpperCase(), extensions: [ext] }, { name: 'All files', extensions: ['*'] }],
   });
@@ -1238,8 +1282,8 @@ ipcMain.handle('session:export', async (_e, { name, content, ext }: { name: stri
 // Import a workspace: read a user-picked JSON file and hand the raw parsed payload back to the renderer,
 // which validates the shape and builds a fresh def + snapshot. (Treated as untrusted content — the
 // renderer sanitizes; imported workspaces start untrusted for the agent.)
-ipcMain.handle('workspace:import', async () => {
-  const r = await dialog.showOpenDialog(win!, {
+ipcMain.handle('workspace:import', async (ev) => {
+  const r = await dialog.showOpenDialog(senderWin(ev)!, {
     properties: ['openFile'],
     filters: [{ name: 'Slayer T workspace', extensions: ['json'] }, { name: 'All files', extensions: ['*'] }],
   });
@@ -1324,7 +1368,15 @@ ipcMain.on('workspace:set-sync', (e, ws) => {
 });
 // Named workspaces: definitions + active id (rare) and per-workspace snapshots (used on switch).
 ipcMain.handle('workspaces:meta', () => store.getWorkspaceMeta());
-ipcMain.on('workspaces:save-meta', (_e, { workspaces, activeWorkspaceId }) => { void store.saveWorkspaceMeta(workspaces, activeWorkspaceId); });
+ipcMain.on('workspaces:save-meta', (e, { workspaces, activeWorkspaceId }) => {
+  void store.saveWorkspaceMeta(workspaces, activeWorkspaceId);
+  // Multi-window: every window keeps its own copy of the definition list, so a create/rename/recolor/delete
+  // in one window must reach the others — otherwise the next stale write from another window silently clobbers
+  // it. Push the fresh list to the OTHER windows (the sender already has it); they refresh without disturbing
+  // the session each is showing.
+  const from = e.sender;
+  for (const w of windows) if (!w.isDestroyed() && w.webContents !== from) w.webContents.send('workspaces:meta-changed', { workspaces, activeWorkspaceId });
+});
 ipcMain.handle('workspace:get-snapshot', (_e, id: string) => store.getWorkspaceSnapshot(id));
 ipcMain.on('workspace:save-snapshot', (_e, { id, ws }) => { void store.saveWorkspaceSnapshot(id, ws); });
 ipcMain.handle('blueprints:get', () => store.getBlueprints());
@@ -1339,12 +1391,14 @@ ipcMain.on('agent:approval-response', (_e, { id, ok }) => {
   pendingApprovals.delete(id);
 });
 
-ipcMain.handle('agent:send', async (e, { model, history, userMessage }: { model: string; history: ChatTurn[]; userMessage: string }) => {
+ipcMain.handle('agent:send', async (e, { model, history, userMessage, wsId }: { model: string; history: ChatTurn[]; userMessage: string; wsId?: string }) => {
   const wc = e.sender;
   await runAgent({
     model,
     history,
     userMessage,
+    wsId: typeof wsId === 'string' && wsId ? wsId : undefined, // the sender window's workspace → its own root + trust
+
     emit: (ev) => {
       if (!wc.isDestroyed()) wc.send('agent:event', ev);
     },
