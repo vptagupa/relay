@@ -42,6 +42,13 @@ This issue has been validated as real. Resolve it:
 3. Summarize what you changed and why.
 4. {closeStep}`;
 
+// Fix stage for a pipeline that has a REVIEW (or other gate) AFTER it. A plain Fix is terminal — it ends at
+// its PR and writes no verdict, so the runner would never advance to the next stage. This variant appends an
+// always-pass verdict so the pipeline moves on to review once the fix (and its PR) are done.
+const FIX_GATED_BRIEF = `${FIX_BRIEF}
+
+When the fix is complete, write \`{verdictRel}\` as JSON on one object: {"passed": true, "summary": "what you changed"} — this hands off to the review stage (it does not decide pass/fail; the review does).`;
+
 const FIX_ONLY_BRIEF = `{issue}
 
 ---
@@ -70,6 +77,13 @@ Run the project's test / build / lint checks. Don't change product code beyond w
 
 Write \`{verdictRel}\` as JSON: {"passed": true, "summary": "which checks ran and the result"} — passed=true only if the checks are green.`;
 
+// Shared review gate: a backend-touching change is NEVER passed on inspection alone — the reviewer must have
+// actually run the backend and confirmed the affected path works, or the verdict must be passed=false. Kept in
+// ONE place and interpolated into every review brief so the rule can't drift between the issue + PR reviews.
+const BACKEND_GATE = `## Backend must be proven working — do NOT pass on inspection alone
+First decide whether this change touches the BACKEND — a server, an HTTP/RPC/GraphQL endpoint, a database schema/migration/query, a queue/worker/cron job, auth, or any server-side business logic. If it does, reading the diff is NOT enough: you MUST actually run the backend and exercise the affected path (call the endpoint, run the query/migration, trigger the job) and observe a correct, error-free result end-to-end.
+If the change is backend-related and you did NOT — or could NOT — actually run it and confirm it works, you MUST set passed=false and state plainly what stayed unverified. Never pass a backend change on assumed, inferred, or "the code looks correct" reasoning — only on behaviour you actually observed working.`;
+
 const REVIEW_BRIEF = `{issue}
 
 ---
@@ -81,7 +95,9 @@ Review the change on this branch as a skeptical reviewer: correctness, edge case
 - **Correct behaviour:** the right result on normal AND edge-case inputs, with no regression to existing behaviour.
 Call out every error, exception, or incorrect behaviour you find.
 
-Write \`{verdictRel}\` as JSON: {"passed": true, "summary": "your review verdict + any concerns"} — passed=true only if the change is correct, builds, runs without errors, and behaves correctly.`;
+${BACKEND_GATE}
+
+Write \`{verdictRel}\` as JSON: {"passed": true, "summary": "your review verdict + any concerns"} — passed=true only if the change is correct, builds, runs without errors, and behaves correctly, AND (when the issue is backend-related) you actually ran the backend and confirmed the affected path works. If it's a backend change you could not validate, passed=false.`;
 
 const CUSTOM_BRIEF = `{issue}
 
@@ -125,9 +141,11 @@ Beyond reading the diff, verify it actually works (don't edit, commit, or push �
 - **Correct behaviour:** the right result on normal AND edge-case inputs, with no regression to existing behaviour.
 Call out every error, exception, or incorrect behaviour you find.
 
+${BACKEND_GATE}
+
 When you're done, write your verdict to \`{verdictRel}\` as JSON on one object:
 {"passed": true, "summary": "one short paragraph: your review — is it correct & ready to merge, and any concerns/risks"}
-Set passed=true only if it builds, runs without errors, behaves correctly, and is ready to merge; false if it needs changes (errors, runtime failures, wrong behaviour, bugs, missing tests, risky).`;
+Set passed=true only if it builds, runs without errors, behaves correctly, and is ready to merge — AND (when the PR is backend-related) you actually ran the backend and confirmed the affected path works; false if it needs changes (errors, runtime failures, wrong behaviour, bugs, missing tests, risky) OR it's a backend change you could not validate.`;
 
 /* ----------------------------- stage-kind catalog ----------------------------- */
 // One entry per kind: the palette label, the graph dot colour, whether it typically GATES (→ its brief
@@ -178,11 +196,12 @@ export const stageIndexById = (p: PipelineDef, id: string): number => p.stages.f
 
 /* ----------------------------- built-in pipelines ----------------------------- */
 const validateFix: PipelineDef = {
-  id: 'validate-fix', name: 'Validate → Fix', builtin: true,
-  desc: 'Confirm the issue is real & reproducible, then fix it. Stops (invalid) if it isn’t.',
+  id: 'validate-fix', name: 'Validate → Fix → Review', builtin: true,
+  desc: 'Confirm the issue is real & reproducible, fix it, then adversarially review the fix (build/run it, and validate the backend if touched). Stops (invalid) if the issue isn’t real.',
   stages: [
     { id: 'validate', name: 'Validate', kind: 'validate', brief: VALIDATE_BRIEF, edges: [{ when: 'valid', to: 'fix' }, { when: 'invalid', to: STOP }], x: 30, y: 110 },
-    { id: 'fix', name: 'Fix', kind: 'fix', brief: FIX_BRIEF, edges: [], x: 320, y: 56 },
+    { id: 'fix', name: 'Fix', kind: 'fix', brief: FIX_GATED_BRIEF, edges: [{ when: 'always', to: 'review' }], x: 320, y: 56 },
+    { id: 'review', name: 'Review', kind: 'review', brief: REVIEW_BRIEF, edges: [{ when: 'valid', to: STOP }, { when: 'invalid', to: STOP }], x: 610, y: 56 },
   ],
 };
 const fixOnly: PipelineDef = {

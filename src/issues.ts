@@ -678,6 +678,14 @@ const workingCount = (): number => {
 function freeReviewedSlots(map: Record<string, { url: string; draft: boolean }>): void {
   for (const [k, s] of [...runStatus]) {
     if (!OCCUPYING.includes(s)) continue;
+    // A run still moving through a staged pipeline (its current stage has outgoing edges → the verdict poll
+    // drives it to completion) must NOT be freed just because a PR appeared. In a Fix → Review pipeline the Fix
+    // stage opens the PR and the Review stage then runs on the SAME branch, so the PR shows up WHILE later
+    // stages still need to run — freeing here would under-count the slot (over-launch past CAP) and tear the
+    // run off mid-review. Only a run whose current stage is TERMINAL (its PR IS the completion, e.g. Fix-only)
+    // frees on PR detection.
+    const run = runs.get(k);
+    if (run && run.pipeline.stages[run.stageIdx]?.edges?.length) continue;
     const h = k.lastIndexOf('#');
     if (map[`${k.slice(0, h)}:issue-${k.slice(h + 1)}`]) runStatus.delete(k);
   }
