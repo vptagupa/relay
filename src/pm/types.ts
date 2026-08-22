@@ -57,6 +57,7 @@ export interface PmCapabilities {
   references: string[];                                 // reference() list names this provider serves
   filters: PmFilter[];                                  // drives the rail's filter bar (empty = no filters)
   paginated: boolean;                                   // tasks() honors limit/offset → the rail shows a pager
+  canComment: boolean;                                  // postComment() is available → write-back posts a comment (else appends the description)
 }
 
 // The rail's task query: declared filter values + pagination. The plugin turns this into its own request.
@@ -90,6 +91,7 @@ export interface PmProvider {
   createTask(ws: string, projectId: string, body: Record<string, unknown>): Promise<PmResult<{ id: string; key: string }>>;
   updateTask(ws: string, idOrKey: string, patch: Record<string, unknown>): Promise<PmResult<{ id: string; key: string }>>;
   reference(ws: string, name: string): Promise<PmResult<PmRef[]>>;
+  postComment?(ws: string, idOrKey: string, body: string): Promise<PmResult<unknown>>; // append a comment on the task's thread (present iff capabilities.canComment)
 }
 
 // SAFE metadata sent to the renderer — no functions, no secrets — so the UI (picker + config form + editor)

@@ -83,6 +83,7 @@ const api = {
   pmTaskCreate: (ws: string, provider: string, projectId: string, body: Record<string, unknown>): Promise<PmResult<{ id: string; key: string }>> => ipcRenderer.invoke('pm:task-create', { ws, provider, projectId, body }),
   pmTaskUpdate: (ws: string, provider: string, idOrKey: string, patch: Record<string, unknown>): Promise<PmResult<{ id: string; key: string }>> => ipcRenderer.invoke('pm:task-update', { ws, provider, idOrKey, patch }),
   pmReference: (ws: string, provider: string, name: string): Promise<PmResult<PmRef[]>> => ipcRenderer.invoke('pm:reference', { ws, provider, name }),
+  pmComment: (ws: string, provider: string, idOrKey: string, body: string): Promise<PmResult<unknown>> => ipcRenderer.invoke('pm:comment', { ws, provider, idOrKey, body }),
   syncStatus: (): Promise<{ configured: boolean; connected: boolean; email: string; hasPassphrase: boolean; lastPush: number; lastPull: number; remoteExists: boolean; remoteModified: string }> => ipcRenderer.invoke('sync:status'),
   syncHasPassphrase: (): Promise<{ has: boolean }> => ipcRenderer.invoke('sync:has-passphrase'),
   syncSetPassphrase: (passphrase: string): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke('sync:set-passphrase', { passphrase }),

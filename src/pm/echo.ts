@@ -108,6 +108,7 @@ export const echo: PmProvider = {
       { key: 'assignee', label: 'Assignee', control: 'select', optionsRef: 'members' },
     ],
     paginated: true,
+    canComment: true, // POST /api/v1/tasks/{id}/comments — see postComment
   },
   auth: {
     kind: 'oauth-pkce', port: PORT, redirectUri: REDIRECT_URI,
@@ -153,4 +154,8 @@ export const echo: PmProvider = {
   async createTask(ws, projectId, body) { const r = await apiFetch<Record<string, unknown>>(ws, 'POST', `/api/v1/projects/${enc(projectId)}/tasks`, body); return r.ok && r.data ? { ok: true, status: r.status, data: { id: str(r.data.id), key: str(r.data.task_key) || str(r.data.id) } } : failed<{ id: string; key: string }>(r); },
   async updateTask(ws, idOrKey, patch) { const r = await apiFetch<Record<string, unknown>>(ws, 'PATCH', `/api/v1/tasks/${enc(idOrKey)}`, patch); return r.ok && r.data ? { ok: true, status: r.status, data: { id: str(r.data.id), key: str(r.data.task_key) || str(r.data.id) } } : failed<{ id: string; key: string }>(r); },
   async reference(ws, name) { const r = await apiFetch<Record<string, unknown>[]>(ws, 'GET', `/api/v1/reference/${enc(name)}`); return r.ok ? { ok: true, status: r.status, data: arr(r.data).map(toRef) } : failed<PmRef[]>(r); },
+  // Post a comment on the task's thread — REST: POST /api/v1/tasks/{idOrKey}/comments with { body } (scope
+  // tasks:write). @mentions notify and updated_at bumps, same as the UI. Goes through apiFetch (Bearer token +
+  // 401-refresh + Echo error parsing) like every other call.
+  postComment(ws, idOrKey, body) { return apiFetch(ws, 'POST', `/api/v1/tasks/${enc(idOrKey)}/comments`, { body }); },
 };

@@ -154,7 +154,8 @@ export interface Settings {
   prDbCredByKey?: Record<string, string>;      // per-PR DB credential template id, keyed "provider:repo#number"; injected into the review run's env
   tasksByWs?: Record<string, Task[]>;          // per-workspace Tasks: draft an issue, validate it against the repo, file it only if valid
   pmProjectRepoByWs?: Record<string, Record<string, string>>; // per-ws PM integration → the git repo its tasks build in: { wsId: { "provider:projectId": "provider:owner/repo" } }
-  pmStatusMapByWs?: Record<string, Record<string, { working?: string; done?: string }>>; // per-ws, per-PM-provider status names that mean "in progress" / "done" (per-org) for pipeline write-back
+  pmStatusMapByWs?: Record<string, Record<string, { start?: string; valid?: string; fixed?: string }>>; // per-ws, per-PM-provider status names for the lifecycle write-back: on validate start / on valid (issue filed) / on fixed (issue closed)
+  pmTracked?: Array<{ ws: string; provider: string; taskKey: string; projectId: string; repoProvider: string; repo: string; issueNumber: number; issueUrl: string; fixedStatus?: string }>; // integration tasks whose filed issue is being watched for closure → set the task to its fixed status
   pmPipelineByProvider?: Record<string, string>; // (legacy) preferred pipeline per PM provider — the integration is validate-only now
   pmTypeByProvider?: Record<string, string[]>;   // last-used task type(s) (bug/enhancement/newfeature) per PM provider — pre-fills the Validate dialog
   pipelines?: PipelineDef[]; // user-authored custom pipelines (built-ins live in code); merged into the registry

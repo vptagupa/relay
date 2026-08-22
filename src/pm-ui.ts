@@ -295,12 +295,12 @@ const agentOptions = (cur?: string): string => AGENTS.map((a) => `<option value=
 
 // Persist the project→repo map + the provider's on-start/validated status map, so the next Validate for this
 // project pre-fills. Read-modify-write the nested per-ws maps (patchSettings replaces top-level keys).
-async function saveMappings(projKey: string, repoId: string, working: string, done: string): Promise<void> {
+async function saveMappings(projKey: string, repoId: string, statuses: { start: string; valid: string; fixed: string }): Promise<void> {
   const wsId = ws();
   const repoAll = { ...(state.settings.pmProjectRepoByWs || {}) };
   repoAll[wsId] = { ...(repoAll[wsId] || {}), [projKey]: repoId };
   const statAll = { ...(state.settings.pmStatusMapByWs || {}) };
-  statAll[wsId] = { ...(statAll[wsId] || {}), [railProvider]: { working: working || undefined, done: done || undefined } };
+  statAll[wsId] = { ...(statAll[wsId] || {}), [railProvider]: { start: statuses.start || undefined, valid: statuses.valid || undefined, fixed: statuses.fixed || undefined } };
   state.settings = await relay.patchSettings({ pmProjectRepoByWs: repoAll, pmStatusMapByWs: statAll });
 }
 
@@ -380,12 +380,13 @@ async function openValidate(taskKey: string): Promise<void> {
       <label class="iss-lbl">Validate in repository</label>
       <input class="tk-input" id="pmaRepo" placeholder="github:owner/repo" value="${esc(savedRepo)}" spellcheck="false" autocomplete="off">
       <div class="iss-agentrow" style="margin-top:11px"><label class="iss-lbl" style="margin:0">Assign to</label><select class="iss-agentsel" id="pmaAgent">${agentOptions(state.settings.issueAgent)}</select></div>
-      <div class="iss-agentrow"><label class="iss-lbl" style="margin:0">Status on start <span class="mut">— optional</span></label>${statusSelect('pmaWorking', statuses, savedStat.working)}</div>
-      <div class="iss-agentrow"><label class="iss-lbl" style="margin:0">Status when valid <span class="mut">— optional</span></label>${statusSelect('pmaDone', statuses, savedStat.done)}</div>
+      <div class="iss-agentrow"><label class="iss-lbl" style="margin:0">Status on start <span class="mut">— optional</span></label>${statusSelect('pmaStart', statuses, savedStat.start)}</div>
+      <div class="iss-agentrow"><label class="iss-lbl" style="margin:0">Status when valid <span class="mut">— issue filed</span></label>${statusSelect('pmaValid', statuses, savedStat.valid)}</div>
+      <div class="iss-agentrow"><label class="iss-lbl" style="margin:0">Status when fixed <span class="mut">— issue closed</span></label>${statusSelect('pmaFixed', statuses, savedStat.fixed)}</div>
       <label class="iss-lbl">Brief <span class="mut">— validate prompt, edit before launch</span></label>
       <textarea class="iss-brief" id="pmaBrief" rows="12" spellcheck="false">${esc(validateBrief(task))}</textarea>
     </div>
-    <div class="ft"><span class="hint">Validates only — no fix or PR</span><span class="r"><button class="tpl-btn ghost" data-x>Cancel</button><button class="tpl-btn pri" data-go>⚡ Validate</button></span></div>
+    <div class="ft"><span class="hint">Valid → files a linked issue, tracked to fixed</span><span class="r"><button class="tpl-btn ghost" data-x>Cancel</button><button class="tpl-btn pri" data-go>⚡ Validate</button></span></div>
   </div>`);
   const q = <T extends HTMLElement>(sel: string) => root.querySelector(sel) as T;
   // Ticking a type only records it (the brief box stays the base prompt); its guidance is appended at launch.
@@ -399,14 +400,13 @@ async function openValidate(taskKey: string): Promise<void> {
     const m = /^(github|gitlab|bitbucket):(.+)$/.exec(repoId);
     if (!m || !/^[\w.-]+(\/[\w.-]+)+$/.test(m[2])) { toast('Repository must look like github:owner/repo', false); return; }
     const agentId = q<HTMLSelectElement>('#pmaAgent').value;
-    const working = q<HTMLSelectElement>('#pmaWorking').value;
-    const done = q<HTMLSelectElement>('#pmaDone').value;
+    const start = q<HTMLSelectElement>('#pmaStart').value, valid = q<HTMLSelectElement>('#pmaValid').value, fixed = q<HTMLSelectElement>('#pmaFixed').value;
     const brief0 = q<HTMLTextAreaElement>('#pmaBrief').value + tagNote([...selectedTags]); // append the type guidance silently, like a local task
-    await saveMappings(projKey, repoId, working, done);
+    await saveMappings(projKey, repoId, { start, valid, fixed });
     state.settings = await relay.patchSettings({ pmTypeByProvider: { ...(state.settings.pmTypeByProvider || {}), [railProvider]: [...selectedTags] } }); // remember the type for next time
     renderRepoRow(); // reflect a repo set/changed here in the rail chip
     close();
-    await assignPmTask({ provider: railProvider, projectId: railProjectId, ws: ws(), task, repoProvider: m[1], repo: m[2], working: working || undefined, done: done || undefined, agentId, brief0 });
+    await assignPmTask({ provider: railProvider, projectId: railProjectId, ws: ws(), task, repoProvider: m[1], repo: m[2], start: start || undefined, valid: valid || undefined, fixed: fixed || undefined, agentId, brief0 });
   };
 }
 

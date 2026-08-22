@@ -31,8 +31,8 @@ const OCCUPYING: PmRunStatus[] = ['working'];
 
 interface PmRun {
   provider: string; projectId: string; taskKey: string; title: string; head: string; ws: string;
-  repoProvider: string; repo: string;         // the git repo the pipeline builds in (auto-cloned if not the open folder)
-  working?: string; done?: string;            // provider status names for write-back
+  repoProvider: string; repo: string;         // the git repo validated against (auto-cloned if not the open folder)
+  start?: string; valid?: string; fixed?: string; // lifecycle status names: on start / on valid (issue filed) / on fixed (issue closed)
   runId: string;                              // worktree/branch id → task-<runId>
   pipeline: PipelineDef; stageIdx: number; wt: string; agentId: string; brief0Rel: string;
   agentTabId?: string; awaiting: boolean; reason?: string; // awaiting = poll this stage's verdict (a validate stage is always gated)
@@ -52,15 +52,75 @@ async function setTaskStatus(run: PmRun, status?: string): Promise<void> {
   if (!status) return;
   try { await relay.pmTaskUpdate(run.ws, run.provider, run.taskKey, { status }); } catch { /* best-effort */ }
 }
-// On completion: write the validation VERDICT back — the summary appended to the task description, and (only on
-// a valid verdict) the "validated" status. Best-effort; every field optional. No PR (validation, not a build).
+// Append a line to the task's provider description (read-modify-write, capped). Best-effort. The description
+// fallback for providers that can't comment.
+async function appendTaskDesc(ws: string, provider: string, taskKey: string, line: string, extra: Record<string, unknown> = {}): Promise<void> {
+  try {
+    const d = await relay.pmTaskGet(ws, provider, taskKey);
+    const desc = (d?.ok && d.data?.description) || '';
+    await relay.pmTaskUpdate(ws, provider, taskKey, { description: `${desc}${desc ? '\n\n' : ''}${line}`.slice(0, 20000), ...extra });
+  } catch { /* best-effort */ }
+}
+// Write a lifecycle note to the task: as a COMMENT on its thread (preferred — visible to watchers, notifies
+// @mentions), else appended to the description if the provider can't comment. The status (optional) is applied
+// alongside either way. All best-effort.
+async function postNote(ws: string, provider: string, taskKey: string, text: string, status?: string): Promise<void> {
+  const c = await relay.pmComment(ws, provider, taskKey, text).catch(() => ({ ok: false }));
+  if (c?.ok) { if (status) { try { await relay.pmTaskUpdate(ws, provider, taskKey, { status }); } catch { /* */ } } return; }
+  await appendTaskDesc(ws, provider, taskKey, text, status ? { status } : {}); // no comment support → fall back to the description
+}
+// On the verdict: INVALID → mark invalid + summary. VALID → file a git issue in the mapped repo, link it on the
+// task, set the "valid/issued" status, and START WATCHING the issue for closure (→ the task's "fixed" status).
 async function reportValidated(run: PmRun, passed: boolean): Promise<void> {
-  const patch: Record<string, unknown> = {};
-  if (passed && run.done) patch.status = run.done;
-  if (run.reason) {
-    try { const d = await relay.pmTaskGet(run.ws, run.provider, run.taskKey); const desc = (d?.ok && d.data?.description) || ''; patch.description = `${desc}${desc ? '\n\n' : ''}Slayer T validation — ${passed ? 'valid ✓' : 'invalid'}: ${run.reason}`.slice(0, 20000); } catch { /* */ }
+  if (!passed) { await postNote(run.ws, run.provider, run.taskKey, `Slayer T validation — invalid: ${run.reason || 'not valid'}`); return; }
+  // Already has an open filed issue being watched (a re-validate) → don't file a duplicate; just refresh status/note.
+  if (trackedList().some((t) => t.provider === run.provider && t.taskKey === run.taskKey)) {
+    await postNote(run.ws, run.provider, run.taskKey, `Slayer T re-validated — valid ✓: ${run.reason || 'valid'} (already has a tracked issue)`, run.valid);
+    return;
   }
-  if (Object.keys(patch).length) { try { await relay.pmTaskUpdate(run.ws, run.provider, run.taskKey, patch); } catch { /* */ } }
+  // Valid → file the issue so it can be fixed + tracked.
+  const body = `${run.head}\n\n---\nSynced from ${run.provider} task **${run.taskKey}** via Slayer T. Closing this issue marks the ${run.provider} task fixed.`;
+  const iss = await relay.providerCreateIssue(run.ws, run.repoProvider, run.repo, run.title, body).catch(() => ({ ok: false as const }));
+  const filed = iss?.ok && typeof iss.number === 'number';
+  const link = filed ? `${run.repo}#${iss.number}${iss.url ? ` — ${iss.url}` : ''}` : '';
+  await postNote(run.ws, run.provider, run.taskKey, `Slayer T validation — valid ✓: ${run.reason || 'valid'}${filed ? `\nFiled as ${link}` : ''}`, run.valid);
+  if (filed) {
+    await addTracked({ ws: run.ws, provider: run.provider, taskKey: run.taskKey, projectId: run.projectId, repoProvider: run.repoProvider, repo: run.repo, issueNumber: iss.number!, issueUrl: iss.url || '', fixedStatus: run.fixed });
+    toast(`${run.taskKey} valid → filed ${link} · watching for fix`, true);
+  } else toast(`${run.taskKey} valid ✓ (couldn't file the issue)`, false);
+}
+
+/* ----------------------------- issue-closure tracking (valid → filed → fixed) ----------------------------- */
+type Tracked = NonNullable<typeof state.settings.pmTracked>[number];
+const trackedList = (): Tracked[] => state.settings.pmTracked || [];
+async function saveTracked(list: Tracked[]): Promise<void> { state.settings = await relay.patchSettings({ pmTracked: list }); }
+async function addTracked(t: Tracked): Promise<void> {
+  const list = trackedList().filter((x) => !(x.provider === t.provider && x.taskKey === t.taskKey)); // one active watch per task
+  await saveTracked([...list, t]); ensureTrackPoll();
+}
+let trackTimer: number | null = null;
+function ensureTrackPoll(): void {
+  const has = trackedList().length > 0;
+  if (has && trackTimer == null) { trackTimer = window.setInterval(() => void pollTracked(), 120000); void pollTracked(); } // every 2 min + an immediate pass
+  else if (!has && trackTimer != null) { clearInterval(trackTimer); trackTimer = null; }
+}
+let trackingPoll = false;
+const twKey = (t: { provider: string; taskKey: string }): string => `${t.provider}#${t.taskKey}`;
+// Watch each tracked issue for closure (its PR merged, or closed) with an EXACT single-issue state check — not a
+// list heuristic, so it works regardless of repo activity. Perf: the checks run CONCURRENTLY and the closed ones
+// are removed from the watch list in ONE settings write (not one per closure). A failed check keeps the watch.
+async function pollTracked(): Promise<void> {
+  if (trackingPoll) return; trackingPoll = true;
+  try {
+    const list = trackedList(); if (!list.length) return;
+    const checks = await Promise.all(list.map(async (t) => ({ t, closed: ((await relay.providerIssueState(t.ws, t.repoProvider, t.repo, t.issueNumber).catch(() => null))?.state) === 'closed' })));
+    const closed = checks.filter((c) => c.closed).map((c) => c.t);
+    if (!closed.length) return;
+    await Promise.all(closed.map((t) => postNote(t.ws, t.provider, t.taskKey, `Slayer T — fixed ✓ (${t.repo}#${t.issueNumber} closed)`, t.fixedStatus)));
+    const done = new Set(closed.map(twKey));
+    await saveTracked(trackedList().filter((x) => !done.has(twKey(x)))); // re-read + single write (survives a concurrent addTracked)
+    for (const t of closed) toast(`${t.taskKey} → fixed (${t.repo}#${t.issueNumber} closed)`, true);
+  } finally { trackingPoll = false; ensureTrackPoll(); }
 }
 
 /* ----------------------------- runner (staged, gated by verdict files) ----------------------------- */
@@ -87,7 +147,7 @@ function startRun(r: PmRun): void {
   const key = keyOf(r.provider, r.taskKey);
   runs.set(key, r);
   runStatus.set(key, 'working');
-  void setTaskStatus(r, r.working);            // write-back: mark the task in progress on the provider
+  void setTaskStatus(r, r.start);              // write-back: mark the task in progress on the provider
   void launchStage(key, 0);
 }
 
@@ -129,7 +189,7 @@ async function pollStages(): Promise<void> {
 export interface AssignParams {
   provider: string; projectId: string; ws: string; task: { key: string; title: string; description?: string };
   repoProvider: string; repo: string;         // git repo id parts
-  working?: string; done?: string;            // status write-back: on start / on a valid verdict
+  start?: string; valid?: string; fixed?: string; // lifecycle status write-back: on start / on valid (issued) / on fixed (issue closed)
   agentId: string; brief0: string;            // the (edited) validate brief
 }
 const taskHead = (t: { key: string; title: string; description?: string }): string => `# ${t.title || t.key}\n\n${(t.description || '').trim() || '_(no description)_'}`;
@@ -147,7 +207,7 @@ export async function assignPmTask(p: AssignParams): Promise<void> {
   if (!res.ok || !res.path) { runStatus.delete(key); deps.refresh(); toast(res.error || 'Could not create the worktree', false); return; }
   startRun({
     provider: p.provider, projectId: p.projectId, taskKey: p.task.key, title: p.task.title, head: taskHead(p.task), ws: p.ws,
-    repoProvider: p.repoProvider, repo: p.repo, working: p.working, done: p.done, runId,
+    repoProvider: p.repoProvider, repo: p.repo, start: p.start, valid: p.valid, fixed: p.fixed, runId,
     pipeline, stageIdx: 0, wt: res.path, agentId: p.agentId, brief0Rel: res.briefRel || `.slayer/task-${runId}.md`, awaiting: false,
   });
   toast(`Validating ${p.task.key} in ${p.repo}`, true);
@@ -182,4 +242,5 @@ export function initPmPipeline(d: PmPipeDeps): void {
       return;
     }
   });
+  ensureTrackPoll(); // resume watching any filed issues for closure (survives restart via Settings.pmTracked)
 }
