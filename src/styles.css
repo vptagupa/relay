@@ -118,9 +118,9 @@ button{font-family:inherit;color:inherit;cursor:pointer;border:none;background:n
 .tpl-card .hd .t{font:700 14.5px/1.25 var(--sans);color:var(--text)}
 .tpl-card .hd .t small{display:block;font:400 11.5px/1.4 var(--mono);color:var(--muted);margin-top:3px}
 .tpl-card .bd{padding:15px 17px;overflow-y:auto}
-.tpl-card .ft{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:12px 17px;border-top:1px solid var(--border);background:var(--surface-2)}
-.tpl-card .ft .hint{font:11.5px/1.4 var(--mono);color:var(--muted)}
-.tpl-card .ft .r{display:flex;gap:9px;flex:none}
+.tpl-card .ft{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:12px 17px;border-top:1px solid var(--border);background:var(--surface-2);flex-wrap:wrap;row-gap:8px}
+.tpl-card .ft .hint{font:11.5px/1.4 var(--mono);color:var(--muted);flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tpl-card .ft .r{display:flex;gap:9px;flex-wrap:wrap;justify-content:flex-end}
 .tpl-btn{border:1px solid var(--border-strong);background:var(--surface-3);color:var(--text);border-radius:8px;padding:7px 15px;font:600 12.5px var(--sans);cursor:pointer}
 .tpl-btn:hover{background:var(--surface-2)}
 .tpl-btn.pri{background:var(--accent);border-color:var(--accent);color:#fff}
@@ -379,6 +379,63 @@ button{font-family:inherit;color:inherit;cursor:pointer;border:none;background:n
 .sync-dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:5px;vertical-align:middle}
 .sync-dot.on{background:var(--ok,#5fbf80)}
 .sync-dot.off{background:var(--muted)}
+.sync-dot.pending{background:var(--warn,#e0a040);animation:pm-pulse 1s ease-in-out infinite}
+@keyframes pm-pulse{0%,100%{opacity:.4}50%{opacity:1}}
+/* Integrations (PM providers): settings picker/config + the Sync rail */
+.pm-redir{background:var(--surface-3);border:1px solid var(--border);border-radius:5px;padding:1px 5px;font:11px var(--mono);word-break:break-all}
+.pm-proj{flex:1;min-width:0;background:var(--surface-2);border:1px solid var(--border-strong);border-radius:9px;padding:8px 10px;color:var(--text);font:12.5px var(--sans)}
+.pm-config{display:flex;flex-direction:column}
+/* Unified Tasks rail: source segment + PM sub-rail */
+.src-seg{display:flex;gap:3px;flex:1;min-width:0;overflow-x:auto;scrollbar-width:none}
+.src-seg::-webkit-scrollbar{display:none}
+.src-chip{flex:none;background:var(--surface-2);border:1px solid var(--border);border-radius:7px;padding:4px 9px;color:var(--muted);font:600 11.5px var(--sans);cursor:pointer;white-space:nowrap}
+.src-chip:hover{color:var(--text)}
+.src-chip.on{background:var(--accent-ghost);border-color:var(--accent-line);color:var(--text)}
+.task-pane{display:flex;flex-direction:column;min-height:0;flex:1}
+.pm-subhead{display:flex;gap:6px;align-items:center;padding:6px 6px 0}
+/* project → build-repo chip (click to set/change) */
+.pm-repo{display:flex;align-items:center;gap:6px;margin:6px 6px 0;padding:5px 9px;width:calc(100% - 12px);box-sizing:border-box;text-align:left;background:var(--surface-2);border:1px solid var(--border);border-radius:7px;color:var(--text);font:11.5px var(--sans);cursor:pointer}
+.pm-repo:hover{border-color:var(--accent-line)}
+.pm-repo.unset{color:var(--muted);border-style:dashed}
+.pm-repo-ic{flex:none;font-size:11px}
+.pm-repo-nm{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--mono)}
+.pm-repo.unset .pm-repo-nm{font-family:var(--sans)}
+.pm-repo-edit{flex:none;opacity:.45}
+.pm-repo:hover .pm-repo-edit{opacity:1}
+.pm-sel{flex:1;min-width:0;background:var(--surface-2);border:1px solid var(--border);border-radius:7px;padding:5px 7px;color:var(--text);font:11.5px var(--sans)}
+.pm-sel-proj{flex:1.3}
+.pm-tasks{padding:6px}
+.pm-task{padding:8px 9px;border:1px solid var(--border);border-radius:8px;margin-bottom:6px;background:var(--surface-2)}
+.pm-task-top{display:flex;align-items:baseline;gap:7px}
+.pm-key{flex:none;font:600 11px var(--mono);color:var(--accent)}
+.pm-title{flex:1;min-width:0;font-size:12.5px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pm-task-fields{display:flex;flex-wrap:wrap;gap:6px;margin-top:7px}
+.pm-prio{font-size:10.5px;color:var(--muted);border:1px solid var(--border);border-radius:5px;padding:1px 6px;align-self:center}
+.pm-field{background:var(--surface-3);border:1px solid var(--border-strong);border-radius:7px;padding:3px 6px;color:var(--text);font:11px var(--sans);max-width:140px}
+.pm-field:disabled{opacity:.6}
+.pm-empty{padding:20px 14px;text-align:center;color:var(--muted);font-size:12px;line-height:1.6}
+/* Sync rail: filter bar + pager */
+.pm-filters{display:flex;flex-wrap:wrap;gap:5px;padding:6px 6px 0}
+.pm-filters:empty{display:none}
+.pm-filter-input{flex:1 1 100%;min-width:0;background:var(--surface-2);border:1px solid var(--border);border-radius:7px;padding:5px 8px;color:var(--text);font:11.5px var(--sans)}
+.pm-filter-sel{flex:1 1 45%;min-width:0;background:var(--surface-2);border:1px solid var(--border);border-radius:7px;padding:4px 6px;color:var(--text);font:11px var(--sans)}
+.pm-filter-input:focus,.pm-filter-sel:focus{outline:none;border-color:var(--accent-line)}
+.pm-pager{display:flex;align-items:center;justify-content:center;gap:10px;padding:6px}
+.pm-pager:empty{display:none}
+.pm-page-btn{background:var(--surface-2);border:1px solid var(--border-strong);border-radius:7px;padding:4px 10px;color:var(--text);font:11.5px var(--sans);cursor:pointer}
+.pm-page-btn:hover:not(:disabled){background:var(--surface-3)}
+.pm-page-btn:disabled{opacity:.4;cursor:default}
+.pm-page-n{font-size:11px;color:var(--muted)}
+/* Assign-to-pipeline: row button, run chip, dialog */
+.pm-assign{flex:none;width:22px;height:20px;display:grid;place-items:center;border:1px solid var(--border);background:var(--surface-3);border-radius:6px;color:var(--muted);font-size:11px;cursor:pointer;opacity:0;transition:opacity .1s}
+.pm-task:hover .pm-assign{opacity:1}
+.pm-assign:hover{color:var(--accent);border-color:var(--accent-line)}
+.pm-run-chip{flex:none;font-size:10px;padding:1px 6px;border-radius:5px;cursor:pointer;border:1px solid var(--border)}
+.pm-run-chip.s-working{color:var(--warn,#e0a040);border-color:var(--warn,#e0a040)}
+.pm-run-chip.s-done{color:var(--ok,#5fbf80);border-color:var(--ok,#5fbf80)}
+.pm-run-chip.s-failed{color:var(--danger,#e0574a);border-color:var(--danger,#e0574a)}
+.pm-run-chip.s-queued{color:var(--muted)}
+/* (the Assign + Push dialogs now use the shared .tpl-card iss-card shell — same as the task/validate dialog) */
 /* Inline list filter (repo pickers: Sources, notification watch-list, dependency selectors) */
 .list-search{width:100%;box-sizing:border-box;margin:2px 0 7px;background:var(--surface-2);border:1px solid var(--border);border-radius:8px;color:var(--text);font:12px var(--sans);padding:7px 10px}
 .list-search:focus{outline:none;border-color:var(--accent-line)}
@@ -1032,7 +1089,11 @@ body.tabdrag .dz{display:block;pointer-events:auto}
 .tk-issue:hover{text-decoration:underline}
 .tk-result{font:10.5px/1.45 var(--sans);color:var(--text-dim);white-space:pre-wrap}
 .tk-result.trunc{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;white-space:normal}
-.tk-side{flex:none}
+.tk-side{flex:none;display:flex;align-items:center;gap:6px}
+.tk-push{flex:none;width:22px;height:20px;display:grid;place-items:center;border:1px solid var(--border);background:var(--surface-3);border-radius:6px;color:var(--muted);font-size:12px;cursor:pointer;opacity:0;transition:opacity .1s}
+.tk-row:hover .tk-push{opacity:1}
+.tk-push:hover{color:var(--accent);border-color:var(--accent-line)}
+.tk-push.linked{opacity:1;color:var(--accent);border-color:var(--accent-line)} /* already linked → always visible */
 .tk-st{font:8.5px/1.4 var(--mono);border:1px solid var(--border-strong);border-radius:999px;padding:1px 6px;white-space:nowrap;color:var(--muted);text-transform:lowercase}
 .tk-st.validating{border-color:#a78bfa66;color:#a78bfa}
 .tk-st.valid,.tk-st.open{border-color:#2ea04366;color:#3fb950}

@@ -138,7 +138,7 @@ export interface Settings {
   bookmarkGroups: BookmarkGroup[];  // groups for organizing bookmarks (display order = array order)
   hasKey: Record<string, boolean>;  // provider -> whether a key is stored (never the key itself)
   issueTags?: Record<string, string[]>; // private local tags, keyed "repo#number" → ["mine","reviewing"] (never touch GitHub)
-  sidebarView?: 'library' | 'files' | 'issues' | 'prs' | 'tasks'; // which rail panel is active in the sidebar
+  sidebarView?: 'library' | 'files' | 'issues' | 'prs' | 'tasks' | 'pm'; // which rail panel is active in the sidebar ('pm' = synced provider tasks)
   issueRepos?: string[]; // LEGACY (pre per-workspace): global tracked repos — migrated into issueReposByWs
   issueRepo?: string;    // LEGACY (pre per-workspace): global active repo — migrated into issueRepoByWs
   issueReposByWs?: Record<string, string[]>; // tracked repos per workspace id (Issues are per-workspace)
@@ -153,6 +153,10 @@ export interface Settings {
   prPipelineByKey?: Record<string, string>;    // per-PR review pipeline id, keyed "provider:repo#number"; unset → default review-pr
   prDbCredByKey?: Record<string, string>;      // per-PR DB credential template id, keyed "provider:repo#number"; injected into the review run's env
   tasksByWs?: Record<string, Task[]>;          // per-workspace Tasks: draft an issue, validate it against the repo, file it only if valid
+  pmProjectRepoByWs?: Record<string, Record<string, string>>; // per-ws PM integration → the git repo its tasks build in: { wsId: { "provider:projectId": "provider:owner/repo" } }
+  pmStatusMapByWs?: Record<string, Record<string, { working?: string; done?: string }>>; // per-ws, per-PM-provider status names that mean "in progress" / "done" (per-org) for pipeline write-back
+  pmPipelineByProvider?: Record<string, string>; // (legacy) preferred pipeline per PM provider — the integration is validate-only now
+  pmTypeByProvider?: Record<string, string[]>;   // last-used task type(s) (bug/enhancement/newfeature) per PM provider — pre-fills the Validate dialog
   pipelines?: PipelineDef[]; // user-authored custom pipelines (built-ins live in code); merged into the registry
   stageBriefs?: Record<string, string>; // per stage-kind (validate/fix/reproduce/test/review/custom) default-brief override; seeds new stages in the builder + task validation
   briefNotes?: BriefNote[]; // reusable prompt snippets shown as toggles in the Assign/Validate dialogs; checked ones are appended to the agent's brief
@@ -226,6 +230,7 @@ export interface Task {
   dbCredId?: string;                             // DB credential template id (see DbCredMeta) injected into the validate run's env
   ts: number;                                    // created (epoch ms)
   ranAt?: number;                                // last validated (epoch ms)
+  pmRef?: { provider: string; projectId: string; taskKey: string }; // linked PM-provider task (from "Push to <provider>") — re-push updates it instead of duplicating
 }
 
 // A saved database-credential TEMPLATE. The full record (incl. password + extra values) is encrypted at rest

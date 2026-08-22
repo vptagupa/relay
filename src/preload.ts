@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer, clipboard } from 'electron';
 import * as os from 'node:os';
 import type { Settings, SavedSession, AgentEvent, ApprovalRequest, ChatTurn, Workspace, WorkspaceDef, WorkspaceBlueprint, Block, Issue, DbCredMeta } from './shared/types';
 import type { ProviderId } from './providers'; // type-only — erased at build, no main-process code pulled in
+import type { PmResult, PmProject, PmTask, PmRef, PmProviderMeta, PmConfig } from './pm/types'; // type-only — erased at build, no main-only code pulled in
 
 // Real identity for the Blocks-view prompt line (user@host + home for ~ shortening).
 function sysInfo() { try { return { user: os.userInfo().username, host: os.hostname().split('.')[0], home: os.homedir() }; } catch { return { user: 'user', host: 'relay', home: '' }; } }
@@ -66,6 +67,22 @@ const api = {
   gdriveDisconnect: (): Promise<{ ok: boolean }> => ipcRenderer.invoke('gdrive:disconnect'),
   gdriveConfigGet: (): Promise<{ clientId: string; hasSecret: boolean; configured: boolean }> => ipcRenderer.invoke('gdrive:config-get'),
   gdriveConfigSet: (clientId: string, secret?: string): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke('gdrive:config-set', { clientId, secret }),
+
+  // --- PM integrations (project-management providers; plugin registry). All take a provider id + ws; the
+  //     renderer never sees a token or secret. Adding a provider needs no change here. ---
+  pmProviders: (): Promise<PmProviderMeta[]> => ipcRenderer.invoke('pm:providers'),
+  pmConfigGet: (ws: string, provider: string): Promise<PmConfig> => ipcRenderer.invoke('pm:config-get', { ws, provider }),
+  pmConfigSet: (ws: string, provider: string, values: Record<string, string>): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke('pm:config-set', { ws, provider, values }),
+  pmOAuth: (ws: string, provider: string): Promise<{ ok: boolean; account?: string; error?: string; cancelled?: boolean }> => ipcRenderer.invoke('pm:oauth', { ws, provider }),
+  pmOAuthCancel: (): Promise<{ ok: boolean }> => ipcRenderer.invoke('pm:oauth-cancel'),
+  pmAuthState: (ws: string, provider: string): Promise<{ connected: boolean; account?: string }> => ipcRenderer.invoke('pm:auth-state', { ws, provider }),
+  pmDisconnect: (ws: string, provider: string): Promise<{ ok: boolean }> => ipcRenderer.invoke('pm:disconnect', { ws, provider }),
+  pmProjects: (ws: string, provider: string): Promise<PmResult<PmProject[]>> => ipcRenderer.invoke('pm:projects', { ws, provider }),
+  pmTasks: (ws: string, provider: string, projectId: string, query?: { filters?: Record<string, string>; limit?: number; offset?: number }): Promise<PmResult<PmTask[]>> => ipcRenderer.invoke('pm:tasks', { ws, provider, projectId, query }),
+  pmTaskGet: (ws: string, provider: string, idOrKey: string): Promise<PmResult<PmTask>> => ipcRenderer.invoke('pm:task-get', { ws, provider, idOrKey }),
+  pmTaskCreate: (ws: string, provider: string, projectId: string, body: Record<string, unknown>): Promise<PmResult<{ id: string; key: string }>> => ipcRenderer.invoke('pm:task-create', { ws, provider, projectId, body }),
+  pmTaskUpdate: (ws: string, provider: string, idOrKey: string, patch: Record<string, unknown>): Promise<PmResult<{ id: string; key: string }>> => ipcRenderer.invoke('pm:task-update', { ws, provider, idOrKey, patch }),
+  pmReference: (ws: string, provider: string, name: string): Promise<PmResult<PmRef[]>> => ipcRenderer.invoke('pm:reference', { ws, provider, name }),
   syncStatus: (): Promise<{ configured: boolean; connected: boolean; email: string; hasPassphrase: boolean; lastPush: number; lastPull: number; remoteExists: boolean; remoteModified: string }> => ipcRenderer.invoke('sync:status'),
   syncHasPassphrase: (): Promise<{ has: boolean }> => ipcRenderer.invoke('sync:has-passphrase'),
   syncSetPassphrase: (passphrase: string): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke('sync:set-passphrase', { passphrase }),

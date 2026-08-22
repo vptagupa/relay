@@ -48,7 +48,7 @@ export function appHtml(panes: string): string {
           <button class="rail-btn" data-view="library" title="Library"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><line x1="8" y1="9" x2="16" y2="9"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="13" y2="17"/></svg><span>Library</span></button>
           <button class="rail-btn" data-view="issues" title="Issues"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="1.7" fill="currentColor" stroke="none"/></svg><span>Issues</span></button>
           <button class="rail-btn" data-view="prs" title="Pull Requests"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M13 6h3a2 2 0 0 1 2 2v7"/><line x1="6" y1="9" x2="6" y2="21"/></svg><span>PR</span></button>
-          <button class="rail-btn" data-view="tasks" title="Tasks"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3 8-8"/><path d="M20 12v6a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h9"/></svg><span>Tasks</span></button>
+          <button class="rail-btn" data-view="tasks" title="Tasks &amp; synced integrations"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3 8-8"/><path d="M20 12v6a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h9"/></svg><span>Tasks</span></button>
           <button class="rail-btn" data-act="agent" title="Agent"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l2.2 5.6L20 10l-5 3.4L16.5 20 12 16.4 7.5 20 9 13.4 4 10l5.8-1.4z"/></svg><span>Agent</span></button>
         </nav>
         <div class="side-body">
@@ -79,8 +79,15 @@ export function appHtml(panes: string): string {
             <div class="side-list" id="prList"></div>
           </div>
           <div class="side-view side-tasks" id="viewTasks">
-            <div class="side-head"><span class="side-title">Tasks</span><button class="iss-repo-sel" id="taskRepo" title="Filter tasks by repository" style="display:none"></button><button class="files-up" id="taskNew" title="New task"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button></div>
-            <div class="side-list" id="taskList"></div>
+            <div class="side-head"><div class="src-seg" id="taskSrcSeg"></div><button class="iss-repo-sel" id="taskRepo" title="Filter tasks by repository" style="display:none"></button><button class="files-up" id="taskNew" title="New task"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button></div>
+            <div class="task-pane" id="taskLocalPane"><div class="side-list" id="taskList"></div></div>
+            <div class="task-pane" id="taskPmPane" style="display:none">
+              <div class="pm-subhead"><select class="pm-sel pm-sel-proj" id="pmRailProject" title="Project"></select><button class="files-up" id="pmRailNew" title="New task in this project"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button><button class="files-up" id="pmRailSync" title="Sync now"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.6-6.4"/><polyline points="21 3 21 9 15 9"/></svg></button></div>
+              <button class="pm-repo" id="pmRailRepo" title="The git repo this project's tasks are validated against"></button>
+              <div class="pm-filters" id="pmRailFilters"></div>
+              <div class="side-list pm-tasks" id="pmRailTasks"></div>
+              <div class="pm-pager" id="pmRailPager"></div>
+            </div>
           </div>
           <div class="side-foot"><span class="sdot" id="storeDot"></span><span id="storeText">Saved on this machine</span></div>
         </div>
@@ -163,6 +170,7 @@ export function appHtml(panes: string): string {
       <button type="button" class="set-tab" data-tab="agents">Agents</button>
       <button type="button" class="set-tab" data-tab="keys">API Keys</button>
       <button type="button" class="set-tab" data-tab="sync">Sync</button>
+      <button type="button" class="set-tab" data-tab="integrations">Integrations</button>
       <button type="button" class="set-tab" data-tab="terminal">Terminal</button>
       <button type="button" class="set-tab" data-tab="notif">Notifications</button>
     </div>
@@ -201,6 +209,15 @@ export function appHtml(panes: string): string {
         <div class="field"><label>2 · Google account</label><div class="row"><button class="set" id="gdConnect">Connect Google Drive</button><button class="set" id="gdDisconnect" style="display:none">Disconnect</button></div></div>
         <div class="field"><label>3 · Encryption passphrase</label><div class="row"><input id="syncPass" type="password" placeholder="a strong passphrase you'll remember"><button class="set" id="syncPassSave">Set</button></div><div class="fhint"><b>Only you know it.</b> It's never uploaded — if you forget it, the cloud backup can't be recovered. Enter the <b>same</b> passphrase on each PC.</div></div>
         <div class="field"><label>Back up &amp; restore</label><div class="row"><button class="set" id="syncPush" disabled>⬆ Back up to Drive</button><button class="set" id="syncPull" disabled>⬇ Restore from Drive</button></div><div class="fhint" id="syncTimes"></div><div class="fhint">Restore replaces this PC's data with the cloud copy and restarts the app.</div></div>
+      </div>
+      <!-- Integrations (project-management providers) -->
+      <div class="set-panel" data-panel="integrations">
+        <div class="set-note">Connect a <b>project-management provider</b> to sync its projects &amp; tasks into the <b>Sync</b> rail. Credentials are encrypted in your OS keychain — <b>never</b> in this window. Each workspace connects independently.</div>
+        <div class="field"><label>Provider</label><select id="pmProvider" class="pm-proj"></select></div>
+        <div class="pm-config" id="pmConfig"></div>
+        <div class="fhint" id="pmScopesNote"></div>
+        <div class="sync-status" id="pmStatus"></div>
+        <div class="field"><label>Account</label><div class="row"><button class="set" id="pmConnect">Connect</button><button class="set" id="pmCancel" style="display:none">Cancel</button><button class="set" id="pmDisconnect" style="display:none">Disconnect</button></div></div>
       </div>
       <!-- Terminal -->
       <div class="set-panel" data-panel="terminal">

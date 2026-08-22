@@ -11,6 +11,8 @@ import { startWebhookServer, stopWebhookServer, webhookRunning } from './webhook
 import * as store from './store';
 import * as keys from './keys';
 import * as gdrive from './gdrive';
+import { pmProviderOf, pmProviderList } from './pm';
+import { genVerifier, challenge } from './pm/shared';
 import * as cloudsync from './cloudsync';
 import { runAgent } from './agent/agent';
 import squirrelStartup from 'electron-squirrel-startup';
@@ -584,6 +586,80 @@ ipcMain.handle('sync:push', async () => { try { return await cloudsync.push(); }
 ipcMain.handle('sync:pull', async () => { try { return await cloudsync.pull(); } catch (err) { logFatal('sync:pull', err); return { ok: false, error: 'Sync pull failed' }; } });
 // Relaunch to load restored state — only meaningful right after a successful pull (renderer confirms first).
 ipcMain.handle('sync:relaunch', () => { cloudsync.relaunchAfterPull(); return { ok: true }; });
+
+// --- PM integrations (project-management providers — plugin registry in src/pm) ---------------------
+// Generic over the registry: every handler takes a `provider` id and dispatches through pmProviderOf(id), so
+// adding a provider (Jira, Linear, Asana…) needs NO change here. The sign-in loopback is generic over the
+// provider's declared auth — oauth/oauth-pkce run the browser flow (PKCE mints a per-attempt code_verifier held
+// ONLY in this closure, never persisted); `token` providers connect via config, not here. The renderer only
+// ever sees { connected, account } + normalized task data — never a token or secret.
+const asRecord = (x: unknown): Record<string, unknown> => (x && typeof x === 'object' && !Array.isArray(x) ? (x as Record<string, unknown>) : {});
+const pmErr = { ok: false, status: 0, error: 'Unknown provider', code: 'NO_PROVIDER' } as const;
+ipcMain.handle('pm:providers', () => { try { return pmProviderList(); } catch (err) { logFatal('pm:providers', err); return []; } });
+ipcMain.handle('pm:config-get', async (_e, p: { provider: string; ws: string }) => { const pr = pmProviderOf(p?.provider); if (!pr) return { fields: {}, hasSecrets: {}, configured: false }; try { return await pr.auth.getConfig(p.ws); } catch (err) { logFatal('pm:config-get', err); return { fields: {}, hasSecrets: {}, configured: false }; } });
+ipcMain.handle('pm:config-set', async (_e, p: { provider: string; ws: string; values: unknown }) => { const pr = pmProviderOf(p?.provider); if (!pr) return { ok: false, error: 'Unknown provider' }; try { const v = asRecord(p?.values); const vals: Record<string, string> = {}; for (const [k, val] of Object.entries(v)) vals[k] = typeof val === 'string' ? val : ''; return await pr.auth.setConfig(p.ws, vals); } catch (err) { logFatal('pm:config-set', err); return { ok: false, error: 'Could not save the settings' }; } });
+
+let cancelPmOAuth: (() => void) | null = null;
+ipcMain.handle('pm:oauth', async (_e, { provider, ws }: { provider: string; ws: string }) => {
+  const pr = pmProviderOf(provider);
+  if (!pr) return { ok: false, error: 'Unknown provider' };
+  if (pr.auth.kind === 'token') return { ok: false, error: `${pr.name} connects with a token — save it in settings, no browser sign-in.` };
+  if (!(await pr.auth.getConfig(ws)).configured) return { ok: false, error: `${pr.name} is not configured` };
+  if (!pr.auth.authorizeUrl || !pr.auth.exchangeCode || !pr.auth.port || !pr.auth.redirectUri) return { ok: false, error: `${pr.name} is missing its OAuth flow` };
+  cancelPmOAuth?.(); // abort any prior in-flight attempt so we never leak a second loopback server
+  const { port, redirectUri } = pr.auth;
+  const usePkce = pr.auth.kind === 'oauth-pkce';
+  return new Promise<{ ok: boolean; account?: string; error?: string; cancelled?: boolean }>((resolve) => {
+    let settled = false;
+    const state = randomBytes(16).toString('hex');
+    const verifier = usePkce ? genVerifier() : '';
+    const page = (title: string, sub: string) => `<!doctype html><meta charset="utf-8"><title>Slayer T</title>` +
+      `<body style="font:15px/1.5 system-ui,Segoe UI,sans-serif;background:#0f1115;color:#e6e6e6;display:grid;place-items:center;height:100vh;margin:0">` +
+      `<div style="text-align:center;max-width:380px"><div style="font-size:34px">${pr.icon}</div><h2 style="margin:.4em 0 .2em">${title}</h2><p style="opacity:.7;margin:0">${sub}</p></div>`;
+    const finish = (v: { ok: boolean; account?: string; error?: string; cancelled?: boolean }) => {
+      if (settled) return; settled = true;
+      cancelPmOAuth = null;
+      clearTimeout(timer); try { server.close(); } catch { /* already closed */ }
+      resolve(v);
+    };
+    cancelPmOAuth = () => finish({ ok: false, cancelled: true, error: 'Sign-in cancelled' });
+    const server = http.createServer(async (req, res) => {
+      try {
+        const url = new URL(req.url || '/', redirectUri);
+        const code = url.searchParams.get('code');
+        const gotState = url.searchParams.get('state');
+        const err = url.searchParams.get('error_description') || url.searchParams.get('error');
+        if (!code && !err) { res.writeHead(404); res.end('Not found'); return; } // ignore /favicon.ico etc.
+        if (err) { res.writeHead(200, { 'Content-Type': 'text/html' }); res.end(page('Authorization failed', 'You can close this tab and return to Slayer T.')); finish({ ok: false, error: String(err) }); return; }
+        if (!code || gotState !== state) { res.writeHead(400, { 'Content-Type': 'text/html' }); res.end(page('Invalid response', 'The sign-in could not be verified. Close this tab and try again.')); finish({ ok: false, error: 'Invalid authorization response (state mismatch)' }); return; }
+        res.writeHead(200, { 'Content-Type': 'text/html' }); res.end(page(`Connected to ${pr.name} ✓`, 'You can close this tab and return to Slayer T.'));
+        finish(await pr.auth.exchangeCode!(ws, code, verifier, redirectUri));
+      } catch { try { res.writeHead(500); res.end('error'); } catch { /* */ } finish({ ok: false, error: 'Callback handling error' }); }
+    });
+    server.on('error', (e: NodeJS.ErrnoException) => finish({ ok: false, error: e?.code === 'EADDRINUSE' ? `Port ${port} is in use — close whatever is using it and try again.` : 'Could not start the local sign-in server' }));
+    const timer = setTimeout(() => finish({ ok: false, error: 'Timed out waiting for authorization' }), 300000); // 5 min
+    server.listen(port, '127.0.0.1', async () => { void shell.openExternal(await pr.auth.authorizeUrl!(ws, state, usePkce ? challenge(verifier) : undefined)); });
+  });
+});
+ipcMain.handle('pm:oauth-cancel', () => { cancelPmOAuth?.(); return { ok: true }; });
+ipcMain.handle('pm:auth-state', async (_e, p: { provider: string; ws: string }) => { const pr = pmProviderOf(p?.provider); if (!pr) return { connected: false }; try { return await pr.auth.authState(p.ws); } catch (err) { logFatal('pm:auth-state', err); return { connected: false }; } });
+ipcMain.handle('pm:disconnect', async (_e, p: { provider: string; ws: string }) => { const pr = pmProviderOf(p?.provider); if (pr) { try { await pr.auth.disconnect(p.ws); } catch (err) { logFatal('pm:disconnect', err); } } return { ok: true }; });
+// Task sync — normalized. Every call reads the token for (provider, ws) server-side; the renderer never sees it.
+ipcMain.handle('pm:projects', async (_e, p: { provider: string; ws: string }) => { const pr = pmProviderOf(p?.provider); if (!pr) return pmErr; try { return await pr.projects(p.ws); } catch (err) { logFatal('pm:projects', err); return { ok: false, status: 0, error: 'Request failed' }; } });
+ipcMain.handle('pm:tasks', async (_e, p: { provider: string; ws: string; projectId: string; query?: { filters?: unknown; limit?: unknown; offset?: unknown } }) => {
+  const pr = pmProviderOf(p?.provider); if (!pr) return pmErr;
+  try {
+    const q = asRecord(p?.query);
+    const filters: Record<string, string> = {};
+    for (const [k, v] of Object.entries(asRecord(q.filters))) if (typeof v === 'string' && v) filters[k] = v; // keep only non-empty string filters
+    const num = (x: unknown, max: number): number | undefined => { const n = Number(x); return Number.isFinite(n) && n >= 0 ? Math.min(Math.floor(n), max) : undefined; };
+    return await pr.tasks(p.ws, String(p?.projectId || ''), { filters, limit: num(q.limit, 100), offset: num(q.offset, 100000) });
+  } catch (err) { logFatal('pm:tasks', err); return { ok: false, status: 0, error: 'Request failed' }; }
+});
+ipcMain.handle('pm:task-get', async (_e, p: { provider: string; ws: string; idOrKey: string }) => { const pr = pmProviderOf(p?.provider); if (!pr) return pmErr; try { return await pr.taskDetail(p.ws, String(p?.idOrKey || '')); } catch (err) { logFatal('pm:task-get', err); return { ok: false, status: 0, error: 'Request failed' }; } });
+ipcMain.handle('pm:task-create', async (_e, p: { provider: string; ws: string; projectId: string; body: unknown }) => { const pr = pmProviderOf(p?.provider); if (!pr) return pmErr; try { return await pr.createTask(p.ws, String(p?.projectId || ''), asRecord(p?.body)); } catch (err) { logFatal('pm:task-create', err); return { ok: false, status: 0, error: 'Request failed' }; } });
+ipcMain.handle('pm:task-update', async (_e, p: { provider: string; ws: string; idOrKey: string; patch: unknown }) => { const pr = pmProviderOf(p?.provider); if (!pr) return pmErr; try { return await pr.updateTask(p.ws, String(p?.idOrKey || ''), asRecord(p?.patch)); } catch (err) { logFatal('pm:task-update', err); return { ok: false, status: 0, error: 'Request failed' }; } });
+ipcMain.handle('pm:reference', async (_e, p: { provider: string; ws: string; name: string }) => { const pr = pmProviderOf(p?.provider); if (!pr) return pmErr; try { return await pr.reference(p.ws, String(p?.name || '')); } catch (err) { logFatal('pm:reference', err); return { ok: false, status: 0, error: 'Request failed' }; } });
 
 // --- generic provider handlers (dispatch to the registry in providers.ts) ---
 const badProvider = { ok: false, error: 'Unknown provider' } as const;

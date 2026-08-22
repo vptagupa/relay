@@ -26,6 +26,7 @@ import { initTasks, renderTasks } from './tasks';
 import { initNotifications, renderBell } from './notifications';
 import { initDbCreds } from './dbcreds';
 import { initSync, refreshSync } from './sync';
+import { initPm, refreshPmSettings, connectedPmProviders, showRailProvider, pushLocalTask } from './pm-ui';
 import { initRepoDeps, refreshRepoDeps } from './repo-deps';
 import { initBriefNotes, refreshBriefNotes } from './brief-notes';
 import type { Settings, SavedSession, AgentEvent, ApprovalRequest, ChatTurn, OpenTab, Workspace, WorkspaceDef, Block, Bookmark, BookmarkGroup } from './shared/types';
@@ -780,7 +781,23 @@ function applySidebarView() {
 function switchSidebarView(v: 'library' | 'files' | 'issues' | 'prs' | 'tasks') {
   state.settings.sidebarView = v; applySidebarView(); void relay.patchSettings({ sidebarView: v });
   if (v === 'prs') void loadPrs();   // load-on-show — PRs refresh whenever the rail is opened
-  if (v === 'tasks') renderTasks();
+  if (v === 'tasks') void renderTaskRail(); // unified rail: source segment (Local + connected integrations) + the active source
+}
+
+/* ---- unified Tasks rail: "Local" + a tab per connected PM integration ---- */
+let taskSource = 'local';   // 'local' = drafted tasks (tasks.ts); else a PM provider id (pm-ui rail)
+async function renderTaskRail(): Promise<void> {
+  const provs = await connectedPmProviders().catch(() => [] as { id: string; name: string; icon: string }[]);
+  if (taskSource !== 'local' && !provs.some((p) => p.id === taskSource)) taskSource = 'local'; // its provider disconnected
+  const seg = $('#taskSrcSeg');
+  if (seg) seg.innerHTML = `<button class="src-chip${taskSource === 'local' ? ' on' : ''}" data-src="local">Tasks</button>`
+    + provs.map((p) => `<button class="src-chip${taskSource === p.id ? ' on' : ''}" data-src="${esc(p.id)}">${esc(p.icon)} ${esc(p.name)}</button>`).join('');
+  const local = taskSource === 'local';
+  ($('#taskLocalPane') as HTMLElement | null)?.style.setProperty('display', local ? '' : 'none');
+  ($('#taskPmPane') as HTMLElement | null)?.style.setProperty('display', local ? 'none' : '');
+  ($('#taskNew') as HTMLElement | null)?.style.setProperty('display', local ? '' : 'none'); // "new task" is local-only
+  if (!local) ($('#taskRepo') as HTMLElement | null)?.style.setProperty('display', 'none'); // the local repo filter is irrelevant to a PM source
+  if (local) renderTasks(); else void showRailProvider(taskSource);
 }
 function applySidebarWidth() { ($('#main') as HTMLElement).style.setProperty('--sidebar-w', (state.settings.sidebarWidth || 260) + 'px'); }
 async function toggleToolbar() { state.settings = await relay.patchSettings({ toolbarShown: !state.settings.toolbarShown }); applyToolbar(); }
@@ -1395,6 +1412,7 @@ function selectSettingsTab(id: string): void {
   document.querySelectorAll<HTMLElement>('#settings .set-panel').forEach((p) => p.classList.toggle('active', p.dataset.panel === id));
   const body = document.querySelector('#settings .modal-body') as HTMLElement | null; if (body) body.scrollTop = 0;
   if (id === 'sync') refreshSync(); // pull fresh Google/passphrase/backup status when the Sync tab is shown
+  if (id === 'integrations') void refreshPmSettings(); // build the provider picker + config form when the Integrations tab is shown
   if (id === 'agents') { refreshRepoDeps(); refreshBriefNotes(); } // repopulate the repo-deps dropdown + brief-notes list
 }
 // Build-time facts baked by vite.renderer.config.ts (define) — the distributed app has no repo to query.
@@ -1923,6 +1941,8 @@ function r(el: HTMLElement) { return el.getBoundingClientRect(); }
 
 // rail: New (new terminal) · Files/Library/Issues (switch the active panel) · Agent (open agent panel)
 document.querySelectorAll<HTMLElement>('.rail-btn[data-view]').forEach((b) => { b.onclick = () => switchSidebarView(b.dataset.view as 'library' | 'files' | 'issues' | 'prs' | 'tasks'); });
+// Unified Tasks rail: the source segment (Local + a tab per connected integration) picks what the rail shows.
+$('#taskSrcSeg')?.addEventListener('click', (e) => { const c = (e.target as HTMLElement).closest('.src-chip') as HTMLElement | null; if (c?.dataset.src && c.dataset.src !== taskSource) { taskSource = c.dataset.src; void renderTaskRail(); } });
 (document.querySelector('.rail-btn[data-act="new"]') as HTMLElement | null)?.addEventListener('click', () => void newTab());
 (document.querySelector('.rail-btn[data-act="agent"]') as HTMLElement | null)?.addEventListener('click', () => openAgent());
 
@@ -2084,7 +2104,7 @@ new ResizeObserver(() => { clearTimeout(_roT); _roT = setTimeout(() => { fitPane
 (async function boot() {
   state.settings = await relay.getSettings();
   state.library = await relay.listSessions();
-  initWorkspaces({ newTab, snapshotTabs, reconcilePanes, fitPanes, renderTabs, updateStatus, reflectModel, renderChat, updateMainView, reflectSettings, persistWorkspace, applyTheme, blocksMode, confirmDialog, shortCwd, sendCommand, renderLibrary, reloadIssues: () => { void loadIssues(); if (state.settings.sidebarView === 'prs') void loadPrs(); renderTasks(); renderBell(); }, pcmd: P_CMD });
+  initWorkspaces({ newTab, snapshotTabs, reconcilePanes, fitPanes, renderTabs, updateStatus, reflectModel, renderChat, updateMainView, reflectSettings, persistWorkspace, applyTheme, blocksMode, confirmDialog, shortCwd, sendCommand, renderLibrary, reloadIssues: () => { void loadIssues(); if (state.settings.sidebarView === 'prs') void loadPrs(); if (state.settings.sidebarView === 'tasks') void renderTaskRail(); else renderTasks(); renderBell(); }, pcmd: P_CMD });
   // openAgentTab returns the new tab's id so a rail can tie a run to its terminal and free the slot when that
   // terminal is closed. onAgentTabClosed lets the rail subscribe to that close event.
   const openAgentTab = async (o: { cwd: string; name: string; runCmd?: string; dbCredId?: string }): Promise<string> => (await newTab({ cwd: o.cwd, name: o.name, runCmd: o.runCmd, dbCredId: o.dbCredId })).id;
@@ -2100,8 +2120,10 @@ new ResizeObserver(() => { clearTimeout(_roT); _roT = setTimeout(() => { fitPane
   // openAgentTab powers PR review pipelines (an agent tab rooted in the PR's checked-out worktree).
   initPrs({ activeWsId: getActiveWsId, focusIssues: () => switchSidebarView('issues'), openAgentTab, onAgentTabClosed });
   // Tasks rail — draft/validate a proposed issue, file it only if valid. Its own validate worktree + agent tab.
-  initTasks({ activeWsId: getActiveWsId, openAgentTab, onAgentTabClosed });
+  initTasks({ activeWsId: getActiveWsId, openAgentTab, onAgentTabClosed, pushToProvider: pushLocalTask }); // ↑ push a local task up to a connected PM integration
   if ((state.settings.sidebarView || 'library') === 'prs') void loadPrs(); // restore-on-boot when PR was the last view
+  if ((state.settings.sidebarView as string) === 'pm') state.settings.sidebarView = 'tasks'; // migrate: the separate Sync rail is now a source inside the Tasks rail
+  if (state.settings.sidebarView === 'tasks') void renderTaskRail(); // restore-on-boot: build the source segment + active source
   // Notifications — background poller (all workspaces) + the per-workspace header bell.
   initNotifications({ activeWsId: getActiveWsId, wsName: wsNameOf });
   // Database credential templates (Settings panel) — the encrypted list the assign dialogs reference.
@@ -2116,6 +2138,7 @@ new ResizeObserver(() => { clearTimeout(_roT); _roT = setTimeout(() => { fitPane
     confirm: confirmDialog,
     flushWorkspace: async () => { await relay.syncFlushWorkspace({ active: state.active, tabs: snapshotTabs(), gv: state.gv, focus: state.focus, layout: state.layout }); },
   });
+  initPm({ activeWsId: getActiveWsId, confirm: confirmDialog, openAgentTab, onAgentTabClosed }); // PM provider integrations: OAuth sign-in + task sync + run a synced task through the build pipeline
   await loadWorkspaceMeta(); // load workspace defs + blueprints, mirror the active workspace's folder + theme into settings before first paint
   // Per-workspace Library migration: sessions saved before Libraries were per-workspace have no wsId.
   // Assign them to the (now-known) active workspace so they land in one Library instead of vanishing from

@@ -29,6 +29,7 @@ export interface TasksDeps {
   activeWsId: () => string;                                                     // active workspace (tasks are per-workspace)
   openAgentTab: (o: { cwd: string; name: string; runCmd?: string; dbCredId?: string }) => Promise<string>;    // open the validate run in a worktree tab (dbCredId → inject a DB credential template into its env); resolves to the tab id
   onAgentTabClosed: (cb: (tabId: string) => void) => void;                      // subscribe to terminal-closed → auto-stop the run whose terminal that was
+  pushToProvider?: (t: Task) => Promise<{ provider: string; projectId: string; taskKey: string } | null>; // "Push to integration": create/update this task in a PM provider; returns the link (pmRef) to store, or null
 }
 let deps: TasksDeps;
 const wsKey = () => deps.activeWsId() || 'ws_default';
@@ -76,13 +77,17 @@ const running = new Map<string, Running>();   // taskId → its live run (in-mem
 const taskHead = (t: Task): string => `# ${t.title}\n\n${(t.body || '').trim() || '_(no description provided)_'}`;
 // The validate brief for a task: {issue} = the proposed issue head; the agent writes its verdict to stage-0.json.
 const validateBrief = (t: Task): string => renderBrief(stageBrief('validate', state.settings.stageBriefs), { issue: taskHead(t), number: 0, title: t.title, closeStep: '', verdictRel: '.slayer/stage-0.json' });
-// Task type tags — ticking one injects type-appropriate validation guidance into the brief.
-const TAG_DEFS: { id: string; label: string }[] = [{ id: 'bug', label: '🐛 Bug' }, { id: 'enhancement', label: '✨ Enhancement' }, { id: FEATURE_TAG, label: '🚀 New Feature' }];
+// Task type tags — ticking one injects type-appropriate validation guidance into the brief. Exported so the PM
+// integration's Validate uses the SAME types + guidance as a local task (single source of truth).
+export const TAG_DEFS: { id: string; label: string }[] = [{ id: 'bug', label: '🐛 Bug' }, { id: 'enhancement', label: '✨ Enhancement' }, { id: FEATURE_TAG, label: '🚀 New Feature' }];
 const TAG_NOTE: Record<string, string> = {
   bug: `\n\n## Type: BUG\nTreat this as a bug report — confirm it's a REAL, REPRODUCIBLE defect in this repository: locate the code and reproduce it (run the path, or write a throwaway repro). passed=false if it's already fixed, not reproducible, or works as intended.`,
   enhancement: `\n\n## Type: ENHANCEMENT\nTreat this as an enhancement request — confirm it's a sensible improvement that ISN'T already implemented and fits this codebase: check it doesn't already exist, is feasible, and is concrete/actionable. passed=false if it already exists, is out of scope, or is too vague.`,
+  // A local New-Feature task AUTHORS a spec (never validate/tagNote), so this note is only reached by the PM
+  // integration, which validates every type (it doesn't author): confirm the feature is sound + not yet built.
+  [FEATURE_TAG]: `\n\n## Type: NEW FEATURE\nTreat this as a new-feature request — confirm it's a sensible feature that ISN'T already implemented, fits this codebase, and is concrete/actionable. passed=false if it already exists, is out of scope, or is too vague to build.`,
 };
-const tagNote = (tags: string[]): string => tags.map((t) => TAG_NOTE[t] || '').join('');
+export const tagNote = (tags: string[]): string => tags.map((t) => TAG_NOTE[t] || '').join('');
 const tagChecks = (selected: Set<string>): string => TAG_DEFS.map((d) => `<label class="tk-tag"><input type="checkbox" data-tag="${d.id}"${selected.has(d.id) ? ' checked' : ''}> ${d.label}</label>`).join('');
 // The .deps/ reference note appended to the brief when dependency repos are selected (same as the issue Assign).
 function depsNote(ids: string[]): string {
@@ -371,9 +376,14 @@ function openTaskDetails(t: Task): void {
         ${t.result ? `<label class="iss-lbl">${resultLabel}</label><div class="tk-result">${esc(t.result)}</div>` : ''}
         ${t.issueUrl ? `<div class="iss-wt">Filed as issue <a href="#" data-issue>#${t.issueNumber} ↗</a> — status: <b>${t.status === 'closed' ? 'closed' : 'open'}</b> (synced from the issue)</div>` : ''}
       </div>
-      <div class="ft"><span class="hint"></span><span class="r"><button class="tpl-btn ghost" data-term style="display:none">⧉ Open terminal</button><button class="tpl-btn ghost" data-del>Delete</button><button class="tpl-btn ghost" data-edit>Edit</button>${action}<button class="tpl-btn ghost" data-x>Close</button></span></div>
+      <div class="ft"><span class="hint">${t.pmRef ? `<span class="mut">↑ linked to ${esc(t.pmRef.provider)} ${esc(t.pmRef.taskKey)}</span>` : ''}</span><span class="r"><button class="tpl-btn ghost" data-term style="display:none">⧉ Open terminal</button>${deps.pushToProvider ? `<button class="tpl-btn ghost" data-push title="${t.pmRef ? 'Update the linked provider task' : 'Create this task in a connected integration'}">${t.pmRef ? '↑ Update' : '↑ Push'}</button>` : ''}<button class="tpl-btn ghost" data-del>Delete</button><button class="tpl-btn ghost" data-edit>Edit</button>${action}<button class="tpl-btn ghost" data-x>Close</button></span></div>
     </div>`);
   root.querySelector('[data-x]')?.addEventListener('click', close);
+  // ↑ Push/Update this local task in a PM provider (Echo…). Stores the returned link so a re-push updates it.
+  root.querySelector('[data-push]')?.addEventListener('click', async () => {
+    const ref = await deps.pushToProvider?.(t);
+    if (ref) { const cur = tasksFor(wsKey()).find((x) => x.id === t.id) || t; upsertTask({ ...cur, pmRef: ref }); close(); }
+  });
   root.querySelector('[data-issue]')?.addEventListener('click', (e) => { e.preventDefault(); if (t.issueUrl) relay.openExternal(t.issueUrl); });
   root.querySelector('[data-open]')?.addEventListener('click', () => { if (t.issueUrl) relay.openExternal(t.issueUrl); });
   root.querySelector('[data-del]')?.addEventListener('click', () => { close(); deleteTask(t.id); toast('Task deleted'); });
@@ -416,13 +426,15 @@ function render(): void {
         <div class="tk-meta"><span class="pr-repo-lbl"><span class="src-dot ${PROV_DOT[(t.provider as ProviderId)] || 'gh'}"></span>${esc(t.repo)}</span>${(t.tags || []).map((tg) => `<span class="tk-tagchip ${esc(tg)}">${esc(tg === FEATURE_TAG ? 'feature' : tg)}</span>`).join('')}${t.issueUrl ? `<span class="tk-issue" data-url="${esc(t.issueUrl)}" title="Open the filed issue">issue #${t.issueNumber} ↗</span>` : ''}</div>
         ${t.result ? `<div class="tk-result trunc">${esc(t.result)}</div>` : ''}
       </div>
-      <div class="tk-side"><span class="tk-st ${t.status}">${esc(STATUS_LABEL[t.status])}</span></div>
+      <div class="tk-side">${deps.pushToProvider ? `<button class="tk-push${t.pmRef ? ' linked' : ''}" data-push title="${t.pmRef ? `Update ${esc(t.pmRef.provider)} ${esc(t.pmRef.taskKey)}` : 'Push to a connected integration'}">↑</button>` : ''}<span class="tk-st ${t.status}">${esc(STATUS_LABEL[t.status])}</span></div>
     </div>`).join('');
   el.querySelectorAll<HTMLElement>('.tk-row').forEach((row) => {
     const t = list.find((x) => x.id === row.dataset.id); if (!t) return;
-    row.onclick = (e) => {
+    row.onclick = async (e) => {
       const issue = (e.target as HTMLElement).closest('.tk-issue') as HTMLElement | null;
       if (issue) { const u = issue.dataset.url; if (u) relay.openExternal(u); return; }
+      const push = (e.target as HTMLElement).closest('.tk-push') as HTMLElement | null;
+      if (push) { e.stopPropagation(); const ref = await deps.pushToProvider?.(t); if (ref) { const cur = tasksFor(wsKey()).find((x) => x.id === t.id) || t; upsertTask({ ...cur, pmRef: ref }); } return; } // ↑ push this task to a provider from the list
       openTaskDetails(t);
     };
   });
