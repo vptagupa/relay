@@ -90,7 +90,8 @@ const TAG_NOTE: Record<string, string> = {
 export const tagNote = (tags: string[]): string => tags.map((t) => TAG_NOTE[t] || '').join('');
 const tagChecks = (selected: Set<string>): string => TAG_DEFS.map((d) => `<label class="tk-tag"><input type="checkbox" data-tag="${d.id}"${selected.has(d.id) ? ' checked' : ''}> ${d.label}</label>`).join('');
 // The .deps/ reference note appended to the brief when dependency repos are selected (same as the issue Assign).
-function depsNote(ids: string[]): string {
+// Exported so the integration Validate dialog (pm-ui) appends the identical note.
+export function depsNote(ids: string[]): string {
   if (!ids.length) return '';
   const lines = ids.map((id) => { const { repo: r } = parseRepoId(id); return `- \`.deps/${r.split('/').pop()}\` — ${id}`; }).join('\n');
   return `\n\n---\n\n## Reference repositories (read-only — do NOT modify these)\nThese related repos are checked out under \`.deps/\` for context while you validate:\n${lines}\nRead them to understand interfaces/contracts.`;
@@ -103,15 +104,18 @@ function ensurePoll(): void {
 }
 // Human names for a task's type tags: for the issue BODY, and the real provider LABELS applied to the new issue.
 const TYPE_NAME: Record<string, string> = { bug: 'Bug', enhancement: 'Enhancement', [FEATURE_TAG]: 'New Feature' };
-const LABEL_NAME: Record<string, string> = { bug: 'bug', enhancement: 'enhancement', [FEATURE_TAG]: 'feature' };
+// Exported so the integration Validate flow (pm-pipeline) labels its filed issue with the exact same names.
+export const LABEL_NAME: Record<string, string> = { bug: 'bug', enhancement: 'enhancement', [FEATURE_TAG]: 'feature' };
 // A "Task details" block appended to the filed issue's body so the issue records the task's type + context.
-function taskDetailsBlock(t: Task): string {
-  const types = (t.tags || []).map((tg) => TYPE_NAME[tg]).filter(Boolean);
+// Exported (as `detailsBlock`) so the integration Validate flow builds the identical block from its own tags/deps.
+export function detailsBlock(tags: string[] | undefined, deps: string[] | undefined): string {
+  const types = (tags || []).map((tg) => TYPE_NAME[tg]).filter(Boolean);
   const rows: string[] = [];
   if (types.length) rows.push(`- **Type:** ${types.join(', ')}`);
-  if (t.deps && t.deps.length) rows.push(`- **Related repositories:** ${t.deps.map((d) => `\`${d}\``).join(', ')}`);
+  if (deps && deps.length) rows.push(`- **Related repositories:** ${deps.map((d) => `\`${d}\``).join(', ')}`);
   return rows.length ? `\n\n---\n### Task details\n${rows.join('\n')}` : '';
 }
+const taskDetailsBlock = (t: Task): string => detailsBlock(t.tags, t.deps);
 
 // File an issue for a passed task and reflect the outcome (shared by validate + feature). Deletes-before-await
 // happened in the caller; here we createIssue, apply the task's type as real labels (best-effort), + upsert.

@@ -9,6 +9,7 @@ import { state } from './state';
 import { stageBrief, nextEdge, stageIndexById, STOP, renderBrief, type PipelineDef, type BriefCtx } from './pipelines';
 import { AGENTS } from './agents-list';
 import { toast } from './ui';
+import { LABEL_NAME, detailsBlock } from './tasks';   // tag id → provider label name + the "Task details" issue block, identical to a local task
 
 const relay = (window as any).relay;
 
@@ -33,6 +34,8 @@ interface PmRun {
   provider: string; projectId: string; taskKey: string; title: string; head: string; ws: string;
   repoProvider: string; repo: string;         // the git repo validated against (auto-cloned if not the open folder)
   start?: string; valid?: string; fixed?: string; // lifecycle status names: on start / on valid (issue filed) / on fixed (issue closed)
+  tags?: string[];                            // task type (bug|enhancement|feature) → applied as issue labels when filed, like a local task
+  deps?: string[];                            // dependency repo ids → recorded in the filed issue's "Task details" block, like a local task
   runId: string;                              // worktree/branch id → task-<runId>
   pipeline: PipelineDef; stageIdx: number; wt: string; agentId: string; brief0Rel: string;
   agentTabId?: string; awaiting: boolean; reason?: string; // awaiting = poll this stage's verdict (a validate stage is always gated)
@@ -69,23 +72,72 @@ async function postNote(ws: string, provider: string, taskKey: string, text: str
   if (c?.ok) { if (status) { try { await relay.pmTaskUpdate(ws, provider, taskKey, { status }); } catch { /* */ } } return; }
   await appendTaskDesc(ws, provider, taskKey, text, status ? { status } : {}); // no comment support → fall back to the description
 }
+
+// --- standard comment format ---------------------------------------------------------------------------------
+// Every lifecycle note Slayer T writes to a provider task uses ONE consistent, scannable layout: a titled header,
+// the agent's verdict, then a labeled detail list (repo / issue / labels / status) and a context footer. Echo
+// stores comment bodies verbatim ("no markup is rendered", per its REST docs), so this is deliberately PLAIN TEXT
+// — emoji header, `• ` bullets, inline URLs — not Markdown, so it reads cleanly wherever the comment is shown.
+type NoteKind = 'valid' | 'invalid' | 'revalidated' | 'fixed';
+const KIND_HEAD: Record<NoteKind, string> = {
+  valid: 'Validation passed ✓',
+  invalid: 'Validation failed ✗',
+  revalidated: 'Re-validated ✓',
+  fixed: 'Fixed ✓',
+};
+interface NoteFields {
+  kind: NoteKind;
+  summary?: string;                     // the agent's verdict/reason
+  repo?: string;                        // owner/repo
+  issue?: { number: number; url?: string };
+  labels?: string[];                    // provider labels applied to the filed issue
+  status?: string;                      // the task status this event sets (shown as a transition)
+  note?: string;                        // a trailing context line
+}
+// Build the standard comment body. Absent fields are omitted so each event shows only what's relevant.
+function noteBody(f: NoteFields): string {
+  const head = `🗡️ Slayer T — ${KIND_HEAD[f.kind]}`;
+  const verdict = f.summary ? `\n\n${f.summary.trim()}` : '';
+  const rows: string[] = [];
+  if (f.repo) rows.push(`• Repository: ${f.repo}`);
+  if (f.issue) rows.push(`• Issue: #${f.issue.number}${f.issue.url ? ` — ${f.issue.url}` : ''}`);
+  if (f.labels && f.labels.length) rows.push(`• Labels: ${f.labels.join(', ')}`);
+  if (f.status) rows.push(`• Status: → ${f.status}`);
+  const list = rows.length ? `\n\n${rows.join('\n')}` : '';
+  const foot = f.note ? `\n\n— ${f.note}` : '';
+  return `${head}${verdict}${list}${foot}`;
+}
 // On the verdict: INVALID → mark invalid + summary. VALID → file a git issue in the mapped repo, link it on the
 // task, set the "valid/issued" status, and START WATCHING the issue for closure (→ the task's "fixed" status).
 async function reportValidated(run: PmRun, passed: boolean): Promise<void> {
-  if (!passed) { await postNote(run.ws, run.provider, run.taskKey, `Slayer T validation — invalid: ${run.reason || 'not valid'}`); return; }
-  // Already has an open filed issue being watched (a re-validate) → don't file a duplicate; just refresh status/note.
-  if (trackedList().some((t) => t.provider === run.provider && t.taskKey === run.taskKey)) {
-    await postNote(run.ws, run.provider, run.taskKey, `Slayer T re-validated — valid ✓: ${run.reason || 'valid'} (already has a tracked issue)`, run.valid);
+  if (!passed) {
+    await postNote(run.ws, run.provider, run.taskKey, noteBody({ kind: 'invalid', summary: run.reason || 'Not valid against the repository.', repo: run.repo, note: 'No issue was filed. Re-validate from Slayer T after changes.' }));
+    return;
+  }
+  // Already has an OPEN filed issue being watched (a re-validate) → don't file a duplicate; just refresh status/note.
+  // A previously-fixed (closed) issue does not block: re-validating files a fresh one.
+  if (openTracked().some((t) => t.provider === run.provider && t.taskKey === run.taskKey)) {
+    const t = openTracked().find((x) => x.provider === run.provider && x.taskKey === run.taskKey);
+    await postNote(run.ws, run.provider, run.taskKey, noteBody({ kind: 'revalidated', summary: run.reason || 'Valid against the repository.', repo: run.repo, issue: t ? { number: t.issueNumber, url: t.issueUrl } : undefined, status: run.valid, note: 'A tracked issue already exists for this task — no duplicate was filed.' }), run.valid);
     return;
   }
   // Valid → file the issue so it can be fixed + tracked.
-  const body = `${run.head}\n\n---\nSynced from ${run.provider} task **${run.taskKey}** via Slayer T. Closing this issue marks the ${run.provider} task fixed.`;
+  const body = `${run.head}\n\n---\nSynced from ${run.provider} task **${run.taskKey}** via Slayer T. Closing this issue marks the ${run.provider} task fixed.${detailsBlock(run.tags, run.deps)}`;
   const iss = await relay.providerCreateIssue(run.ws, run.repoProvider, run.repo, run.title, body).catch(() => ({ ok: false as const }));
   const filed = iss?.ok && typeof iss.number === 'number';
   const link = filed ? `${run.repo}#${iss.number}${iss.url ? ` — ${iss.url}` : ''}` : '';
-  await postNote(run.ws, run.provider, run.taskKey, `Slayer T validation — valid ✓: ${run.reason || 'valid'}${filed ? `\nFiled as ${link}` : ''}`, run.valid);
+  // Apply the task's type as real provider labels on the new issue (best-effort — a label failure must never unfile
+  // it), exactly like a local task. Collect the names actually applied so the write-back note shows them too.
+  const labels: string[] = [];
+  if (filed) for (const tg of run.tags || []) { const name = LABEL_NAME[tg]; if (name) { labels.push(name); void relay.providerAddLabel(run.ws, run.repoProvider, run.repo, iss.number, name).catch(() => {}); } }
+  await postNote(run.ws, run.provider, run.taskKey, noteBody({
+    kind: 'valid', summary: run.reason || 'Valid against the repository.', repo: run.repo,
+    issue: filed ? { number: iss.number!, url: iss.url } : undefined, labels, status: run.valid,
+    note: filed ? 'Closing the issue will mark this task fixed.' : 'Validation passed, but filing the issue failed — see Slayer T.',
+  }), run.valid);
   if (filed) {
-    await addTracked({ ws: run.ws, provider: run.provider, taskKey: run.taskKey, projectId: run.projectId, repoProvider: run.repoProvider, repo: run.repo, issueNumber: iss.number!, issueUrl: iss.url || '', fixedStatus: run.fixed });
+    await addTracked({ ws: run.ws, provider: run.provider, taskKey: run.taskKey, projectId: run.projectId, repoProvider: run.repoProvider, repo: run.repo, issueNumber: iss.number!, issueUrl: iss.url || '', fixedStatus: run.fixed, tags: labels.length ? [...(run.tags || [])] : undefined, closed: false });
+    deps.refresh();   // the record now exists → redraw the rail row with its issue badge + type labels
     toast(`${run.taskKey} valid → filed ${link} · watching for fix`, true);
   } else toast(`${run.taskKey} valid ✓ (couldn't file the issue)`, false);
 }
@@ -93,6 +145,12 @@ async function reportValidated(run: PmRun, passed: boolean): Promise<void> {
 /* ----------------------------- issue-closure tracking (valid → filed → fixed) ----------------------------- */
 type Tracked = NonNullable<typeof state.settings.pmTracked>[number];
 const trackedList = (): Tracked[] => state.settings.pmTracked || [];
+const openTracked = (): Tracked[] => trackedList().filter((t) => !t.closed); // still watched for closure (closed ones are kept only for the rail-row display)
+// The filed-issue display record for a provider task's rail row (labels + issue ref), whether still open or fixed —
+// so the integration list shows its issue + type labels exactly like a local task row. Undefined until validated.
+// Workspace-scoped: the same provider task validated in two workspaces keeps separate records.
+export const pmFiledOf = (ws: string, provider: string, taskKey: string): Tracked | undefined =>
+  trackedList().find((t) => t.ws === ws && t.provider === provider && t.taskKey === taskKey);
 async function saveTracked(list: Tracked[]): Promise<void> { state.settings = await relay.patchSettings({ pmTracked: list }); }
 async function addTracked(t: Tracked): Promise<void> {
   const list = trackedList().filter((x) => !(x.provider === t.provider && x.taskKey === t.taskKey)); // one active watch per task
@@ -100,7 +158,7 @@ async function addTracked(t: Tracked): Promise<void> {
 }
 let trackTimer: number | null = null;
 function ensureTrackPoll(): void {
-  const has = trackedList().length > 0;
+  const has = openTracked().length > 0;   // only open issues need polling; closed ones linger only for display
   if (has && trackTimer == null) { trackTimer = window.setInterval(() => void pollTracked(), 120000); void pollTracked(); } // every 2 min + an immediate pass
   else if (!has && trackTimer != null) { clearInterval(trackTimer); trackTimer = null; }
 }
@@ -112,13 +170,16 @@ const twKey = (t: { provider: string; taskKey: string }): string => `${t.provide
 async function pollTracked(): Promise<void> {
   if (trackingPoll) return; trackingPoll = true;
   try {
-    const list = trackedList(); if (!list.length) return;
+    const list = openTracked(); if (!list.length) return;
     const checks = await Promise.all(list.map(async (t) => ({ t, closed: ((await relay.providerIssueState(t.ws, t.repoProvider, t.repo, t.issueNumber).catch(() => null))?.state) === 'closed' })));
     const closed = checks.filter((c) => c.closed).map((c) => c.t);
     if (!closed.length) return;
-    await Promise.all(closed.map((t) => postNote(t.ws, t.provider, t.taskKey, `Slayer T — fixed ✓ (${t.repo}#${t.issueNumber} closed)`, t.fixedStatus)));
+    await Promise.all(closed.map((t) => postNote(t.ws, t.provider, t.taskKey, noteBody({ kind: 'fixed', repo: t.repo, issue: { number: t.issueNumber, url: t.issueUrl }, labels: t.tags?.map((tg) => LABEL_NAME[tg]).filter(Boolean), status: t.fixedStatus, note: 'The filed issue was closed, so Slayer T marked this task fixed.' }), t.fixedStatus)));
     const done = new Set(closed.map(twKey));
-    await saveTracked(trackedList().filter((x) => !done.has(twKey(x)))); // re-read + single write (survives a concurrent addTracked)
+    // Keep the record (mark `closed`) rather than deleting it, so the rail row still shows the fixed issue + its
+    // labels — the same way a local task row stays visible as "issue closed". A single re-read + write.
+    await saveTracked(trackedList().map((x) => (done.has(twKey(x)) ? { ...x, closed: true } : x)));
+    deps.refresh();   // reflect the fixed/closed issue on the rail row
     for (const t of closed) toast(`${t.taskKey} → fixed (${t.repo}#${t.issueNumber} closed)`, true);
   } finally { trackingPoll = false; ensureTrackPoll(); }
 }
@@ -191,6 +252,8 @@ export interface AssignParams {
   repoProvider: string; repo: string;         // git repo id parts
   start?: string; valid?: string; fixed?: string; // lifecycle status write-back: on start / on valid (issued) / on fixed (issue closed)
   agentId: string; brief0: string;            // the (edited) validate brief
+  deps?: string[];                            // dependency repo ids ("provider:owner/repo") linked read-only under .deps/
+  tags?: string[];                            // task type (bug|enhancement|feature) → applied as issue labels when filed
 }
 const taskHead = (t: { key: string; title: string; description?: string }): string => `# ${t.title || t.key}\n\n${(t.description || '').trim() || '_(no description)_'}`;
 export async function assignPmTask(p: AssignParams): Promise<void> {
@@ -205,9 +268,15 @@ export async function assignPmTask(p: AssignParams): Promise<void> {
   runStatus.set(key, 'working'); deps.refresh();  // optimistic — reflect immediately while the worktree preps (auto-clone can take a while)
   const res = await relay.taskWorktreeAdd(p.repoProvider, p.repo, dir, runId, brief0).catch(() => ({ ok: false as const, error: 'Worktree creation failed' }));
   if (!res.ok || !res.path) { runStatus.delete(key); deps.refresh(); toast(res.error || 'Could not create the worktree', false); return; }
+  // Link any selected dependency repos read-only under .deps/ (same as a local task's Validate), so the agent can
+  // read related interfaces/contracts while it validates. Best-effort — a link failure must not block the run.
+  if (p.deps && p.deps.length) {
+    const parsed = p.deps.map((id) => { const i = id.indexOf(':'); return { provider: id.slice(0, i), repo: id.slice(i + 1) }; });
+    await relay.linkDeps(res.path, dir, parsed).catch(() => null);
+  }
   startRun({
     provider: p.provider, projectId: p.projectId, taskKey: p.task.key, title: p.task.title, head: taskHead(p.task), ws: p.ws,
-    repoProvider: p.repoProvider, repo: p.repo, start: p.start, valid: p.valid, fixed: p.fixed, runId,
+    repoProvider: p.repoProvider, repo: p.repo, start: p.start, valid: p.valid, fixed: p.fixed, tags: p.tags, deps: p.deps, runId,
     pipeline, stageIdx: 0, wt: res.path, agentId: p.agentId, brief0Rel: res.briefRel || `.slayer/task-${runId}.md`, awaiting: false,
   });
   toast(`Validating ${p.task.key} in ${p.repo}`, true);

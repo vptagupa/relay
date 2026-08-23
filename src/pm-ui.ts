@@ -5,11 +5,12 @@
 // nothing here. The renderer only ever handles config values + task data — never a token or client secret.
 
 import { $, esc } from './dom';
-import { toast } from './ui';
+import { toast, addSearch } from './ui';
 import { state } from './state';
 import { AGENTS } from './agents-list';
-import { assignPmTask, pmRunStatusOf, PM_RUN_LABEL, onPmRunChip, validateBrief, initPmPipeline } from './pm-pipeline';
-import { TAG_DEFS, tagNote } from './tasks';   // reuse the exact task-type set + brief guidance a local task uses
+import { assignPmTask, pmRunStatusOf, PM_RUN_LABEL, onPmRunChip, validateBrief, initPmPipeline, pmFiledOf } from './pm-pipeline';
+import { TAG_DEFS, tagNote, depsNote, LABEL_NAME } from './tasks';   // reuse the exact task-type set + brief guidance + .deps/ note + label names a local task uses
+import { repoDepsFor } from './repo-deps';   // a repo's default dependency template (same source the local Validate dialog defaults from)
 import type { PmProviderMeta, PmConfig, PmTask, PmProject, EditField } from './pm/types';
 
 const relay = (window as any).relay;
@@ -232,8 +233,13 @@ function rerenderTasks(): void {
     const st = pmRunStatusOf(railProvider, t.key || t.id);
     const chip = st !== 'idle' ? `<span class="pm-run-chip s-${st}" data-runchip="${esc(t.key || t.id)}" title="Click to dismiss / free">${esc(PM_RUN_LABEL[st])}</span>` : '';
     const canAssign = st === 'idle';
+    // Once validated, this task has a filed issue: show its type labels + an issue #N badge on the row, exactly like
+    // a local task row (same .tk-tagchip / .tk-issue classes). Survives closure — a fixed issue shows as "closed".
+    const filed = pmFiledOf(ws(), railProvider, t.key || t.id);
+    const labelChips = (filed?.tags || []).map((tg) => `<span class="tk-tagchip ${esc(tg)}">${esc(LABEL_NAME[tg] || tg)}</span>`).join('');
+    const issueBadge = filed ? `<span class="tk-issue${filed.closed ? ' closed' : ''}" data-issue-url="${esc(filed.issueUrl)}" title="Open the filed issue (${filed.closed ? 'closed' : 'open'})">issue #${filed.issueNumber}${filed.closed ? ' ✓' : ''} ↗</span>` : '';
     return `<div class="pm-task" data-key="${esc(t.key || t.id)}">
-      <div class="pm-task-top"><span class="pm-key">${esc(t.key || '')}</span><span class="pm-title" title="${esc(t.title || '')}">${esc(t.title || '')}</span>${chip}${canAssign ? `<button class="pm-assign" data-assign="${esc(t.key || t.id)}" title="Validate this task against the repo">⚡</button>` : ''}</div>
+      <div class="pm-task-top"><span class="pm-key">${esc(t.key || '')}</span><span class="pm-title" title="${esc(t.title || '')}">${esc(t.title || '')}</span>${labelChips}${issueBadge}${chip}${canAssign ? `<button class="pm-assign" data-assign="${esc(t.key || t.id)}" title="Validate this task against the repo">⚡</button>` : ''}</div>
       <div class="pm-task-fields">${selects.map((f) => fieldSelect(meta, f, t)).join('')}${t.priority && !selects.some((f) => f.key === 'priority') ? `<span class="pm-prio">${esc(t.priority)}</span>` : ''}</div>
     </div>`;
   }).join('');
@@ -372,6 +378,12 @@ async function openValidate(taskKey: string): Promise<void> {
   const savedType = state.settings.pmTypeByProvider?.[railProvider];
   (savedType && savedType.length ? savedType : ['bug']).forEach((t) => selectedTags.add(t));
 
+  // Dependency repos the validate agent may READ (linked read-only under .deps/) — the workspace's OTHER tracked
+  // repos, exactly like a local task's Validate dialog. Default to the mapped repo's dependency template. Like the
+  // type guidance, the .deps/ note is appended silently at launch (not shown in the brief box).
+  const depCandidates = (state.settings.issueReposByWs?.[ws()] || []).filter((id) => id !== savedRepo);
+  const selectedDeps = new Set((savedRepo ? repoDepsFor(savedRepo) : []).filter((id) => depCandidates.includes(id)));
+
   const { root, close } = tplModal(`<div class="tpl-card iss-card">
     <div class="hd"><span class="dot" style="background:var(--accent)"></span><span class="t">Validate against the repo<small>${esc(task.key)} · ${esc(meta.containerLabel)}: ${esc(projTitle)}</small></span></div>
     <div class="bd">
@@ -383,6 +395,8 @@ async function openValidate(taskKey: string): Promise<void> {
       <div class="iss-agentrow"><label class="iss-lbl" style="margin:0">Status on start <span class="mut">— optional</span></label>${statusSelect('pmaStart', statuses, savedStat.start)}</div>
       <div class="iss-agentrow"><label class="iss-lbl" style="margin:0">Status when valid <span class="mut">— issue filed</span></label>${statusSelect('pmaValid', statuses, savedStat.valid)}</div>
       <div class="iss-agentrow"><label class="iss-lbl" style="margin:0">Status when fixed <span class="mut">— issue closed</span></label>${statusSelect('pmaFixed', statuses, savedStat.fixed)}</div>
+      ${depCandidates.length ? `<label class="iss-lbl">Dependencies <span class="mut">— read-only repos the agent can view under <code>.deps/</code></span></label>
+      <div class="iss-deps" id="pmaDeps">${depCandidates.map((id) => `<label class="iss-dep"><input type="checkbox" value="${esc(id)}"${selectedDeps.has(id) ? ' checked' : ''}><b>${esc(id.split('/').pop() || id)}</b><span class="mut">${esc(id)}</span></label>`).join('')}</div>` : ''}
       <label class="iss-lbl">Brief <span class="mut">— validate prompt, edit before launch</span></label>
       <textarea class="iss-brief" id="pmaBrief" rows="12" spellcheck="false">${esc(validateBrief(task))}</textarea>
     </div>
@@ -394,6 +408,11 @@ async function openValidate(taskKey: string): Promise<void> {
     selectedTags.clear();
     root.querySelectorAll<HTMLInputElement>('#pmaTags input:checked').forEach((cb) => selectedTags.add(cb.dataset.tag!));
   };
+  root.querySelector('#pmaDeps')?.addEventListener('change', () => {   // toggle a dependency repo → record it (linked at launch)
+    selectedDeps.clear();
+    root.querySelectorAll<HTMLInputElement>('#pmaDeps input:checked').forEach((cb) => selectedDeps.add(cb.value));
+  });
+  addSearch(root.querySelector('#pmaDeps'), 'Search dependency repos…');   // filter a long dependency-repo list
   q<HTMLElement>('[data-x]').onclick = close;
   q<HTMLElement>('[data-go]').onclick = async () => {
     const repoId = q<HTMLInputElement>('#pmaRepo').value.trim();
@@ -401,12 +420,13 @@ async function openValidate(taskKey: string): Promise<void> {
     if (!m || !/^[\w.-]+(\/[\w.-]+)+$/.test(m[2])) { toast('Repository must look like github:owner/repo', false); return; }
     const agentId = q<HTMLSelectElement>('#pmaAgent').value;
     const start = q<HTMLSelectElement>('#pmaStart').value, valid = q<HTMLSelectElement>('#pmaValid').value, fixed = q<HTMLSelectElement>('#pmaFixed').value;
-    const brief0 = q<HTMLTextAreaElement>('#pmaBrief').value + tagNote([...selectedTags]); // append the type guidance silently, like a local task
+    const depIds = [...selectedDeps].filter((id) => id !== repoId); // never link the build repo as its own dependency
+    const brief0 = q<HTMLTextAreaElement>('#pmaBrief').value + tagNote([...selectedTags]) + depsNote(depIds); // append the type + .deps/ guidance silently, like a local task
     await saveMappings(projKey, repoId, { start, valid, fixed });
     state.settings = await relay.patchSettings({ pmTypeByProvider: { ...(state.settings.pmTypeByProvider || {}), [railProvider]: [...selectedTags] } }); // remember the type for next time
     renderRepoRow(); // reflect a repo set/changed here in the rail chip
     close();
-    await assignPmTask({ provider: railProvider, projectId: railProjectId, ws: ws(), task, repoProvider: m[1], repo: m[2], start: start || undefined, valid: valid || undefined, fixed: fixed || undefined, agentId, brief0 });
+    await assignPmTask({ provider: railProvider, projectId: railProjectId, ws: ws(), task, repoProvider: m[1], repo: m[2], start: start || undefined, valid: valid || undefined, fixed: fixed || undefined, agentId, brief0, deps: depIds, tags: [...selectedTags] });
   };
 }
 
@@ -528,6 +548,7 @@ export function initPm(d: PmDeps): void {
   $('#pmRailTasks')?.addEventListener('click', (e) => {
     const t = e.target as HTMLElement;
     const a = t.closest('.pm-assign') as HTMLElement | null; if (a?.dataset.assign) { void openValidate(a.dataset.assign); return; }
+    const iss = t.closest('.tk-issue') as HTMLElement | null; if (iss?.dataset.issueUrl) { void relay.openExternal(iss.dataset.issueUrl); return; }
     const c = t.closest('.pm-run-chip') as HTMLElement | null; if (c?.dataset.runchip) onPmRunChip(railProvider, c.dataset.runchip);
   });
   // Filter bar — selects apply immediately; the search box debounces.

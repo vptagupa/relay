@@ -39,7 +39,18 @@ async function endpoints(ws: string): Promise<{ authorize: string; token: string
   };
 }
 
-async function refresh(ws: string): Promise<boolean> {
+// Coalesce concurrent refreshes per workspace: when several Echo calls hit an expired token at once, they must
+// trigger ONE refresh grant, not a stampede — with one-time-use rotating refresh tokens a stampede would race and
+// self-revoke. Callers share the single in-flight promise; it's cleared when it settles.
+const refreshInFlight = new Map<string, Promise<boolean>>();
+function refresh(ws: string): Promise<boolean> {
+  const existing = refreshInFlight.get(ws);
+  if (existing) return existing;
+  const p = doRefresh(ws).finally(() => refreshInFlight.delete(ws));
+  refreshInFlight.set(ws, p);
+  return p;
+}
+async function doRefresh(ws: string): Promise<boolean> {
   const rt = await tokens.refreshToken(ws);
   if (!rt) return false;
   const { token } = await endpoints(ws);
@@ -47,9 +58,14 @@ async function refresh(ws: string): Promise<boolean> {
   const r = await pmReq(token, 'POST', { Authorization: await basicAuth(ws), 'Content-Type': 'application/x-www-form-urlencoded', 'Content-Length': String(Buffer.byteLength(body)), Accept: 'application/json' }, body);
   let j: Record<string, unknown> = {};
   try { j = JSON.parse(r.text) as Record<string, unknown>; } catch { /* */ }
-  if (!j.access_token) return false;
-  await tokens.store(ws, j);
-  return true;
+  if (j.access_token) { await tokens.store(ws, j); return true; }
+  // A 4xx from the token endpoint means the grant is DEAD (invalid_grant = refresh token expired/revoked,
+  // invalid_client = the app's access was revoked) → clear so authState reports disconnected and the user is
+  // prompted to re-auth. A network error/timeout (status 0) or a 5xx is transient — KEEP the tokens so a blip
+  // never signs the user out; the next call retries the refresh. This makes `refresh` the single authority on
+  // when the grant is truly gone, so no other layer has to guess.
+  if (r.status >= 400 && r.status < 500) await tokens.clear(ws);
+  return false;
 }
 
 async function fetchUser(ws: string, token: string): Promise<string> {
@@ -68,8 +84,14 @@ async function apiFetch<T = unknown>(ws: string, method: string, path: string, b
   const hdr = (t: string): Record<string, string> => ({ Authorization: `Bearer ${t}`, Accept: 'application/json', ...(bodyStr ? { 'Content-Type': 'application/json', 'Content-Length': String(Buffer.byteLength(bodyStr)) } : {}) });
   let r = await pmReq(desk + path, method, hdr(token), bodyStr);
   if (r.status === 401) {
-    if (await refresh(ws)) { const t2 = await tokens.token(ws); if (t2) r = await pmReq(desk + path, method, hdr(t2), bodyStr); }
-    if (r.status === 401) await tokens.clear(ws);
+    // One-shot refresh + retry. `refresh` already clears the tokens if the grant is dead (a 4xx from the token
+    // endpoint) and keeps them on a transient failure, so we only clear HERE for the remaining case: a freshly
+    // refreshed token that STILL 401s (an audience/scope/config mismatch the user must resolve by re-connecting).
+    if (await refresh(ws)) {
+      const t2 = await tokens.token(ws);
+      if (t2) r = await pmReq(desk + path, method, hdr(t2), bodyStr);
+      if (r.status === 401) await tokens.clear(ws);
+    }
   }
   let j: Record<string, unknown> | null = null;
   try { j = JSON.parse(r.text) as Record<string, unknown>; } catch { /* non-JSON */ }

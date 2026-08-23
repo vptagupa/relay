@@ -1087,6 +1087,7 @@ body.tabdrag .dz{display:block;pointer-events:auto}
 .tk-meta .pr-repo-lbl{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .tk-issue{color:var(--accent-2);cursor:pointer;flex:none}
 .tk-issue:hover{text-decoration:underline}
+.tk-issue.closed{color:var(--muted)}
 .tk-result{font:10.5px/1.45 var(--sans);color:var(--text-dim);white-space:pre-wrap}
 .tk-result.trunc{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;white-space:normal}
 .tk-side{flex:none;display:flex;align-items:center;gap:6px}
