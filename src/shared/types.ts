@@ -158,6 +158,7 @@ export interface Settings {
   pmTracked?: Array<{ ws: string; provider: string; taskKey: string; projectId: string; repoProvider: string; repo: string; issueNumber: number; issueUrl: string; fixedStatus?: string; tags?: string[]; closed?: boolean }>; // integration tasks whose filed issue is being watched for closure → set the task to its fixed status. Also the display record on the rail row (type labels + issue ref); `closed` marks a fixed issue we keep for display but stop polling.
   pmPipelineByProvider?: Record<string, string>; // (legacy) preferred pipeline per PM provider — the integration is validate-only now
   pmTypeByProvider?: Record<string, string[]>;   // last-used task type(s) (bug/enhancement/newfeature) per PM provider — pre-fills the Validate dialog
+  pmAssigneeFilterByProvider?: Record<string, boolean>; // per PM provider: allow filtering the rail by assignee. OFF (default) hides the assignee filter and locks the rail to the authenticated user's own tasks; ON lists everyone's and shows the filter.
   pipelines?: PipelineDef[]; // user-authored custom pipelines (built-ins live in code); merged into the registry
   stageBriefs?: Record<string, string>; // per stage-kind (validate/fix/reproduce/test/review/custom) default-brief override; seeds new stages in the builder + task validation
   briefNotes?: BriefNote[]; // reusable prompt snippets shown as toggles in the Assign/Validate dialogs; checked ones are appended to the agent's brief

@@ -37,6 +37,9 @@ let filterState: Record<string, string> = {};   // active filter values (reset w
 const refCache: Record<string, string[]> = {};   // `${ws}:${provider}:${refName}` → option titles. ws-scoped: statuses/priorities are per-org, so a different workspace/connection must not reuse them.
 
 const ws = (): string => deps.activeWsId();
+// Whether the user may filter the rail by assignee for this provider (Settings → Integrations). OFF (default) hides
+// the assignee filter and locks the rail to the authenticated user's own tasks; ON lists everyone's and shows it.
+const assigneeFilterOn = (provider: string): boolean => !!state.settings.pmAssigneeFilterByProvider?.[provider];
 const metaOf = (id: string): PmProviderMeta | undefined => metas.find((m) => m.id === id);
 
 async function loadMetas(): Promise<void> {
@@ -68,12 +71,34 @@ async function renderSettingsFor(provider: string): Promise<void> {
         + `<input class="tk-input" data-cfg="${esc(f.key)}" type="${f.secret ? 'password' : 'text'}" placeholder="${ph}" value="${val}" spellcheck="false" autocomplete="off">`
         + (f.help ? `<div class="fhint">${esc(f.help)}</div>` : '') + `</div>`;
     }).join('') + `<div class="row"><button class="set" id="pmConfigSave">Save settings</button></div>`
-      + (meta.authKind !== 'token' && cfg.redirectUri ? `<div class="fhint">Redirect URI to register (must match <b>exactly</b>): <code class="pm-redir" id="pmRedirect">${esc(cfg.redirectUri)}</code> <a href="#" id="pmCopyRedir">copy</a></div>` : '');
+      + (meta.authKind !== 'token' && cfg.redirectUri ? `<div class="fhint">Redirect URI to register (must match <b>exactly</b>): <code class="pm-redir" id="pmRedirect">${esc(cfg.redirectUri)}</code> <a href="#" id="pmCopyRedir">copy</a></div>` : '')
+      // Per-provider preference: allow filtering the task rail by assignee. Only offered if the provider actually
+      // supports an assignee filter. Persists immediately (it's an app setting, not a provider config field).
+      + (meta.capabilities.filters.some((f) => f.key === 'assignee')
+        ? `<div class="field pm-optrow"><label class="pm-optlbl"><input type="checkbox" id="pmAssigneeToggle"${assigneeFilterOn(meta.id) ? ' checked' : ''}> Allow filtering tasks by assignee</label>`
+          + `<div class="fhint">On — the task rail lists everyone's tasks and shows an assignee filter. Off (default) — the filter is hidden and the rail shows only the tasks assigned to you.</div></div>`
+        : '');
     $('#pmConfigSave')?.addEventListener('click', () => void saveConfig());
     $('#pmCopyRedir')?.addEventListener('click', (e) => { e.preventDefault(); const t = ($('#pmRedirect') as HTMLElement)?.textContent || ''; if (t) { relay.copyText(t); toast('Redirect URI copied', true); } });
+    $('#pmAssigneeToggle')?.addEventListener('change', (e) => void toggleAssigneeFilter(meta.id, (e.target as HTMLInputElement).checked));
   }
   const note = $('#pmScopesNote'); if (note) note.innerHTML = meta.scopesNote ? esc(meta.scopesNote) : '';
   await reflectStatus(meta);
+}
+
+// Toggle the per-provider "allow filter by assignee" setting. Persists immediately, then — if the rail is currently
+// showing this provider — re-seeds the assignee scope (OFF → lock to my tasks; ON → clear the forced "me" so it
+// lists everyone), rebuilds the filter bar (to show/hide the control), and reloads.
+async function toggleAssigneeFilter(provider: string, on: boolean): Promise<void> {
+  state.settings = await relay.patchSettings({ pmAssigneeFilterByProvider: { ...(state.settings.pmAssigneeFilterByProvider || {}), [provider]: on } });
+  if (railProvider === provider) {
+    const meta = metaOf(provider);
+    if (meta && meta.capabilities.filters.some((f) => f.key === 'assignee')) {
+      if (!on) filterState.assignee = 'me'; else if (filterState.assignee === 'me') delete filterState.assignee;
+      renderFilters(meta); railOffset = 0; await loadRailTasks();
+    }
+  }
+  toast(on ? 'Assignee filtering enabled' : 'Assignee filter hidden — showing your tasks', true);
 }
 
 async function reflectStatus(meta: PmProviderMeta): Promise<void> {
@@ -162,8 +187,10 @@ export async function showRailProvider(id: string): Promise<void> {
   const meta = metaOf(id);
   if (!meta) { const list = $('#pmRailTasks'); if (list) list.innerHTML = '<div class="pm-empty">Provider unavailable.</div>'; return; }
   if (id !== railProvider) { railProvider = id; filterState = {}; railOffset = 0; }
-  // Default to MY tasks: if the provider filters by assignee, seed it to "me" so the rail shows only my tasks.
-  if (meta.capabilities.filters.some((f) => f.key === 'assignee') && filterState.assignee === undefined) filterState.assignee = 'me';
+  // Assignee scoping honors the per-provider "Allow filtering by assignee" setting (Settings → Integrations):
+  // OFF (default) locks the rail to the authenticated user's own tasks (the filter is also hidden); ON leaves it
+  // unset so the rail lists everyone's tasks and the user can filter by assignee.
+  if (meta.capabilities.filters.some((f) => f.key === 'assignee') && !assigneeFilterOn(id)) filterState.assignee = 'me';
   await loadRailProjects();
 }
 
@@ -200,11 +227,14 @@ async function ensureRefs(meta: PmProviderMeta): Promise<void> {
 function renderFilters(meta: PmProviderMeta | undefined): void {
   const bar = $('#pmRailFilters'); if (!bar) return;
   if (!meta || !meta.capabilities.filters.length) { bar.innerHTML = ''; return; }
-  bar.innerHTML = meta.capabilities.filters.map((f) => {
+  // The assignee filter is shown only when the per-provider setting allows it; otherwise the rail is locked to the
+  // authenticated user's own tasks (filterState.assignee stays "me") and the control is hidden entirely.
+  bar.innerHTML = meta.capabilities.filters.filter((f) => f.key !== 'assignee' || assigneeFilterOn(meta.id)).map((f) => {
     const cur = filterState[f.key] || '';
     if (f.control === 'text') return `<input class="pm-filter-input" data-filter="${esc(f.key)}" type="text" placeholder="${esc(f.placeholder || f.label)}" value="${esc(cur)}" spellcheck="false" autocomplete="off">`;
     const opts = (f.optionsRef ? refCache[`${ws()}:${meta.id}:${f.optionsRef}`] : []) || [];
-    // Assignee gets a leading "Me" option (the default) so the rail shows only my tasks — "anyone" clears it.
+    // Assignee (shown only when the filter is enabled) offers a "Me" convenience option alongside "anyone" (list
+    // all — the default) and the members list, so the user can quickly narrow to their own tasks.
     const meOpt = f.key === 'assignee' ? `<option value="me"${cur === 'me' ? ' selected' : ''}>👤 Me</option>` : '';
     return `<select class="pm-filter-sel" data-filter="${esc(f.key)}"><option value="">${esc(f.label)}: anyone</option>${meOpt}${opts.map((o) => `<option value="${esc(o)}"${o === cur ? ' selected' : ''}>${esc(o)}</option>`).join('')}</select>`;
   }).join('');

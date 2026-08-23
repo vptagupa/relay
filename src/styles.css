@@ -363,6 +363,10 @@ button{font-family:inherit;color:inherit;cursor:pointer;border:none;background:n
 .field select{width:100%;background:var(--surface-2);border:1px solid var(--border);border-radius:8px;color:var(--text);font-family:var(--sans);font-size:12.5px;padding:9px 10px;cursor:pointer}
 .field select:focus{outline:none;border-color:var(--accent-line)}
 .field .row select{flex:1}
+/* Inline checkbox option row (e.g. the integration "allow filter by assignee" toggle) */
+.pm-optrow{margin-top:2px}
+.pm-optrow .pm-optlbl{display:flex;align-items:center;gap:8px;margin-bottom:5px;cursor:pointer;color:var(--text-dim)}
+.pm-optrow .pm-optlbl input{flex:none;width:14px;height:14px;padding:0;margin:0;accent-color:var(--accent)}
 .pbrief-ta{width:100%;box-sizing:border-box;resize:vertical;min-height:120px;margin-top:8px;background:var(--surface-2);border:1px solid var(--border);border-radius:8px;color:var(--text);font:11.5px/1.5 var(--mono);padding:9px 10px}
 .pbrief-ta:focus{outline:none;border-color:var(--accent-line)}
 /* Database credential templates (Settings panel) */
