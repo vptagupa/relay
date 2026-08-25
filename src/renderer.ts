@@ -155,20 +155,29 @@ async function newTab(seed?: Partial<OpenTab> & { libId?: string; runCmd?: strin
   // handled by the selection pill and Ctrl+Shift+C. term.paste() routes through xterm so bracketed-paste
   // works for TUIs (Claude Code, vim). Reads the Electron clipboard (relay.readText) — navigator.clipboard
   // needs focus/permission and fails silently in the terminal, which is why right-click paste "didn't work".
-  let pasteViaMenu = false;   // set right before our menu-paste; used to swallow the OS's trailing native paste
+  // Right-click PASTES the clipboard (classic terminal paste) — unconditional, NOT "copy if there's a selection"
+  // (that would clobber the clipboard when you meant to paste). Copy is the selection pill / Ctrl+Shift+C.
+  // term.paste() routes through xterm so bracketed-paste works for TUIs (Claude Code, vim). Reads the Electron
+  // clipboard (navigator.clipboard needs focus/permission and fails silently in the terminal).
+  //
+  // Windows Electron ALSO fires a native paste into xterm's textarea for the SAME right-click, and it can arrive
+  // either BEFORE or AFTER the contextmenu event — so a flag set only inside contextmenu misses the "before" case
+  // and the native paste + our term.paste() double up. Fix: arm a short suppression window on the right-button
+  // PRESS (ahead of any native paste) and swallow every native paste inside it, leaving exactly the one
+  // term.paste() below. Ctrl+V never arms the window, so normal paste is untouched.
+  let suppressPasteUntil = 0;
+  el.addEventListener('pointerdown', (e) => { if ((e as PointerEvent).button === 2) suppressPasteUntil = Date.now() + 400; });
   el.addEventListener('contextmenu', (e) => {
     e.preventDefault();
     const text = relay.readText();
-    if (!text) return;
-    // On Windows the right-click also fires a NATIVE paste into the (now-focused) xterm textarea — a SECOND
-    // insert. Flag it so the capture-phase listener below swallows that native paste, keeping it to one.
-    pasteViaMenu = true; setTimeout(() => { pasteViaMenu = false; }, 150);
+    if (!text) { suppressPasteUntil = 0; return; }   // nothing to paste → don't swallow a later legit paste
+    suppressPasteUntil = Date.now() + 400;           // hold the window open across the menu event too
     term.focus(); term.paste(text);
   });
-  // Capture phase so this runs BEFORE xterm's own textarea paste handler: after a right-click paste, cancel the
-  // trailing native paste event (no-op for Ctrl+V, which never sets the flag → normal paste still works).
+  // Capture phase → runs BEFORE xterm's own textarea paste handler, so a native paste during the window never
+  // reaches it (and never inserts). Outside the window (plain Ctrl+V) it passes straight through.
   el.addEventListener('paste', (e) => {
-    if (pasteViaMenu) { pasteViaMenu = false; e.stopImmediatePropagation(); e.preventDefault(); }
+    if (Date.now() < suppressPasteUntil) { e.stopImmediatePropagation(); e.preventDefault(); }
   }, true);
   // Shift+Enter → send a literal newline so multiline TUIs (e.g. Claude Code) insert a line instead
   // of submitting; xterm otherwise emits the same \r as plain Enter. Plain Enter is unchanged.
