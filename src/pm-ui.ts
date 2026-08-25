@@ -20,6 +20,7 @@ export interface PmDeps {
   confirm: (title: string, detail: string, okLabel: string) => Promise<boolean>;
   openAgentTab: (o: { cwd: string; name: string; runCmd?: string; dbCredId?: string }) => Promise<string>; // for the build pipeline (opens an agent tab in the worktree)
   onAgentTabClosed: (cb: (tabId: string) => void) => void;                                                  // free a run's slot when its terminal closes
+  onConnectionChange?: () => void;                                                                          // a provider was connected/disconnected → rebuild the Tasks rail's source segment
 }
 let deps: PmDeps;
 let railTasks: PmTask[] = [];              // current project's tasks in memory → a run-status refresh re-renders without re-fetching
@@ -147,11 +148,11 @@ async function connect(): Promise<void> {
   if (!(await persistConfig(meta, false))) return;
   const cfg: PmConfig = await relay.pmConfigGet(ws(), meta.id).catch(() => ({ configured: false } as PmConfig));
   if (!cfg.configured) { toast('Fill in all the required fields first', false); return; }
-  if (meta.authKind === 'token') { await reflectStatus(meta); const st = await relay.pmAuthState(ws(), meta.id).catch(() => null); toast(st?.connected ? `Connected to ${meta.name}` : 'Token not accepted — check the settings', !!st?.connected); return; }
+  if (meta.authKind === 'token') { await reflectStatus(meta); const st = await relay.pmAuthState(ws(), meta.id).catch(() => null); toast(st?.connected ? `Connected to ${meta.name}` : 'Token not accepted — check the settings', !!st?.connected); if (st?.connected) deps.onConnectionChange?.(); return; }
   connecting = true; await reflectStatus(meta);
   const r = await relay.pmOAuth(ws(), meta.id).catch(() => ({ ok: false, error: 'Sign-in failed' }));
   connecting = false;
-  if (r?.ok) { toast(`Connected to ${meta.name}${r.account ? ` as ${r.account}` : ''}`, true); }
+  if (r?.ok) { toast(`Connected to ${meta.name}${r.account ? ` as ${r.account}` : ''}`, true); deps.onConnectionChange?.(); } // surface the new provider in the Tasks rail immediately
   else if (!r?.cancelled) toast(r?.error || 'Sign-in failed', false);
   await reflectStatus(meta);
 }
@@ -162,6 +163,7 @@ async function disconnect(): Promise<void> {
   await relay.pmDisconnect(ws(), meta.id).catch(() => {});
   toast(`Disconnected from ${meta.name}`, true);
   await reflectStatus(meta);
+  deps.onConnectionChange?.(); // drop the provider from the Tasks rail immediately
 }
 
 /* ============================ Sync rail ============================ */
@@ -233,10 +235,14 @@ function renderFilters(meta: PmProviderMeta | undefined): void {
     const cur = filterState[f.key] || '';
     if (f.control === 'text') return `<input class="pm-filter-input" data-filter="${esc(f.key)}" type="text" placeholder="${esc(f.placeholder || f.label)}" value="${esc(cur)}" spellcheck="false" autocomplete="off">`;
     const opts = (f.optionsRef ? refCache[`${ws()}:${meta.id}:${f.optionsRef}`] : []) || [];
-    // Assignee (shown only when the filter is enabled) offers a "Me" convenience option alongside "anyone" (list
-    // all — the default) and the members list, so the user can quickly narrow to their own tasks.
-    const meOpt = f.key === 'assignee' ? `<option value="me"${cur === 'me' ? ' selected' : ''}>👤 Me</option>` : '';
-    return `<select class="pm-filter-sel" data-filter="${esc(f.key)}"><option value="">${esc(f.label)}: anyone</option>${meOpt}${opts.map((o) => `<option value="${esc(o)}"${o === cur ? ' selected' : ''}>${esc(o)}</option>`).join('')}</select>`;
+    // Assignee is a SEARCHABLE combobox — an input backed by a <datalist> of members (+ a "me" convenience option),
+    // so a long member list is typed-to-filter rather than scrolled. Empty = anyone (list all); commits on change.
+    if (f.key === 'assignee') {
+      const listId = `pmaf-${esc(meta.id)}`;
+      return `<input class="pm-filter-combo" data-filter="assignee" list="${listId}" placeholder="${esc(f.label)}: anyone — type to filter" value="${esc(cur)}" spellcheck="false" autocomplete="off">`
+        + `<datalist id="${listId}"><option value="me">👤 Me</option>${opts.map((o) => `<option value="${esc(o)}"></option>`).join('')}</datalist>`;
+    }
+    return `<select class="pm-filter-sel" data-filter="${esc(f.key)}"><option value="">${esc(f.label)}: anyone</option>${opts.map((o) => `<option value="${esc(o)}"${o === cur ? ' selected' : ''}>${esc(o)}</option>`).join('')}</select>`;
   }).join('');
 }
 
@@ -269,7 +275,7 @@ function rerenderTasks(): void {
     const labelChips = (filed?.tags || []).map((tg) => `<span class="tk-tagchip ${esc(tg)}">${esc(LABEL_NAME[tg] || tg)}</span>`).join('');
     const issueBadge = filed ? `<span class="tk-issue${filed.closed ? ' closed' : ''}" data-issue-url="${esc(filed.issueUrl)}" title="Open the filed issue (${filed.closed ? 'closed' : 'open'})">issue #${filed.issueNumber}${filed.closed ? ' ✓' : ''} ↗</span>` : '';
     return `<div class="pm-task" data-key="${esc(t.key || t.id)}">
-      <div class="pm-task-top"><span class="pm-key">${esc(t.key || '')}</span><span class="pm-title" title="${esc(t.title || '')}">${esc(t.title || '')}</span>${labelChips}${issueBadge}${chip}${canAssign ? `<button class="pm-assign" data-assign="${esc(t.key || t.id)}" title="Validate this task against the repo">⚡</button>` : ''}</div>
+      <div class="pm-task-top"><span class="pm-key">${esc(t.key || '')}</span><span class="pm-title" title="${esc(t.title || '')}">${esc(t.title || '')}</span>${labelChips}${issueBadge}${chip}${meta.capabilities.editFields.length ? `<button class="pm-edit" data-edit="${esc(t.key || t.id)}" title="Edit this task">✎</button>` : ''}${canAssign ? `<button class="pm-assign" data-assign="${esc(t.key || t.id)}" title="Validate this task against the repo">⚡</button>` : ''}</div>
       <div class="pm-task-fields">${selects.map((f) => fieldSelect(meta, f, t)).join('')}${t.priority && !selects.some((f) => f.key === 'priority') ? `<span class="pm-prio">${esc(t.priority)}</span>` : ''}</div>
     </div>`;
   }).join('');
@@ -411,7 +417,8 @@ async function openValidate(taskKey: string): Promise<void> {
   // Dependency repos the validate agent may READ (linked read-only under .deps/) — the workspace's OTHER tracked
   // repos, exactly like a local task's Validate dialog. Default to the mapped repo's dependency template. Like the
   // type guidance, the .deps/ note is appended silently at launch (not shown in the brief box).
-  const depCandidates = (state.settings.issueReposByWs?.[ws()] || []).filter((id) => id !== savedRepo);
+  const trackedRepos = state.settings.issueReposByWs?.[ws()] || []; // the workspace's tracked repos — feed the repo picker + the deps list
+  const depCandidates = trackedRepos.filter((id) => id !== savedRepo);
   const selectedDeps = new Set((savedRepo ? repoDepsFor(savedRepo) : []).filter((id) => depCandidates.includes(id)));
 
   const { root, close } = tplModal(`<div class="tpl-card iss-card">
@@ -419,8 +426,8 @@ async function openValidate(taskKey: string): Promise<void> {
     <div class="bd">
       <label class="iss-lbl">Type <span class="mut">— shapes the validation</span></label>
       <div class="tk-tags" id="pmaTags" style="margin-bottom:12px">${TAG_DEFS.map((d) => `<label class="tk-tag"><input type="checkbox" data-tag="${esc(d.id)}"${selectedTags.has(d.id) ? ' checked' : ''}> ${esc(d.label)}</label>`).join('')}</div>
-      <label class="iss-lbl">Validate in repository</label>
-      <input class="tk-input" id="pmaRepo" placeholder="github:owner/repo" value="${esc(savedRepo)}" spellcheck="false" autocomplete="off">
+      <label class="iss-lbl">Validate in repository <span class="mut">— pick a tracked repo (type to filter)</span></label>
+      <select class="iss-agentsel" id="pmaRepoPick">${trackedRepos.length ? `<option value="">— pick a tracked repo —</option>${trackedRepos.map((id) => `<option value="${esc(id)}"${id === savedRepo ? ' selected' : ''}>${esc(id.replace(/^[^:]+:/, ''))} · ${esc(id.replace(/:.*$/, ''))}</option>`).join('')}` : '<option value="">— no tracked repos — add one under Issues first —</option>'}</select>
       <div class="iss-agentrow" style="margin-top:11px"><label class="iss-lbl" style="margin:0">Assign to</label><select class="iss-agentsel" id="pmaAgent">${agentOptions(state.settings.issueAgent)}</select></div>
       <div class="iss-agentrow"><label class="iss-lbl" style="margin:0">Status on start <span class="mut">— optional</span></label>${statusSelect('pmaStart', statuses, savedStat.start)}</div>
       <div class="iss-agentrow"><label class="iss-lbl" style="margin:0">Status when valid <span class="mut">— issue filed</span></label>${statusSelect('pmaValid', statuses, savedStat.valid)}</div>
@@ -444,19 +451,26 @@ async function openValidate(taskKey: string): Promise<void> {
   });
   addSearch(root.querySelector('#pmaDeps'), 'Search dependency repos…');   // filter a long dependency-repo list
   q<HTMLElement>('[data-x]').onclick = close;
-  q<HTMLElement>('[data-go]').onclick = async () => {
-    const repoId = q<HTMLInputElement>('#pmaRepo').value.trim();
+  const goBtn = q<HTMLButtonElement>('[data-go]');
+  goBtn.onclick = async () => {
+    if (goBtn.disabled) return; // guard double-submit
+    const repoId = q<HTMLSelectElement>('#pmaRepoPick').value.trim();
+    if (!repoId) { toast('Pick a repository to validate against', false); return; }
     const m = /^(github|gitlab|bitbucket):(.+)$/.exec(repoId);
     if (!m || !/^[\w.-]+(\/[\w.-]+)+$/.test(m[2])) { toast('Repository must look like github:owner/repo', false); return; }
     const agentId = q<HTMLSelectElement>('#pmaAgent').value;
     const start = q<HTMLSelectElement>('#pmaStart').value, valid = q<HTMLSelectElement>('#pmaValid').value, fixed = q<HTMLSelectElement>('#pmaFixed').value;
     const depIds = [...selectedDeps].filter((id) => id !== repoId); // never link the build repo as its own dependency
     const brief0 = q<HTMLTextAreaElement>('#pmaBrief').value + tagNote([...selectedTags]) + depsNote(depIds); // append the type + .deps/ guidance silently, like a local task
+    // Same feel as a local task's Validate: keep the dialog open, show progress on the button while the worktree is
+    // created (auto-clone can take a while), and only close once the run actually starts — re-enable on failure.
+    goBtn.disabled = true; goBtn.textContent = 'Creating worktree…';
     await saveMappings(projKey, repoId, { start, valid, fixed });
     state.settings = await relay.patchSettings({ pmTypeByProvider: { ...(state.settings.pmTypeByProvider || {}), [railProvider]: [...selectedTags] } }); // remember the type for next time
     renderRepoRow(); // reflect a repo set/changed here in the rail chip
-    close();
-    await assignPmTask({ provider: railProvider, projectId: railProjectId, ws: ws(), task, repoProvider: m[1], repo: m[2], start: start || undefined, valid: valid || undefined, fixed: fixed || undefined, agentId, brief0, deps: depIds, tags: [...selectedTags] });
+    const ok = await assignPmTask({ provider: railProvider, projectId: railProjectId, ws: ws(), task, repoProvider: m[1], repo: m[2], start: start || undefined, valid: valid || undefined, fixed: fixed || undefined, agentId, brief0, deps: depIds, tags: [...selectedTags] });
+    if (ok) close();
+    else { goBtn.disabled = false; goBtn.textContent = '⚡ Validate'; }
   };
 }
 
@@ -500,14 +514,59 @@ async function openCreateTask(): Promise<void> {
   };
 }
 
+// Edit an existing provider task in place — title / status / priority / description → pmTaskUpdate, then reload.
+// The list rows omit the description, so fetch the detail first to pre-fill it.
+async function openEditTask(taskKey: string): Promise<void> {
+  const meta = metaOf(railProvider); if (!meta) return;
+  const summary = railTasks.find((t) => (t.key || t.id) === taskKey); if (!summary) return;
+  await ensureRefs(meta);
+  const statuses = refCache[`${ws()}:${meta.id}:task-statuses`] || [];
+  const priorities = refCache[`${ws()}:${meta.id}:task-priorities`] || [];
+  const detail = await relay.pmTaskGet(ws(), railProvider, taskKey).catch(() => null);
+  const curTitle = summary.title || '', curStatus = summary.status || '', curPriority = summary.priority || '';
+  const curDesc = (detail?.ok && detail.data?.description) || summary.description || '';
+  const projTitle = railProjects.find((p) => p.id === railProjectId)?.title || railProjectId;
+  const { root, close } = tplModal(`<div class="tpl-card iss-card">
+    <div class="hd"><span class="dot" style="background:var(--accent)"></span><span class="t">Edit task<small>${esc(summary.key || taskKey)} · ${esc(meta.containerLabel)}: ${esc(projTitle)}</small></span></div>
+    <div class="bd">
+      <label class="iss-lbl">Title</label>
+      <input class="tk-input" id="etTitle" value="${esc(curTitle)}" spellcheck="false" autocomplete="off">
+      <div class="iss-agentrow" style="margin-top:11px"><label class="iss-lbl" style="margin:0">Status</label><select class="iss-agentsel" id="etStatus">${statuses.length ? statuses.map((s) => `<option value="${esc(s)}"${s === curStatus ? ' selected' : ''}>${esc(s)}</option>`).join('') : '<option value="">— no statuses —</option>'}</select></div>
+      ${priorities.length ? `<div class="iss-agentrow"><label class="iss-lbl" style="margin:0">Priority <span class="mut">— optional</span></label><select class="iss-agentsel" id="etPriority"><option value="">— none —</option>${priorities.map((p) => `<option value="${esc(p)}"${p === curPriority ? ' selected' : ''}>${esc(p)}</option>`).join('')}</select></div>` : ''}
+      <label class="iss-lbl">Description</label>
+      <textarea class="iss-brief" id="etDesc" rows="7" spellcheck="false">${esc(curDesc)}</textarea>
+    </div>
+    <div class="ft"><span class="hint">Saved to ${esc(meta.name)}</span><span class="r"><button class="tpl-btn ghost" data-x>Cancel</button><button class="tpl-btn pri" data-go>Save</button></span></div>
+  </div>`);
+  const q = <T extends HTMLElement>(s: string) => root.querySelector(s) as T;
+  q<HTMLElement>('[data-x]').onclick = close;
+  setTimeout(() => q<HTMLInputElement>('#etTitle').focus(), 30);
+  q<HTMLElement>('[data-go]').onclick = async () => {
+    const title = q<HTMLInputElement>('#etTitle').value.trim();
+    const status = q<HTMLSelectElement>('#etStatus').value;
+    const priority = (root.querySelector('#etPriority') as HTMLSelectElement | null)?.value || '';
+    const description = q<HTMLTextAreaElement>('#etDesc').value;
+    if (!title) { toast('A title is required', false); return; }
+    const body: Record<string, unknown> = { title, description };
+    if (status) body.status = status;
+    if (priority) body.priority = priority;
+    const r = await relay.pmTaskUpdate(ws(), railProvider, taskKey, body).catch(() => ({ ok: false, error: 'Update failed' }));
+    if (r?.ok) { toast(`Updated ${summary.key || taskKey}`, true); close(); void loadRailTasks(); }
+    else toast(r?.error || 'Could not update the task', false);
+  };
+}
+
 /* ============================ push a local task → provider ============================ */
 type PmTaskLink = { provider: string; projectId: string; taskKey: string };
 // Open a dialog to CREATE (or UPDATE, if already linked) this local task as a provider task. Resolves with the
 // link (pmRef) to store on the local task, or null if cancelled/failed. Re-pushing a linked task updates it.
-export async function pushLocalTask(task: { title: string; body?: string; pmRef?: PmTaskLink }): Promise<PmTaskLink | null> {
+export async function pushLocalTask(task: { title: string; body?: string; pmRef?: PmTaskLink; provider?: string; repo?: string }): Promise<PmTaskLink | null> {
   await loadMetas();
   const provs = await connectedProviders();
   if (!provs.length) { toast('Connect a provider in Settings → Integrations first', false); return null; }
+  // The local task's selected validate repo (provider:owner/repo) → mirrored onto the integration project on push,
+  // so validating the pushed task starts pre-set to the same repo (and its default .deps/ template).
+  const taskRepo = task.provider && task.repo ? `${task.provider}:${task.repo}` : '';
   return new Promise<PmTaskLink | null>((resolve) => {
     let provider = task.pmRef && provs.some((p) => p.id === task.pmRef!.provider) ? task.pmRef.provider : provs[0].id;
     const { root, close } = tplModal(`<div class="tpl-card iss-card">
@@ -548,12 +607,23 @@ export async function pushLocalTask(task: { title: string; body?: string; pmRef?
       // Auto-assign the pushed task to the current user ("me" resolves to the caller); this also satisfies a
       // status that requires an assignee.
       const body = { title, status, description, assignee: 'me' };
+      // Mirror the local task's selected repo onto the target integration project, so a later Validate of this
+      // pushed task auto-reflects it. Best-effort — never fail the push over the mapping.
+      const reflectRepo = async (): Promise<void> => {
+        if (!taskRepo) return;
+        await setProjectRepo(`${provider}:${projectId}`, taskRepo);
+        renderRepoRow(); // refresh the rail chip if it's showing this project
+      };
       if (linkedSame) {
         const r = await relay.pmTaskUpdate(ws(), provider, task.pmRef!.taskKey, body).catch(() => ({ ok: false, error: 'Update failed' }));
-        if (r?.ok) { toast(`Updated ${task.pmRef!.taskKey}`, true); done(task.pmRef!); } else toast(r?.error || 'Update failed', false);
+        if (r?.ok) { await reflectRepo(); toast(`Updated ${task.pmRef!.taskKey}${taskRepo ? ` · repo ${taskRepo.replace(/^[^:]+:/, '')}` : ''}`, true); done(task.pmRef!); } else toast(r?.error || 'Update failed', false);
       } else {
+        // Already linked, but this would CREATE a new provider task (a different provider/project than the link) —
+        // that's a duplicate. Refuse with an error instead of re-creating; the user must update the existing link
+        // (pick its provider+project) or unlink first. Only a genuinely-unlinked task reaches the create call.
+        if (task.pmRef) { toast(`Already pushed to ${task.pmRef.provider} as ${task.pmRef.taskKey} — pick that project to update it, or unlink first (it won't be re-created)`, false); return; }
         const r = await relay.pmTaskCreate(ws(), provider, projectId, body).catch(() => ({ ok: false, error: 'Create failed' }));
-        if (r?.ok && r.data?.key) { toast(`Created ${r.data.key} in ${provider}`, true); done({ provider, projectId, taskKey: r.data.key }); } else toast(r?.error || 'Create failed', false);
+        if (r?.ok && r.data?.key) { await reflectRepo(); toast(`Created ${r.data.key} in ${provider}${taskRepo ? ` · repo ${taskRepo.replace(/^[^:]+:/, '')}` : ''}`, true); done({ provider, projectId, taskKey: r.data.key }); } else toast(r?.error || 'Create failed', false);
       }
     };
   });
@@ -578,11 +648,14 @@ export function initPm(d: PmDeps): void {
   $('#pmRailTasks')?.addEventListener('click', (e) => {
     const t = e.target as HTMLElement;
     const a = t.closest('.pm-assign') as HTMLElement | null; if (a?.dataset.assign) { void openValidate(a.dataset.assign); return; }
+    const ed = t.closest('.pm-edit') as HTMLElement | null; if (ed?.dataset.edit) { void openEditTask(ed.dataset.edit); return; }
     const iss = t.closest('.tk-issue') as HTMLElement | null; if (iss?.dataset.issueUrl) { void relay.openExternal(iss.dataset.issueUrl); return; }
     const c = t.closest('.pm-run-chip') as HTMLElement | null; if (c?.dataset.runchip) onPmRunChip(railProvider, c.dataset.runchip);
   });
   // Filter bar — selects apply immediately; the search box debounces.
-  $('#pmRailFilters')?.addEventListener('change', (e) => { const el = (e.target as HTMLElement).closest('.pm-filter-sel') as HTMLSelectElement | null; if (el?.dataset.filter) onFilter(el.dataset.filter, el.value, false); });
+  // Selects + the searchable assignee combobox commit on `change` (a datalist pick, Enter, or blur); free-text
+  // filters (query) debounce on `input`.
+  $('#pmRailFilters')?.addEventListener('change', (e) => { const el = (e.target as HTMLElement).closest('.pm-filter-sel, .pm-filter-combo') as HTMLSelectElement | HTMLInputElement | null; if (el?.dataset.filter) onFilter(el.dataset.filter, el.value.trim(), false); });
   $('#pmRailFilters')?.addEventListener('input', (e) => { const el = (e.target as HTMLElement).closest('.pm-filter-input') as HTMLInputElement | null; if (el?.dataset.filter) onFilter(el.dataset.filter, el.value.trim(), true); });
   // Pager
   $('#pmRailPager')?.addEventListener('click', (e) => {

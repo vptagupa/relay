@@ -380,10 +380,11 @@ function openTaskDetails(t: Task): void {
         ${t.result ? `<label class="iss-lbl">${resultLabel}</label><div class="tk-result">${esc(t.result)}</div>` : ''}
         ${t.issueUrl ? `<div class="iss-wt">Filed as issue <a href="#" data-issue>#${t.issueNumber} ↗</a> — status: <b>${t.status === 'closed' ? 'closed' : 'open'}</b> (synced from the issue)</div>` : ''}
       </div>
-      <div class="ft"><span class="hint">${t.pmRef ? `<span class="mut">↑ linked to ${esc(t.pmRef.provider)} ${esc(t.pmRef.taskKey)}</span>` : ''}</span><span class="r"><button class="tpl-btn ghost" data-term style="display:none">⧉ Open terminal</button>${deps.pushToProvider ? `<button class="tpl-btn ghost" data-push title="${t.pmRef ? 'Update the linked provider task' : 'Create this task in a connected integration'}">${t.pmRef ? '↑ Update' : '↑ Push'}</button>` : ''}<button class="tpl-btn ghost" data-del>Delete</button><button class="tpl-btn ghost" data-edit>Edit</button>${action}<button class="tpl-btn ghost" data-x>Close</button></span></div>
+      <div class="ft"><span class="hint">${t.pmRef ? `<span class="mut">↑ linked to ${esc(t.pmRef.provider)} ${esc(t.pmRef.taskKey)}</span>` : ''}</span><span class="r"><button class="tpl-btn ghost" data-term style="display:none">⧉ Open terminal</button>${deps.pushToProvider && !t.pmRef ? `<button class="tpl-btn ghost" data-push title="Create this task in a connected integration">↑ Push</button>` : ''}<button class="tpl-btn ghost" data-del>Delete</button><button class="tpl-btn ghost" data-edit>Edit</button>${action}<button class="tpl-btn ghost" data-x>Close</button></span></div>
     </div>`);
   root.querySelector('[data-x]')?.addEventListener('click', close);
-  // ↑ Push/Update this local task in a PM provider (Echo…). Stores the returned link so a re-push updates it.
+  // ↑ Push this local task to a PM provider (Echo…) — only shown while UNLINKED. Once pushed it stores the link
+  // and the button becomes a static "pushed" indicator (no re-push / update).
   root.querySelector('[data-push]')?.addEventListener('click', async () => {
     const ref = await deps.pushToProvider?.(t);
     if (ref) { const cur = tasksFor(wsKey()).find((x) => x.id === t.id) || t; upsertTask({ ...cur, pmRef: ref }); close(); }
@@ -430,7 +431,7 @@ function render(): void {
         <div class="tk-meta"><span class="pr-repo-lbl"><span class="src-dot ${PROV_DOT[(t.provider as ProviderId)] || 'gh'}"></span>${esc(t.repo)}</span>${(t.tags || []).map((tg) => `<span class="tk-tagchip ${esc(tg)}">${esc(tg === FEATURE_TAG ? 'feature' : tg)}</span>`).join('')}${t.issueUrl ? `<span class="tk-issue" data-url="${esc(t.issueUrl)}" title="Open the filed issue">issue #${t.issueNumber} ↗</span>` : ''}</div>
         ${t.result ? `<div class="tk-result trunc">${esc(t.result)}</div>` : ''}
       </div>
-      <div class="tk-side">${deps.pushToProvider ? `<button class="tk-push${t.pmRef ? ' linked' : ''}" data-push title="${t.pmRef ? `Update ${esc(t.pmRef.provider)} ${esc(t.pmRef.taskKey)}` : 'Push to a connected integration'}">↑</button>` : ''}<span class="tk-st ${t.status}">${esc(STATUS_LABEL[t.status])}</span></div>
+      <div class="tk-side">${t.pmRef ? `<span class="tk-pushed" title="Pushed to ${esc(t.pmRef.provider)} · ${esc(t.pmRef.taskKey)}">↑ pushed</span>` : (deps.pushToProvider ? `<button class="tk-push" data-push title="Push to a connected integration">↑</button>` : '')}<span class="tk-st ${t.status}">${esc(STATUS_LABEL[t.status])}</span></div>
     </div>`).join('');
   el.querySelectorAll<HTMLElement>('.tk-row').forEach((row) => {
     const t = list.find((x) => x.id === row.dataset.id); if (!t) return;

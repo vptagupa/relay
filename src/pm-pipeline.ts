@@ -256,18 +256,20 @@ export interface AssignParams {
   tags?: string[];                            // task type (bug|enhancement|feature) → applied as issue labels when filed
 }
 const taskHead = (t: { key: string; title: string; description?: string }): string => `# ${t.title || t.key}\n\n${(t.description || '').trim() || '_(no description)_'}`;
-export async function assignPmTask(p: AssignParams): Promise<void> {
+// Returns true once the worktree exists and the run has started, false on any early-out (already running, at
+// capacity, worktree failed) — so the caller's dialog can stay open + re-enable on failure, like a local task.
+export async function assignPmTask(p: AssignParams): Promise<boolean> {
   const key = keyOf(p.provider, p.task.key);
   const cur = runStatus.get(key);
-  if (cur && OCCUPYING.includes(cur)) { toast(`${p.task.key} is already running`); return; }
-  if (workingCount() >= CAP()) { toast(`At capacity (${CAP()} runs) — try again when one finishes`, false); return; }
+  if (cur && OCCUPYING.includes(cur)) { toast(`${p.task.key} is already running`); return false; }
+  if (workingCount() >= CAP()) { toast(`At capacity (${CAP()} runs) — try again when one finishes`, false); return false; }
   const pipeline = validatePipeline();
   const runId = `${p.provider}-${p.task.key}`.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 40);
   const dir = state.settings.workspace || '';
   const brief0 = p.brief0 || validateBrief(p.task);   // the (possibly edited) validate brief
   runStatus.set(key, 'working'); deps.refresh();  // optimistic — reflect immediately while the worktree preps (auto-clone can take a while)
   const res = await relay.taskWorktreeAdd(p.repoProvider, p.repo, dir, runId, brief0).catch(() => ({ ok: false as const, error: 'Worktree creation failed' }));
-  if (!res.ok || !res.path) { runStatus.delete(key); deps.refresh(); toast(res.error || 'Could not create the worktree', false); return; }
+  if (!res.ok || !res.path) { runStatus.delete(key); deps.refresh(); toast(res.error || 'Could not create the worktree', false); return false; }
   // Link any selected dependency repos read-only under .deps/ (same as a local task's Validate), so the agent can
   // read related interfaces/contracts while it validates. Best-effort — a link failure must not block the run.
   if (p.deps && p.deps.length) {
@@ -280,6 +282,7 @@ export async function assignPmTask(p: AssignParams): Promise<void> {
     pipeline, stageIdx: 0, wt: res.path, agentId: p.agentId, brief0Rel: res.briefRel || `.slayer/task-${runId}.md`, awaiting: false,
   });
   toast(`Validating ${p.task.key} in ${p.repo}`, true);
+  return true;
 }
 
 export const pmRunStatusOf = (provider: string, taskKey: string): PmRunStatus => runStatus.get(keyOf(provider, taskKey)) || 'idle';

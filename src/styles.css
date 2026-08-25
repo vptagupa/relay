@@ -422,8 +422,8 @@ button{font-family:inherit;color:inherit;cursor:pointer;border:none;background:n
 .pm-filters{display:flex;flex-wrap:wrap;gap:5px;padding:6px 6px 0}
 .pm-filters:empty{display:none}
 .pm-filter-input{flex:1 1 100%;min-width:0;background:var(--surface-2);border:1px solid var(--border);border-radius:7px;padding:5px 8px;color:var(--text);font:11.5px var(--sans)}
-.pm-filter-sel{flex:1 1 45%;min-width:0;background:var(--surface-2);border:1px solid var(--border);border-radius:7px;padding:4px 6px;color:var(--text);font:11px var(--sans)}
-.pm-filter-input:focus,.pm-filter-sel:focus{outline:none;border-color:var(--accent-line)}
+.pm-filter-sel,.pm-filter-combo{flex:1 1 45%;min-width:0;background:var(--surface-2);border:1px solid var(--border);border-radius:7px;padding:4px 6px;color:var(--text);font:11px var(--sans)}
+.pm-filter-input:focus,.pm-filter-sel:focus,.pm-filter-combo:focus{outline:none;border-color:var(--accent-line)}
 .pm-pager{display:flex;align-items:center;justify-content:center;gap:10px;padding:6px}
 .pm-pager:empty{display:none}
 .pm-page-btn{background:var(--surface-2);border:1px solid var(--border-strong);border-radius:7px;padding:4px 10px;color:var(--text);font:11.5px var(--sans);cursor:pointer}
@@ -431,9 +431,9 @@ button{font-family:inherit;color:inherit;cursor:pointer;border:none;background:n
 .pm-page-btn:disabled{opacity:.4;cursor:default}
 .pm-page-n{font-size:11px;color:var(--muted)}
 /* Assign-to-pipeline: row button, run chip, dialog */
-.pm-assign{flex:none;width:22px;height:20px;display:grid;place-items:center;border:1px solid var(--border);background:var(--surface-3);border-radius:6px;color:var(--muted);font-size:11px;cursor:pointer;opacity:0;transition:opacity .1s}
-.pm-task:hover .pm-assign{opacity:1}
-.pm-assign:hover{color:var(--accent);border-color:var(--accent-line)}
+.pm-assign,.pm-edit{flex:none;width:22px;height:20px;display:grid;place-items:center;border:1px solid var(--border);background:var(--surface-3);border-radius:6px;color:var(--muted);font-size:11px;cursor:pointer;opacity:0;transition:opacity .1s}
+.pm-task:hover .pm-assign,.pm-task:hover .pm-edit{opacity:1}
+.pm-assign:hover,.pm-edit:hover{color:var(--accent);border-color:var(--accent-line)}
 .pm-run-chip{flex:none;font-size:10px;padding:1px 6px;border-radius:5px;cursor:pointer;border:1px solid var(--border)}
 .pm-run-chip.s-working{color:var(--warn,#e0a040);border-color:var(--warn,#e0a040)}
 .pm-run-chip.s-done{color:var(--ok,#5fbf80);border-color:var(--ok,#5fbf80)}
@@ -1098,7 +1098,8 @@ body.tabdrag .dz{display:block;pointer-events:auto}
 .tk-push{flex:none;width:22px;height:20px;display:grid;place-items:center;border:1px solid var(--border);background:var(--surface-3);border-radius:6px;color:var(--muted);font-size:12px;cursor:pointer;opacity:0;transition:opacity .1s}
 .tk-row:hover .tk-push{opacity:1}
 .tk-push:hover{color:var(--accent);border-color:var(--accent-line)}
-.tk-push.linked{opacity:1;color:var(--accent);border-color:var(--accent-line)} /* already linked → always visible */
+/* Already pushed → a static indicator pill (no re-push / update), always visible */
+.tk-pushed{flex:none;font:8.5px/1.4 var(--mono);border:1px solid var(--accent-line);border-radius:999px;padding:1px 7px;white-space:nowrap;color:var(--accent);text-transform:lowercase;cursor:default}
 .tk-st{font:8.5px/1.4 var(--mono);border:1px solid var(--border-strong);border-radius:999px;padding:1px 6px;white-space:nowrap;color:var(--muted);text-transform:lowercase}
 .tk-st.validating{border-color:#a78bfa66;color:#a78bfa}
 .tk-st.valid,.tk-st.open{border-color:#2ea04366;color:#3fb950}

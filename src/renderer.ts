@@ -2147,7 +2147,7 @@ new ResizeObserver(() => { clearTimeout(_roT); _roT = setTimeout(() => { fitPane
     confirm: confirmDialog,
     flushWorkspace: async () => { await relay.syncFlushWorkspace({ active: state.active, tabs: snapshotTabs(), gv: state.gv, focus: state.focus, layout: state.layout }); },
   });
-  initPm({ activeWsId: getActiveWsId, confirm: confirmDialog, openAgentTab, onAgentTabClosed }); // PM provider integrations: OAuth sign-in + task sync + run a synced task through the build pipeline
+  initPm({ activeWsId: getActiveWsId, confirm: confirmDialog, openAgentTab, onAgentTabClosed, onConnectionChange: () => void renderTaskRail() }); // PM provider integrations: OAuth sign-in + task sync + run a synced task through the build pipeline; rebuild the Tasks rail when a provider connects/disconnects
   await loadWorkspaceMeta(); // load workspace defs + blueprints, mirror the active workspace's folder + theme into settings before first paint
   // Per-workspace Library migration: sessions saved before Libraries were per-workspace have no wsId.
   // Assign them to the (now-known) active workspace so they land in one Library instead of vanishing from
