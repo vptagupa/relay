@@ -15,6 +15,7 @@ import { pmProviderOf, pmProviderList } from './pm';
 import { genVerifier, challenge } from './pm/shared';
 import * as cloudsync from './cloudsync';
 import { runAgent } from './agent/agent';
+import { AGENT_GUIDE, AGENT_GUIDE_MARK } from './agent-guide';
 import squirrelStartup from 'electron-squirrel-startup';
 import type { ApprovalRequest, ChatTurn } from './shared/types';
 import type { Provider } from './shared/models';
@@ -950,6 +951,37 @@ async function dropSlayerBrief(git: string, wtPath: string, briefRel: string, br
   } catch (err) { logFatal('worktree/brief', err); return undefined; } // brief is best-effort; the worktree still opens
 }
 
+// Drop the agent commenting protocol as CLAUDE.md at the worktree ROOT so every stage's agent picks it up
+// automatically (Claude Code reads a worktree's CLAUDE.md; the briefs also point at it for other agents). Never
+// pollutes the PR:
+//  • the repo already tracks its own CLAUDE.md → APPEND our delimited block, then mark the file `skip-worktree`
+//    so `git add -A` / commit can't carry the change into the PR (the repo's own instructions are preserved);
+//  • otherwise → write our own CLAUDE.md and git-exclude it (same mechanism as .slayer/).
+// Idempotent: a reused worktree already carrying our marker is left untouched. Best-effort — a failure here never
+// blocks the worktree from opening.
+async function dropAgentGuide(git: string, wtPath: string): Promise<void> {
+  try {
+    const cm = path.join(wtPath, 'CLAUDE.md');
+    let existing = ''; try { existing = await fsp.readFile(cm, 'utf8'); } catch { /* none yet */ }
+    if (existing.includes(AGENT_GUIDE_MARK)) return; // already added (reused worktree) — don't duplicate
+    const tracked = !!existing && (await runBin(git, ['-C', wtPath, 'ls-files', '--error-unmatch', 'CLAUDE.md'])).ok;
+    const block = `${AGENT_GUIDE_MARK}\n\n${AGENT_GUIDE}`;
+    await fsp.writeFile(cm, existing ? existing.replace(/\s+$/, '') + '\n\n' + block + '\n' : block + '\n', 'utf8');
+    if (tracked) {
+      // The repo owns CLAUDE.md → keep our appended section out of git so a fix's `git add -A` never commits it.
+      await runBin(git, ['-C', wtPath, 'update-index', '--skip-worktree', 'CLAUDE.md']);
+    } else {
+      // Our own untracked CLAUDE.md → locally git-exclude it (mirrors dropSlayerBrief's .slayer/ exclusion).
+      const gp = await runBin(git, ['-C', wtPath, 'rev-parse', '--git-path', 'info/exclude']);
+      if (gp.ok) {
+        const excl = path.isAbsolute(gp.stdout.trim()) ? gp.stdout.trim() : path.join(wtPath, gp.stdout.trim());
+        const cur = await fsp.readFile(excl, 'utf8').catch(() => '');
+        if (!/^\/?CLAUDE\.md$/m.test(cur.replace(/\r/g, ''))) await fsp.writeFile(excl, (!cur || cur.endsWith('\n') ? cur : cur + '\n') + '/CLAUDE.md\n', 'utf8');
+      }
+    }
+  } catch (err) { logFatal('worktree/agent-guide', err); } // best-effort; the worktree still opens without it
+}
+
 // Create (or reuse) an ISOLATED git worktree for an issue: a per-issue working dir on branch
 // issue-<n>, so several issues can be worked in parallel without disturbing the main checkout.
 // Also drops the (edited) issue brief as .slayer/issue-<n>.md and locally git-excludes it, so the
@@ -1003,6 +1035,7 @@ ipcMain.handle('git:worktree-add', async (_e, p: { provider?: ProviderId; repo: 
         return { ok: false, error: msg };
       }
     }
+    await dropAgentGuide(git, wtPath); // CLAUDE.md: the PR commenting protocol every stage's agent follows
     const briefRel = await dropSlayerBrief(git, wtPath, `.slayer/issue-${num}.md`, typeof p?.brief === 'string' ? p.brief : '');
     return { ok: true, path: wtPath, branch, base, reused, briefRel };
   } catch (err) { logFatal('git:worktree-add', err); return { ok: false, error: 'Worktree creation failed' }; }
@@ -1128,6 +1161,7 @@ ipcMain.handle('git:pr-worktree-add', async (_e, p: { provider?: ProviderId; rep
       const add = await runBin(git, ['-C', repoRoot, 'worktree', 'add', wtPath, branch], { timeout: 60000 });
       if (!add.ok) { const msg = (add.stderr || add.stdout || 'git worktree add failed').trim().split('\n').filter(Boolean).pop() || 'git worktree add failed'; return { ok: false, error: msg }; }
     }
+    await dropAgentGuide(git, wtPath); // CLAUDE.md: the PR commenting protocol every stage's agent follows
     const briefRel = await dropSlayerBrief(git, wtPath, `.slayer/pr-${num}.md`, typeof p?.brief === 'string' ? p.brief : '');
     return { ok: true, path: wtPath, branch, reused, briefRel };
   } catch (err) { logFatal('git:pr-worktree-add', err); return { ok: false, error: 'Worktree creation failed' }; }
@@ -1185,6 +1219,7 @@ ipcMain.handle('git:pr-resolve-worktree', async (_e, p: { provider?: ProviderId;
         pushable = (await runBin(git, ['-C', wtPath, 'branch', `--set-upstream-to=origin/${src}`, branch])).ok;
     }
     // Drop the stage brief now that the worktree exists (so the resolve pipeline reads it like any other stage 0).
+    await dropAgentGuide(git, wtPath); // CLAUDE.md: the PR commenting protocol every stage's agent follows
     const briefRel = await dropSlayerBrief(git, wtPath, `.slayer/pr-${num}.md`, typeof p?.brief === 'string' ? p.brief : '');
     // Already mid-merge from a previous resolve attempt → don't touch it; just report the conflicts and reopen.
     if ((await runBin(git, ['-C', wtPath, 'rev-parse', '-q', '--verify', 'MERGE_HEAD'])).ok) {
@@ -1297,6 +1332,7 @@ ipcMain.handle('git:task-worktree-add', async (_e, p: { provider?: ProviderId; r
       const add = await runBin(git, addArgs, { timeout: 60000 });
       if (!add.ok) { const msg = (add.stderr || add.stdout || 'git worktree add failed').trim().split('\n').filter(Boolean).pop() || 'git worktree add failed'; return { ok: false, error: msg }; }
     }
+    await dropAgentGuide(git, wtPath); // CLAUDE.md: the PR commenting protocol every stage's agent follows
     const briefRel = await dropSlayerBrief(git, wtPath, `.slayer/task-${id}.md`, typeof p?.brief === 'string' ? p.brief : '');
     return { ok: true, path: wtPath, branch, reused, briefRel };
   } catch (err) { logFatal('git:task-worktree-add', err); return { ok: false, error: 'Worktree creation failed' }; }

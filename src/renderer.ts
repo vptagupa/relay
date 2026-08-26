@@ -472,6 +472,7 @@ async function closeTab(id: string, skipConfirm = false) {
   }
   const i = state.tabs.findIndex((x) => x.id === id); if (i < 0) return; // re-find (state may have changed during confirm)
   const [t] = state.tabs.splice(i, 1);
+  tabLastOutput.delete(id); // drop its activity record — the watchdog must not track a closed tab
   if (t.kind === 'file') {
     disposeFileViewer(t.id); t.el.remove(); // file tabs: no pty, no Library, no xterm to dispose
   } else {
@@ -514,6 +515,7 @@ function tabHtml(t: Tab): string {
 /* ---- per-tab "running" indicator: a live green pulse while a tab's terminal is producing output ---- */
 const runningTabs = new Set<string>();            // tabs currently showing the live pulse
 const tabIdleTimer = new Map<string, number>();   // tabId → timeout that clears the pulse once output stops
+const tabLastOutput = new Map<string, number>();  // tabId → ms of its last PTY output — the activity signal the pipeline watchdog reads (a working agent keeps this fresh; a stuck one lets it go stale)
 // Toggle the class on the live tab node(s) directly, so we don't rebuild the whole tab strip on every chunk.
 function setTabRunning(id: string, on: boolean): void {
   if (on) runningTabs.add(id); else runningTabs.delete(id);
@@ -521,6 +523,7 @@ function setTabRunning(id: string, on: boolean): void {
 }
 // Output arrived → pulse the tab; a rolling idle timer clears it ~1.5s after output stops.
 function markTabActive(id: string): void {
+  tabLastOutput.set(id, Date.now());   // stamp the activity signal the pipeline watchdog reads
   if (!runningTabs.has(id)) setTabRunning(id, true);
   const prev = tabIdleTimer.get(id); if (prev) clearTimeout(prev);
   tabIdleTimer.set(id, window.setTimeout(() => { tabIdleTimer.delete(id); setTabRunning(id, false); }, 1500));
@@ -2172,16 +2175,18 @@ new ResizeObserver(() => { clearTimeout(_roT); _roT = setTimeout(() => { fitPane
   // terminal is closed. onAgentTabClosed lets the rail subscribe to that close event.
   const openAgentTab = async (o: { cwd: string; name: string; runCmd?: string; dbCredId?: string }): Promise<string> => (await newTab({ cwd: o.cwd, name: o.name, runCmd: o.runCmd, dbCredId: o.dbCredId })).id;
   const onAgentTabClosed = (cb: (tabId: string) => void): void => { agentTabCloseSubs.push(cb); };
+  const tabActivity = (tabId: string): number | undefined => tabLastOutput.get(tabId); // last-output ms → the pipeline watchdog's activity signal
   initIssues({
     // Assign → open a fresh terminal tab rooted in the issue's worktree, seeded to launch the agent.
     // dbCredId (optional) → main injects a referenced DB credential template into the run's env.
     openAgentTab,
     onAgentTabClosed,          // closing a stage's terminal frees that run's slot (queue can't wedge on a dead run)
+    tabActivity,               // the stage watchdog watches terminal activity, not a flat wall-clock, to spot a stuck agent
     activeWsId: getActiveWsId, // Issues (tracked repos + active repo) are scoped per workspace
   });
   // PR rail — shares the Issues rail's active repo; clicking its repo chip jumps to Issues to change it.
   // openAgentTab powers PR review pipelines (an agent tab rooted in the PR's checked-out worktree).
-  initPrs({ activeWsId: getActiveWsId, focusIssues: () => switchSidebarView('issues'), openAgentTab, onAgentTabClosed });
+  initPrs({ activeWsId: getActiveWsId, focusIssues: () => switchSidebarView('issues'), openAgentTab, onAgentTabClosed, tabActivity });
   // Tasks rail — draft/validate a proposed issue, file it only if valid. Its own validate worktree + agent tab.
   initTasks({ activeWsId: getActiveWsId, openAgentTab, onAgentTabClosed, pushToProvider: pushLocalTask }); // ↑ push a local task up to a connected PM integration
   if ((state.settings.sidebarView || 'library') === 'prs') void loadPrs(); // restore-on-boot when PR was the last view

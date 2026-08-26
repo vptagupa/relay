@@ -18,6 +18,7 @@ export interface PrsDeps {
   focusIssues: () => void;    // jump to the Issues rail (where the shared repo is picked)
   openAgentTab: (o: { cwd: string; name: string; runCmd?: string; dbCredId?: string }) => Promise<string>; // for PR review pipelines (agent tab in the PR worktree; dbCredId → inject a DB credential template); resolves to the tab id
   onAgentTabClosed: (cb: (tabId: string) => void) => void;   // subscribe to terminal-closed → free the review slot held by that tab
+  tabActivity: (tabId: string) => number | undefined;        // last-output ms of a stage's terminal → the review⇄fix watchdog's activity signal
 }
 let deps: PrsDeps;
 
@@ -524,7 +525,7 @@ function render(): void {
 /* ----------------------------- wire-up ----------------------------- */
 export function initPrs(d: PrsDeps): void {
   deps = d;
-  initPrReview({ activeWsId: d.activeWsId, openAgentTab: d.openAgentTab, onAgentTabClosed: d.onAgentTabClosed, refresh: () => render() });
+  initPrReview({ activeWsId: d.activeWsId, openAgentTab: d.openAgentTab, onAgentTabClosed: d.onAgentTabClosed, tabActivity: d.tabActivity, refresh: () => render() });
   const rsel = $('#prSideRepo'); if (rsel) rsel.onclick = (e) => { e.stopPropagation(); openPrRepoMenu(); }; // the PR rail's OWN repo picker (no longer jumps to Issues)
   const asel = $('#prAuthor'); if (asel) asel.onclick = (e) => { e.stopPropagation(); openPrAuthorMenu(); };
   const pull = $('#prPull'); if (pull) pull.onclick = () => void loadPrs();

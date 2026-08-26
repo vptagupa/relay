@@ -199,6 +199,20 @@ export function stageBrief(kind: StageKind, overrides?: Record<string, string>):
   return (o && o.trim()) ? o : kindSpec(kind).brief;
 }
 
+// A short nudge appended to a review/fix stage's brief telling the agent to post its result on the PR following the
+// worktree's CLAUDE.md commenting protocol (identity + standard format). The FULL protocol lives in that CLAUDE.md;
+// this only points at it — so the agent actually posts, and non-Claude agents read+follow it too. `prov` is loose
+// (a provider id) to avoid a type import here; bitbucket has no first-class comment CLI wired, so it gets nothing.
+export function commentNote(kind: StageKind, prov: string): string {
+  if ((kind !== 'review' && kind !== 'fix') || prov === 'bitbucket') return '';
+  const cmd = prov === 'gitlab' ? '`glab mr note --message "<comment>"`' : '`gh pr comment <number> --body "<comment>"`';
+  const who = kind === 'review' ? 'the **Review Agent**' : 'the **Fix Agent**';
+  const what = kind === 'review'
+    ? 'post your verdict as a comment on the pull request'
+    : 'post a comment on the pull request summarizing what you changed (and, if a Review Agent reviewed before you, frame it as a response to their review)';
+  return `\n\n---\n## Post your result on the pull request\nBefore you finish, ${what}, following the commenting protocol in \`./CLAUDE.md\` — read it, identify yourself as ${who}, and use its standard format. Post with ${cmd}.`;
+}
+
 /* ----------------------------- brief rendering ----------------------------- */
 export interface BriefCtx { issue: string; number: number; title: string; closeStep: string; verdictRel: string; base?: string; source?: string; }
 // Interpolate ONLY the known tokens (so literal JSON braces like {"passed":…} in the template are untouched).

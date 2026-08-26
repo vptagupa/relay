@@ -12,9 +12,9 @@
 import { state } from './state';
 import { esc } from './dom';
 import { toast } from './ui';
-import { prPipelines, prPipelineById, renderBrief, nextEdge, stageIndexById, STOP, kindSpec, type PipelineDef, type BriefCtx } from './pipelines';
+import { prPipelines, prPipelineById, renderBrief, nextEdge, stageIndexById, STOP, kindSpec, commentNote, type PipelineDef, type BriefCtx } from './pipelines';
 import { openPipelineBuilder } from './pipeline-editor';
-import { AGENTS } from './agents-list';
+import { AGENTS, redriveAgent } from './agents-list';
 import { dbCredOptions, dbCredNote, loadDbCreds, dbCredMetas } from './dbcreds';
 
 const relay = (window as any).relay;
@@ -30,6 +30,7 @@ export interface PrCtx { provider: ProviderId; repo: string; dir: string; }
 export interface PrReviewDeps {
   openAgentTab: (o: { cwd: string; name: string; runCmd?: string; dbCredId?: string }) => Promise<string>; // open a terminal tab in the worktree, launching the agent (dbCredId → inject a DB credential template into its env); resolves to the tab id
   onAgentTabClosed: (cb: (tabId: string) => void) => void;                    // subscribe to terminal-closed → free the review slot held by that tab
+  tabActivity: (tabId: string) => number | undefined;                        // last-output ms of a stage's terminal → the review⇄fix watchdog's activity signal
   refresh: () => void;                                                        // re-render the PR rail (a run's status changed)
 }
 let deps: PrReviewDeps;
@@ -89,6 +90,8 @@ interface PrRunInfo {
   rounds?: number;       // count of review→fix cycles so far (loop-cap guard)
   lastReviewSummary?: string; // the latest review's concerns → injected into the next Fix brief + posted as a PR comment
   awaitingSince?: number; // ms timestamp the current gate started awaiting a verdict → the stage watchdog's clock
+  recoverStage?: number;  // after a watchdog stall: the stage index whose verdict we keep watching (late-verdict recovery)
+  recoverUntil?: number;  // ms deadline for that recovery watch — after it, give up (manual re-assign still available)
 }
 interface PrQueueItem { provider: ProviderId; repo: string; number: number; title: string; headText: string; base: string; source: string; cwd: string; agentId: string; agentName: string; pipeline: PipelineDef; brief0Rel: string; }
 
@@ -115,21 +118,28 @@ function stageBriefText(p: PipelineDef, idx: number, ctx: { number: number; titl
 
 /* ----------------------------- runner (staged, gated by verdict files) ----------------------------- */
 const MAX_REVIEW_ROUNDS = 3; // review→fix cycles before the auto-fix loop stops and asks for a human
-const STAGE_TIMEOUT_MS = 30 * 60 * 1000; // watchdog: a gate with no verdict for this long is treated as stuck (recovers a hung reuse / dead agent instead of polling forever with the slot held)
+// Watchdog (activity-based) — see issues.ts for the rationale. A gate is "stuck" only if its terminal has gone
+// silent for STAGE_IDLE_MS (a working agent streams output); STAGE_HARD_CAP_MS is an absolute backstop. On a stall
+// we free the slot but keep watching the verdict for RECOVER_GRACE_MS so a late-finishing agent still advances.
+const STAGE_IDLE_MS = 15 * 60 * 1000;         // no terminal output for this long ⇒ treat as stuck
+const STAGE_HARD_CAP_MS = 4 * 60 * 60 * 1000; // absolute ceiling regardless of activity
+const RECOVER_GRACE_MS = 60 * 60 * 1000;      // after a stall, keep watching for a late verdict this long
 // Desktop notification for a loop transition (respects the app's notifications setting).
 function notify(title: string, body: string): void {
   try { if (state.settings.notifications && typeof Notification !== 'undefined' && Notification.permission === 'granted') new Notification(title, { body: (body || '').slice(0, 180) }); } catch { /* best-effort */ }
 }
-// Post the review verdict as a PR comment (so the Fix agent reads the concerns + there's an audit trail).
-function postReviewComment(run: PrRunInfo, summary: string, passed: boolean): void {
-  const body = passed ? `## ✅ Slayer T review — passed\n\n${summary}` : `## 🔁 Slayer T review — changes requested\n\n${summary}\n\n_Auto-fixing and re-reviewing…_`;
-  void relay.providerPrComment(activeWs(), run.provider, run.repo, run.number, body).catch(() => {});
+// The review/fix VERDICT comments are now posted by the AGENTS themselves (Review Agent / Fix Agent), per the
+// worktree's CLAUDE.md protocol — see commentNote() + agent-guide.ts. The app only posts ORCHESTRATOR notices the
+// agent can't (e.g. "auto-fix stopped after N rounds"), clearly signed so it's distinct from the agent identities.
+function postOrchestratorNote(run: PrRunInfo, body: string): void {
+  void relay.providerPrComment(activeWs(), run.provider, run.repo, run.number, `### 🤖 Slayer T orchestrator\n\n${body}`).catch(() => {});
 }
 
 async function launchPrStage(key: string, idx: number): Promise<void> {
   const run = prRuns.get(key); if (!run) return;
   const stage = run.pipeline.stages[idx]; if (!stage) return;
   run.stageIdx = idx; run.awaiting = false; run.reason = undefined; run.agentTabId = undefined; // not awaiting yet — clear the stale verdict FIRST (below); tab rebound once it opens
+  run.recoverStage = undefined; run.recoverUntil = undefined; // (re)launching this run supersedes any pending recovery watch
   prRunStatus.set(key, stageToStatus(stage.kind)); // synchronous, so workingCount() is correct before the async prep
   const briefRel = idx === 0 ? run.brief0Rel : `.slayer/stage-${idx}.md`;
   // A referenced DB credential template → injected into this stage's env (every stage is its own shell) and its
@@ -137,7 +147,7 @@ async function launchPrStage(key: string, idx: number): Promise<void> {
   const dbCredId = prDbCredFor(run.provider, run.repo, run.number);
   // Stage 0's brief file is already on disk (pr-worktree-add wrote it); write later stages + clear this stage's
   // stale verdict so a reused worktree can't read a previous run's pass/fail. Then launch the agent on the FILE.
-  let brief = renderBrief(stage.brief, prBriefCtx(run, idx)) + dbCredNote(dbCredId);
+  let brief = renderBrief(stage.brief, prBriefCtx(run, idx)) + dbCredNote(dbCredId) + commentNote(stage.kind, run.provider); // ← post result on the PR per ./CLAUDE.md (Review/Fix Agent)
   // Auto-fix loop: hand the Fix stage the exact concerns the latest review raised.
   if (stage.kind === 'fix' && run.lastReviewSummary) brief += `\n\n---\n\n## Review concerns to address\n${run.lastReviewSummary}`;
   await relay.pipelinePrep(run.wt, idx === 0 ? null : briefRel, idx === 0 ? null : brief, idx).catch(() => {});
@@ -150,7 +160,7 @@ async function launchPrStage(key: string, idx: number): Promise<void> {
   const existingTab = run.stageTabs?.[stage.id];
   if (existingTab && agent?.interactive) {
     run.agentTabId = existingTab;
-    relay.ptyWrite(existingTab, agent.prompt(briefRel) + '\r');
+    redriveAgent(existingTab, agent.prompt(briefRel)); // type the next round's prompt + submit it as a SEPARATE Enter (else the REPL treats text+CR as a paste and doesn't run it)
     deps.refresh(); ensureStagePoll();
     return;
   }
@@ -199,7 +209,7 @@ function drainQueue(): void {
 // Verdict poll — advances GATE stages. Runs only while some run awaits a verdict, and stops itself otherwise.
 let stageTimer: number | null = null;
 function ensureStagePoll(): void {
-  const active = [...prRuns.values()].some((r) => r.awaiting);
+  const active = [...prRuns.values()].some((r) => r.awaiting || r.recoverStage != null);
   if (active && stageTimer == null) stageTimer = window.setInterval(() => void pollStages(), 4000);
   else if (!active && stageTimer != null) { clearInterval(stageTimer); stageTimer = null; }
 }
@@ -208,63 +218,91 @@ async function pollStages(): Promise<void> {
   if (polling) return;
   polling = true;
   try {
+    // ── awaiting gates: advance on a verdict, or trip the activity-based watchdog ──
     for (const [key, run] of [...prRuns.entries()].filter(([, r]) => r.awaiting)) {
-      // Watchdog: a gate with no verdict for STAGE_TIMEOUT_MS is treated as stuck (a hung terminal-reuse, a dead
-      // agent, or an agent that just never writes a verdict) → stop it and free the slot, rather than poll forever.
-      if (run.awaitingSince && Date.now() - run.awaitingSince > STAGE_TIMEOUT_MS) {
-        run.awaiting = false;
-        run.reason = `Timed out after ${Math.round(STAGE_TIMEOUT_MS / 60000)}m with no ${run.pipeline.stages[run.stageIdx].name} verdict — the agent may be stuck. Take over from its terminal, or re-assign.`;
-        prRunStatus.set(key, 'changes');
-        toast(`PR #${run.number} — ${run.pipeline.stages[run.stageIdx].name} timed out`, false);
-        notify(`PR #${run.number}: stage timed out`, run.reason);
-        drainQueue(); deps.refresh();
-        continue;
+      // Watchdog: stuck only if the terminal has gone SILENT for STAGE_IDLE_MS (a working agent keeps emitting) or
+      // blown past the STAGE_HARD_CAP_MS backstop. On a stall we free the slot but hand off to recovery (below), which
+      // keeps watching this stage's verdict so a late-finishing agent's real result is never thrown away.
+      if (run.awaitingSince) {
+        const act = run.agentTabId ? deps.tabActivity(run.agentTabId) : undefined;
+        const idleFor = Date.now() - Math.max(run.awaitingSince, act || 0);
+        const ranFor = Date.now() - run.awaitingSince;
+        if (idleFor > STAGE_IDLE_MS || ranFor > STAGE_HARD_CAP_MS) {
+          run.awaiting = false;
+          run.recoverStage = run.stageIdx; run.recoverUntil = Date.now() + RECOVER_GRACE_MS; // keep watching for a late verdict
+          const why = ranFor > STAGE_HARD_CAP_MS ? `ran ${Math.round(STAGE_HARD_CAP_MS / 3600000)}h without a verdict` : `produced no output for ${Math.round(STAGE_IDLE_MS / 60000)}m`;
+          run.reason = `${run.pipeline.stages[run.stageIdx].name} ${why} — the agent looks stuck. Take over from its terminal, or re-assign. (If it's still working, its verdict will still be picked up.)`;
+          prRunStatus.set(key, 'changes');
+          toast(`PR #${run.number} — ${run.pipeline.stages[run.stageIdx].name} stalled`, false);
+          notify(`PR #${run.number}: stage stalled`, run.reason);
+          drainQueue(); deps.refresh();
+          continue;
+        }
       }
       const v = await relay.pipelineVerdict(run.wt, run.stageIdx).catch(() => null);
       if (!prRuns.has(key) || !run.awaiting) continue;   // resolved/cleared while we awaited
       if (!v || !v.found) continue;                       // verdict not written yet — keep polling
       run.awaiting = false;
-      const fromStage = run.pipeline.stages[run.stageIdx];
-      const edge = nextEdge(fromStage, !!v.passed);
-      const target = edge && edge.to !== STOP ? stageIndexById(run.pipeline, edge.to) : -1;
-      const summary = (v.summary || '').trim();
-      if (edge && edge.to !== STOP && target >= 0) {
-        const toStage = run.pipeline.stages[target];
-        // Leaving a review with concerns → capture them for the Fix brief + post them as a PR comment.
-        if (fromStage.kind === 'review') { const s = summary || 'Changes requested.'; run.lastReviewSummary = s; postReviewComment(run, s, false); }
-        // Loop-cap guard: a review→fix cycle. After MAX rounds without a clean pass, stop and ask for a human.
-        if (fromStage.kind === 'review' && toStage.kind === 'fix') {
-          run.rounds = (run.rounds || 0) + 1;
-          if (run.rounds > MAX_REVIEW_ROUNDS) {
-            run.reason = `Still has concerns after ${MAX_REVIEW_ROUNDS} review⇄fix rounds — needs a human.\n\n${summary}`;
-            prRunStatus.set(key, 'changes');
-            postReviewComment(run, `⚠️ Auto-fix stopped after ${MAX_REVIEW_ROUNDS} rounds — a human should take over.\n\n${summary}`, false);
-            toast(`PR #${run.number} — auto-fix stopped after ${MAX_REVIEW_ROUNDS} rounds`, false);
-            notify(`PR #${run.number}: needs a human`, `Still has concerns after ${MAX_REVIEW_ROUNDS} review⇄fix rounds.`);
-            drainQueue(); deps.refresh();
-            continue; // don't advance — end the loop
-          }
-        }
-        toast(`PR #${run.number} — ${fromStage.name} done; starting ${toStage.name}` + (toStage.kind === 'fix' ? ` (round ${run.rounds})` : ''), true);
-        notify(`PR #${run.number}: ${toStage.name} starting`, fromStage.kind === 'review' ? summary : `${fromStage.name} done`);
-        await launchPrStage(key, target);
-      } else if (v.passed) {
-        // A valid/always edge to Stop, or no outgoing edge → the review passed: ready ✓.
-        if (fromStage.kind === 'review') postReviewComment(run, summary || 'Looks good.', true);
-        run.reason = summary || 'Looks good.'; prRunStatus.set(key, 'ready');
-        toast(`PR #${run.number} — review passed ✓ ready to merge`, true);
-        notify(`PR #${run.number}: review passed ✓`, summary || 'Ready to merge.');
-        drainQueue(); deps.refresh();
-      } else {
-        // The invalid off-ramp (or a failed verdict with no matching edge) → changes requested.
-        if (fromStage.kind === 'review') postReviewComment(run, summary || 'Changes requested.', false);
-        run.reason = summary || 'Changes requested.'; prRunStatus.set(key, 'changes');
-        toast(`PR #${run.number} — review: changes requested`);
-        notify(`PR #${run.number}: changes requested`, summary);
-        drainQueue(); deps.refresh();
-      }
+      run.recoverStage = undefined; run.recoverUntil = undefined; // a real, on-time verdict supersedes any recovery
+      await advanceOnVerdict(key, run, v);
+    }
+    // ── late-verdict recovery: a stalled gate whose verdict finally landed still advances (never lose finished work) ──
+    for (const [key, run] of [...prRuns.entries()].filter(([, r]) => r.recoverStage != null && !r.awaiting)) {
+      if (run.recoverUntil && Date.now() > run.recoverUntil) { run.recoverStage = undefined; run.recoverUntil = undefined; continue; } // grace expired — give up (re-assign still works)
+      const v = await relay.pipelineVerdict(run.wt, run.recoverStage!).catch(() => null);
+      if (!prRuns.has(key) || run.recoverStage == null) continue; // cleared while we read (re-assign / relaunch)
+      if (!v || !v.found) continue;                               // still no verdict — keep watching until grace expires
+      const e = nextEdge(run.pipeline.stages[run.recoverStage], !!v.passed);
+      const willAdvance = !!(e && e.to !== STOP && stageIndexById(run.pipeline, e.to) >= 0);
+      if (willAdvance && workingCount() >= CAP()) continue;       // no slot to resume into — retry next tick
+      run.stageIdx = run.recoverStage; run.recoverStage = undefined; run.recoverUntil = undefined; run.reason = undefined;
+      toast(`PR #${run.number} — verdict arrived after the stall; resuming`, true);
+      notify(`PR #${run.number}: resuming`, 'A late verdict landed — continuing the pipeline.');
+      await advanceOnVerdict(key, run, v);
     }
   } finally { polling = false; ensureStagePoll(); }
+}
+
+// Apply a gate stage's verdict: advance to the next stage, or finalize (ready ✓ / changes requested). Shared by
+// the awaiting poll and the late-verdict recovery poll so routing + PR-comment write-back can't drift between them.
+async function advanceOnVerdict(key: string, run: PrRunInfo, v: { passed?: boolean; summary?: string }): Promise<void> {
+  const fromStage = run.pipeline.stages[run.stageIdx];
+  const edge = nextEdge(fromStage, !!v.passed);
+  const target = edge && edge.to !== STOP ? stageIndexById(run.pipeline, edge.to) : -1;
+  const summary = (v.summary || '').trim();
+  if (edge && edge.to !== STOP && target >= 0) {
+    const toStage = run.pipeline.stages[target];
+    // Leaving a review with concerns → capture them for the Fix brief (the Review Agent already posted them on the PR).
+    if (fromStage.kind === 'review') run.lastReviewSummary = summary || 'Changes requested.';
+    // Loop-cap guard: a review→fix cycle. After MAX rounds without a clean pass, stop and ask for a human.
+    if (fromStage.kind === 'review' && toStage.kind === 'fix') {
+      run.rounds = (run.rounds || 0) + 1;
+      if (run.rounds > MAX_REVIEW_ROUNDS) {
+        run.reason = `Still has concerns after ${MAX_REVIEW_ROUNDS} review⇄fix rounds — needs a human.\n\n${summary}`;
+        prRunStatus.set(key, 'changes');
+        postOrchestratorNote(run, `⚠️ **Auto-fix stopped** after ${MAX_REVIEW_ROUNDS} review⇄fix rounds — a human should take over. Latest review concerns:\n\n${summary}`);
+        toast(`PR #${run.number} — auto-fix stopped after ${MAX_REVIEW_ROUNDS} rounds`, false);
+        notify(`PR #${run.number}: needs a human`, `Still has concerns after ${MAX_REVIEW_ROUNDS} review⇄fix rounds.`);
+        drainQueue(); deps.refresh();
+        return; // don't advance — end the loop
+      }
+    }
+    toast(`PR #${run.number} — ${fromStage.name} done; starting ${toStage.name}` + (toStage.kind === 'fix' ? ` (round ${run.rounds})` : ''), true);
+    notify(`PR #${run.number}: ${toStage.name} starting`, fromStage.kind === 'review' ? summary : `${fromStage.name} done`);
+    await launchPrStage(key, target);
+  } else if (v.passed) {
+    // A valid/always edge to Stop, or no outgoing edge → the review passed: ready ✓ (the Review Agent posted the verdict).
+    run.reason = summary || 'Looks good.'; prRunStatus.set(key, 'ready');
+    toast(`PR #${run.number} — review passed ✓ ready to merge`, true);
+    notify(`PR #${run.number}: review passed ✓`, summary || 'Ready to merge.');
+    drainQueue(); deps.refresh();
+  } else {
+    // The invalid off-ramp (or a failed verdict with no matching edge) → changes requested (the Review Agent posted it).
+    run.reason = summary || 'Changes requested.'; prRunStatus.set(key, 'changes');
+    toast(`PR #${run.number} — review: changes requested`);
+    notify(`PR #${run.number}: changes requested`, summary);
+    drainQueue(); deps.refresh();
+  }
 }
 
 /* ----------------------------- status + chip actions (used by the PR rail) ----------------------------- */
