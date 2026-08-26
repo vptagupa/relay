@@ -1040,7 +1040,7 @@ function prNotes(stage: StageDef, pipeline: PipelineDef, prov: ProviderId): stri
   const opensPr = pipeline.stages.some((s) => s.brief.includes('{closeStep}')); // a fix/fix-only stage opens a PR
   if (stage.brief.includes('{closeStep}')) {   // a stage that opens the PR/MR (Fix, Fix-only, or a custom one)
     const flow = pipeline.stages.map((s) => s.name).join(' → ');
-    out += `\n\n---\nWhen you open the pull request, add this exact line to its description so the pipeline that produced it is visible:\n\n> 🔧 Slayer T pipeline: ${flow}`;
+    out += `\n\n---\nWhen you open the pull request, structure its title + description using the "Opening a pull request" format in \`./CLAUDE.md\` (§5): a **Summary**, an **In plain terms** section that explains the change for a non-engineer (no jargon), **Changes**, and **Testing**. Include this exact marker line in the description:\n\n> 🔧 Slayer T pipeline: ${flow}`;
   }
   // Only when the pipeline actually opens a PR do review/fix stages have a PR to comment on. The detailed format +
   // identity live in the worktree's CLAUDE.md; commentNote just points the agent at it (and covers non-Claude agents).

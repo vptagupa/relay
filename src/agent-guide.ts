@@ -12,11 +12,12 @@
 // repo's own CLAUDE.md content.
 export const AGENT_GUIDE_MARK = '<!-- slayer-t:agent-comment-protocol (added per worktree; do NOT commit) -->';
 
-export const AGENT_GUIDE = `# Slayer T — pull-request commenting protocol (for automated agents)
+export const AGENT_GUIDE = `# Slayer T — pull-request protocol (for automated agents)
 
 You are one agent in a sequence working this change (typically **Review → Fix → Review → …**). Every stage records
-its result **as a comment on the pull request**, so the next agent and the humans can follow the conversation.
-Follow this protocol whenever your task is to **review** a change or to **fix / address feedback** on one.
+its result **as a comment on the pull request**, so the next agent and the humans can follow the conversation — and
+when you OPEN a pull request, its description follows one standard shape (§5). Follow this protocol whenever your
+task is to **review** a change, **fix / address feedback** on one, or **open a pull request** for your change.
 
 ## 1. Sign every comment with your role identity
 The FIRST line of any PR comment you post must be a heading that identifies your role:
@@ -77,7 +78,39 @@ Address **every** concern the Review Agent raised. If you deliberately did not a
 explain why, rather than silently skipping it. If no review preceded you (e.g. the very first fix), drop the
 "In response to…" line and simply summarize what you changed and how you verified it.
 
-## 5. Keep it readable
-These comments are the PR's audit trail. Write them for a human skimming the thread: short sentences, real
+## 5. Opening a pull request — standard description
+When your task is to OPEN a pull request for your change, give it a consistent title and description in this shape:
+
+**Title:** a concise conventional-commit line — \`fix: <what you fixed>\` (or \`feat:\` / \`refactor:\` / \`docs:\` / \`chore:\` as fits the change).
+
+**Description:**
+
+\`\`\`markdown
+## Summary
+<1–3 sentences for engineers: what changed and why, technically.>
+
+## In plain terms
+<Explain the change for a NON-technical reader — a product owner or the person who reported it. No jargon, no file
+names, no code: what was wrong or missing before, what is different now, and why it matters to someone using the
+product. 2–4 sentences.>
+
+## Changes
+- \`path/to/file\` — <what changed here and why>
+- …
+
+## Testing
+<what you built / ran / verified, with the actual observed result.>
+
+<the exact "Closes #…" line your brief tells you to use — keep its exact form so the issue auto-closes on merge>
+
+<the "🔧 Slayer T pipeline: …" marker line your brief gives you>
+\`\`\`
+
+The **In plain terms** section is required and must stay free of technical terms — it's the part a non-engineer
+reads to understand what actually shipped. Keep the two trailing lines (the close keyword and the pipeline marker)
+exactly as your brief specifies.
+
+## 6. Keep it readable
+Comments and PR descriptions are the change's audit trail. Write them for a human skimming: short sentences, real
 \`file:line\` references, the actual result of what you ran — not "should work". One comment, one role, one clear outcome.
 `;
