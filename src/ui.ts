@@ -63,3 +63,54 @@ export function makeEditable(el: HTMLElement, commit: (v: string) => void, onDon
   };
   el.onblur = () => done(true);
 }
+
+// A lazy hover-preview card for a list. Hovering a row (matching `rowSel`) for ~350ms calls `render(row)` for the
+// card's HTML (a string, a Promise for async data, or null to skip); the card is positioned beside the row and
+// shown. The card is HOVERABLE + scrollable (like the PR hover): a `mouseenter` on it cancels the pending hide, and
+// leaving a row only SCHEDULES a hide (a grace delay), so moving the mouse across the gap onto the card — or between
+// a row's own children — never closes it. Delegated on the container, so it survives row re-renders. Attach once.
+export function attachHoverCard(container: HTMLElement | null, rowSel: string, render: (row: HTMLElement) => string | null | Promise<string | null>): void {
+  if (!container) return;
+  let card: HTMLDivElement | null = null;
+  let showT: number | null = null;
+  let hideT: number | null = null;
+  let token = 0;   // bumped on every show/hide; a stale async render whose token changed is dropped
+  const cancelHide = (): void => { if (hideT) { clearTimeout(hideT); hideT = null; } };
+  const scheduleHide = (): void => { cancelHide(); hideT = window.setTimeout(() => { token++; if (card) card.style.display = 'none'; }, 240); };
+  const ensureCard = (): HTMLDivElement => {
+    if (!card) {
+      card = document.createElement('div'); card.className = 'hovercard'; document.body.appendChild(card);
+      card.addEventListener('mouseenter', cancelHide);   // moving ONTO the card keeps it open
+      card.addEventListener('mouseleave', scheduleHide); // leaving the card hides it after the grace delay
+    }
+    return card;
+  };
+  const position = (row: HTMLElement, c: HTMLDivElement): void => {
+    const r = row.getBoundingClientRect(); const w = c.offsetWidth || 330;
+    let left = r.left - w - 12; if (left < 8) left = r.right + 12;   // prefer LEFT of the (right-docked) rail
+    c.style.left = `${Math.max(8, Math.min(left, window.innerWidth - w - 8))}px`;
+    c.style.top = `${Math.max(8, Math.min(r.top, window.innerHeight - c.offsetHeight - 8))}px`;
+  };
+  container.addEventListener('mouseover', (e) => {
+    const row = (e.target as HTMLElement).closest(rowSel) as HTMLElement | null;
+    if (!row || !container.contains(row)) return;
+    cancelHide();
+    if (showT) clearTimeout(showT);
+    const my = ++token;
+    showT = window.setTimeout(async () => {
+      let html: string | null = null;
+      try { html = await Promise.resolve(render(row)); } catch { html = null; }
+      if (my !== token || !html) return;               // cursor moved on / nothing to show
+      const c = ensureCard(); c.innerHTML = html; c.scrollTop = 0; c.style.display = 'block';
+      position(row, c);
+    }, 350);
+  });
+  container.addEventListener('mouseout', (e) => {
+    const to = (e as MouseEvent).relatedTarget as HTMLElement | null;
+    // Keep it open while moving WITHIN a row's children, onto another row, or onto the card itself.
+    if (to && ((to.closest && to.closest(rowSel)) || card?.contains(to))) return;
+    if (showT) { clearTimeout(showT); showT = null; }   // hadn't shown yet → cancel the pending show
+    scheduleHide();                                     // shown → hide after a grace delay (bridges the row→card gap)
+  });
+  container.addEventListener('scroll', () => { if (showT) { clearTimeout(showT); showT = null; } token++; if (card) card.style.display = 'none'; }, true);
+}

@@ -2,7 +2,7 @@ import { contextBridge, ipcRenderer, clipboard } from 'electron';
 import * as os from 'node:os';
 import type { Settings, SavedSession, AgentEvent, ApprovalRequest, ChatTurn, Workspace, WorkspaceDef, WorkspaceBlueprint, Block, Issue, DbCredMeta } from './shared/types';
 import type { ProviderId } from './providers'; // type-only — erased at build, no main-process code pulled in
-import type { PmResult, PmProject, PmTask, PmRef, PmProviderMeta, PmConfig } from './pm/types'; // type-only — erased at build, no main-only code pulled in
+import type { PmResult, PmProject, PmTask, PmRef, PmComment, PmProviderMeta, PmConfig } from './pm/types'; // type-only — erased at build, no main-only code pulled in
 
 // Real identity for the Blocks-view prompt line (user@host + home for ~ shortening).
 function sysInfo() { try { return { user: os.userInfo().username, host: os.hostname().split('.')[0], home: os.homedir() }; } catch { return { user: 'user', host: 'relay', home: '' }; } }
@@ -84,6 +84,7 @@ const api = {
   pmTaskUpdate: (ws: string, provider: string, idOrKey: string, patch: Record<string, unknown>): Promise<PmResult<{ id: string; key: string }>> => ipcRenderer.invoke('pm:task-update', { ws, provider, idOrKey, patch }),
   pmReference: (ws: string, provider: string, name: string): Promise<PmResult<PmRef[]>> => ipcRenderer.invoke('pm:reference', { ws, provider, name }),
   pmComment: (ws: string, provider: string, idOrKey: string, body: string): Promise<PmResult<unknown>> => ipcRenderer.invoke('pm:comment', { ws, provider, idOrKey, body }),
+  pmComments: (ws: string, provider: string, idOrKey: string): Promise<PmResult<PmComment[]>> => ipcRenderer.invoke('pm:comments', { ws, provider, idOrKey }),
   syncStatus: (): Promise<{ configured: boolean; connected: boolean; email: string; hasPassphrase: boolean; lastPush: number; lastPull: number; remoteExists: boolean; remoteModified: string }> => ipcRenderer.invoke('sync:status'),
   syncHasPassphrase: (): Promise<{ has: boolean }> => ipcRenderer.invoke('sync:has-passphrase'),
   syncSetPassphrase: (passphrase: string): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke('sync:set-passphrase', { passphrase }),
@@ -224,6 +225,8 @@ const api = {
   // --- file browser ---
   fsList: (dir: string): Promise<{ path: string; parent: string; entries: { name: string; isDir: boolean }[]; truncated?: boolean; error?: string }> => ipcRenderer.invoke('fs:list', dir),
   fsOpen: (p: string): Promise<{ method: 'editor' | 'default' | 'error'; editor?: string; error?: string }> => ipcRenderer.invoke('fs:open', p),
+  fsRead: (p: string): Promise<{ ok: boolean; text?: string; size?: number; error?: string }> => ipcRenderer.invoke('fs:read', p),
+  fsWrite: (p: string, content: string): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke('fs:write', { path: p, content }),
   // Open a path a terminal printed, resolved against the tab's cwd (for clickable file-path links). No-op if it's not a real file.
   revealPath: (cwd: string, target: string): Promise<{ ok: boolean; method?: string }> => ipcRenderer.invoke('fs:open-rel', { cwd, target }),
 

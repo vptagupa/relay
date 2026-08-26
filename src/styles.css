@@ -287,6 +287,47 @@ button{font-family:inherit;color:inherit;cursor:pointer;border:none;background:n
 
 .term-host{flex:1;min-height:0;position:relative}
 .xterm-wrap{position:absolute;inset:0;padding:8px 10px}
+/* ---- in-app file viewer / editor (kind:'file' tabs) ---- */
+.file-wrap{position:absolute;inset:0;display:flex;flex-direction:column;background:var(--surface);min-height:0}
+.file-wrap.hidden{display:none} /* the app hides pane hosts via <kind>-wrap.hidden, not a generic .hidden — match that */
+.fv-msg{margin:auto;color:var(--muted);font:12px var(--sans);padding:20px}
+.fv-msg.err{color:#e0574a}
+.fv-bar{flex:none;display:flex;align-items:center;gap:10px;padding:6px 10px;border-bottom:1px solid var(--border);background:var(--surface-2)}
+.fv-bar .fv-name{font:12px var(--sans);color:var(--text);font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:50%}
+.fv-bar .fv-lang{font:10px var(--mono);color:var(--muted);border:1px solid var(--border);border-radius:5px;padding:1px 6px;flex:none}
+.fv-bar .fv-ro{font:9.5px var(--mono);color:var(--muted);text-transform:uppercase;letter-spacing:.05em;flex:none}
+.fv-bar .fv-spacer{flex:1}
+.fv-btn{flex:none;font:11px var(--sans);border:1px solid var(--border);background:var(--surface-3);color:var(--text-dim);border-radius:6px;padding:3px 10px;cursor:pointer}
+.fv-btn:hover{border-color:var(--accent-line);color:var(--text)}
+.fv-btn.pri{background:var(--accent);border-color:var(--accent);color:#fff}
+.fv-body{flex:1;min-height:0;position:relative;overflow:hidden}
+.fv-scroll{position:absolute;inset:0;display:flex;overflow-y:auto;font:12.5px/1.55 var(--mono)}
+.fv-scroll:focus{outline:none}
+.fv-gutter{flex:none;margin:0;padding:10px 10px 10px 12px;text-align:right;color:var(--muted);background:var(--surface-2);border-right:1px solid var(--border);user-select:none;white-space:pre;font:inherit}
+.fv-codepre{flex:1;margin:0;padding:10px 12px;overflow-x:auto;white-space:pre;font:inherit;color:var(--text)}
+.fv-codepre code.hljs{background:none;padding:0;font:inherit;color:inherit;white-space:pre}
+/* Edit mode: a transparent textarea over a live-highlighted <pre>, plus a scroll-synced gutter. All layers share
+   the same font/padding/line metrics so the caret sits exactly on the colored text. */
+.fv-editscroll{position:absolute;inset:0;display:flex;overflow:hidden;font:12.5px/1.55 var(--mono);background:var(--surface)}
+.fv-egutwrap{flex:none;overflow:hidden;background:var(--surface-2);border-right:1px solid var(--border)}
+.fv-egutter{margin:0;padding:10px 10px 10px 12px;text-align:right;color:var(--muted);white-space:pre;font:inherit;user-select:none;will-change:transform}
+.fv-editarea{position:relative;flex:1;min-width:0;overflow:hidden}
+.fv-hl{position:absolute;inset:0;margin:0;padding:10px 12px;overflow:hidden;white-space:pre;pointer-events:none;font:inherit;color:var(--text)}
+.fv-hl code.hljs{background:none;padding:0;font:inherit;color:inherit;white-space:pre}
+.fv-edit{position:absolute;inset:0;margin:0;padding:10px 12px;border:0;outline:none;resize:none;overflow:auto;white-space:pre;font:inherit;tab-size:2;background:transparent;color:transparent;caret-color:var(--text)}
+.fv-edit::selection{background:rgba(120,150,255,.28)}
+/* highlight.js token palette — mid-tones that read on the app's dark + light themes; comments use the theme muted */
+.hljs-comment,.hljs-quote{color:var(--muted);font-style:italic}
+.hljs-keyword,.hljs-selector-tag,.hljs-literal,.hljs-section,.hljs-doctag,.hljs-type,.hljs-name,.hljs-strong{color:#c678dd}
+.hljs-string,.hljs-attr,.hljs-template-string,.hljs-addition,.hljs-regexp{color:#98c379}
+.hljs-number,.hljs-symbol,.hljs-bullet,.hljs-meta,.hljs-link{color:#d19a66}
+.hljs-title,.hljs-title\.function_,.hljs-built_in{color:#61afef}
+.hljs-class .hljs-title,.hljs-params,.hljs-selector-attr{color:#e5c07b}
+.hljs-variable,.hljs-attribute,.hljs-property,.hljs-selector-class,.hljs-selector-id,.hljs-deletion,.hljs-tag{color:#e06c75}
+/* Settings: syntax-highlighting language toggles */
+.hl-langs{display:flex;flex-wrap:wrap;gap:6px 12px;margin-top:2px}
+.hl-lang{display:flex;align-items:center;gap:5px;font:11.5px var(--sans);color:var(--text-dim);cursor:pointer}
+.hl-lang input{margin:0;flex:none;accent-color:var(--accent)}
 .xterm-wrap.hidden{display:none}
 .term-empty{position:absolute;inset:0;display:grid;place-items:center;color:var(--muted);font-family:var(--mono);font-size:13px;text-align:center;line-height:1.7}
 
@@ -415,6 +456,8 @@ button{font-family:inherit;color:inherit;cursor:pointer;border:none;background:n
 .pm-title{flex:1;min-width:0;font-size:12.5px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .pm-task-fields{display:flex;flex-wrap:wrap;gap:6px;margin-top:7px}
 .pm-prio{font-size:10.5px;color:var(--muted);border:1px solid var(--border);border-radius:5px;padding:1px 6px;align-self:center}
+.pm-assignee{font-size:10.5px;color:var(--text-dim);border:1px solid var(--border);border-radius:999px;padding:1px 8px;align-self:center;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pm-assignee.unassigned{color:var(--muted);font-style:italic}
 .pm-field{background:var(--surface-3);border:1px solid var(--border-strong);border-radius:7px;padding:3px 6px;color:var(--text);font:11px var(--sans);max-width:140px}
 .pm-field:disabled{opacity:.6}
 .pm-empty{padding:20px 14px;text-align:center;color:var(--muted);font-size:12px;line-height:1.6}
@@ -424,6 +467,18 @@ button{font-family:inherit;color:inherit;cursor:pointer;border:none;background:n
 .pm-filter-input{flex:1 1 100%;min-width:0;background:var(--surface-2);border:1px solid var(--border);border-radius:7px;padding:5px 8px;color:var(--text);font:11.5px var(--sans)}
 .pm-filter-sel,.pm-filter-combo{flex:1 1 45%;min-width:0;background:var(--surface-2);border:1px solid var(--border);border-radius:7px;padding:4px 6px;color:var(--text);font:11px var(--sans)}
 .pm-filter-input:focus,.pm-filter-sel:focus,.pm-filter-combo:focus{outline:none;border-color:var(--accent-line)}
+/* Hover-preview card (task details + comments) — non-interactive, capped */
+.hovercard{position:fixed;z-index:9000;width:330px;max-height:62vh;overflow-y:auto;background:var(--surface);border:1px solid var(--border-strong);border-radius:10px;box-shadow:var(--shadow);padding:12px 13px;color:var(--text);pointer-events:auto;display:none}
+.hovercard .hc-hd{font:13px var(--sans);margin-bottom:4px;display:flex;gap:6px;align-items:baseline;justify-content:space-between}
+.hovercard .hc-hd b{color:var(--text);overflow:hidden;text-overflow:ellipsis}
+.hovercard .hc-meta{font:10.5px var(--mono);color:var(--muted);display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:6px}
+.hovercard .hc-sec{margin-top:9px}
+.hovercard .hc-lbl{font:9px var(--mono);text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin-bottom:4px}
+.hovercard .hc-body{white-space:pre-wrap;color:var(--text-dim);font:11.5px/1.45 var(--sans)}
+.hovercard .hc-cmt{border-left:2px solid var(--accent-line);padding:1px 0 1px 8px;margin-bottom:7px}
+.hovercard .hc-cmt-hd{font:9.5px var(--mono);color:var(--muted);margin-bottom:2px}
+.hovercard .hc-cmt-body{white-space:pre-wrap;color:var(--text-dim);font:11px/1.4 var(--sans)}
+.hovercard .mut{color:var(--muted);font-size:11px}
 .pm-pager{display:flex;align-items:center;justify-content:center;gap:10px;padding:6px}
 .pm-pager:empty{display:none}
 .pm-page-btn{background:var(--surface-2);border:1px solid var(--border-strong);border-radius:7px;padding:4px 10px;color:var(--text);font:11.5px var(--sans);cursor:pointer}
@@ -1092,6 +1147,8 @@ body.tabdrag .dz{display:block;pointer-events:auto}
 .tk-issue{color:var(--accent-2);cursor:pointer;flex:none}
 .tk-issue:hover{text-decoration:underline}
 .tk-issue.closed{color:var(--muted)}
+.tk-issue.nolink{cursor:default}
+.tk-issue.nolink:hover{text-decoration:none}
 .tk-result{font:10.5px/1.45 var(--sans);color:var(--text-dim);white-space:pre-wrap}
 .tk-result.trunc{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;white-space:normal}
 .tk-side{flex:none;display:flex;align-items:center;gap:6px}

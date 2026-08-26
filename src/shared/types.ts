@@ -132,7 +132,8 @@ export interface Settings {
   shellIntegration: boolean;        // inject command-block markers into new shells
   useWinpty?: boolean;              // Windows: use the legacy winpty backend instead of ConPTY (fixes PCs where ConPTY is broken — terminals spawn but I/O is dead / TUIs crash)
   blocksView: boolean;              // Warp-style blocks as the main view (vs classic xterm)
-  fileEditor?: string;              // editor id (see shared/editors.ts) the Files list opens a code file in; default 'code' (VS Code), 'system' = OS default
+  fileEditor?: string;              // editor id (see shared/editors.ts) the Files list opens a code file in; default 'code' (VS Code), 'system' = open in an in-app viewer tab
+  highlightLangs?: Record<string, boolean>; // per-language syntax-highlighting toggle for the in-app file viewer (lang id → enabled); absent/true = on, false = off
   notifications: boolean;           // desktop notification when a long command finishes unfocused
   bookmarks: Bookmark[];            // saved command snippets
   bookmarkGroups: BookmarkGroup[];  // groups for organizing bookmarks (display order = array order)

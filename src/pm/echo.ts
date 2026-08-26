@@ -2,7 +2,7 @@
 // (/api/v1) for projects + tasks. Implements PmProvider using the shared configStore / tokenStore / pmReq, so
 // the provider-specific part is just: its endpoints, its request shapes, and the mapping to the normalized model.
 
-import type { PmProvider, PmResult, PmProject, PmTask, PmRef, ConfigField, PmTaskQuery } from './types';
+import type { PmProvider, PmResult, PmProject, PmTask, PmRef, PmComment, ConfigField, PmTaskQuery } from './types';
 import { pmReq, configStore, tokenStore, genVerifier, challenge, str, enc } from './shared';
 
 const ID = 'echo';
@@ -109,6 +109,7 @@ const toTask = (t: Record<string, unknown>): PmTask => ({
   url: undefined, description: str(t.description) || undefined,
 });
 const toRef = (r: Record<string, unknown>): PmRef => ({ id: str(r.id), title: str(r.title) || str(r.name) || str(r.display_name) || str(r.email) });
+const toComment = (c: Record<string, unknown>): PmComment => ({ id: str(c.id), author: str(c.author_email) || undefined, body: str(c.body), at: str(c.created_at) || undefined });
 const arr = (x: unknown): Record<string, unknown>[] => (Array.isArray(x) ? (x as Record<string, unknown>[]) : []);
 // Re-type an error result to the caller's data shape (data is absent on failure, so this is safe).
 const failed = <T>(r: PmResult<unknown>): PmResult<T> => ({ ok: false, status: r.status, error: r.error, code: r.code });
@@ -180,4 +181,6 @@ export const echo: PmProvider = {
   // tasks:write). @mentions notify and updated_at bumps, same as the UI. Goes through apiFetch (Bearer token +
   // 401-refresh + Echo error parsing) like every other call.
   postComment(ws, idOrKey, body) { return apiFetch(ws, 'POST', `/api/v1/tasks/${enc(idOrKey)}/comments`, { body }); },
+  // Read the thread (oldest-first), for the hover preview / detail view. Same Bearer + 401-refresh path.
+  async listComments(ws, idOrKey) { const r = await apiFetch<Record<string, unknown>[]>(ws, 'GET', `/api/v1/tasks/${enc(idOrKey)}/comments?limit=100`); return r.ok ? { ok: true, status: r.status, data: arr(r.data).map(toComment) } : failed<PmComment[]>(r); },
 };

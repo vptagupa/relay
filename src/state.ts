@@ -10,7 +10,10 @@ import type { Settings, SavedSession, ChatTurn, Block } from './shared/types';
 import { DEFAULT_MODEL } from './shared/models';
 import type { LNode } from './layout';
 
-export interface Tab { id: string; name: string; model: string; cwd: string; repo?: string; repoCwd?: string; libId?: string; term: Terminal; fit: FitAddon; ser: SerializeAddon; el: HTMLElement; lastCols?: number; lastRows?: number; fitted?: boolean; replayQ?: string; tabBg?: string; tabFg?: string; bodyBg?: string; bodyFg?: string; chat: ChatTurn[]; blocks: Block[]; bkNonce: string; cmdHistory: string[]; histIdx: number; liveInteractive: boolean; group: number; }
+// A tab is polymorphic: kind 'terminal' (the default — an xterm + pty) or 'file' (an in-app code viewer/editor).
+// term/fit/ser are terminal-only (undefined for file tabs); filePath is file-only. `el` is the generic pane host
+// element for either kind. New content kinds slot in the same way — add to the union + guard the terminal-only sites.
+export interface Tab { id: string; name: string; model: string; cwd: string; repo?: string; repoCwd?: string; libId?: string; kind: 'terminal' | 'file'; term?: Terminal; fit?: FitAddon; ser?: SerializeAddon; el: HTMLElement; filePath?: string; fileDirty?: boolean; lastCols?: number; lastRows?: number; fitted?: boolean; replayQ?: string; tabBg?: string; tabFg?: string; bodyBg?: string; bodyFg?: string; chat: ChatTurn[]; blocks: Block[]; bkNonce: string; cmdHistory: string[]; histIdx: number; liveInteractive: boolean; group: number; }
 
 export const state = {
   tabs: [] as Tab[],

@@ -92,7 +92,10 @@ export interface PmProvider {
   updateTask(ws: string, idOrKey: string, patch: Record<string, unknown>): Promise<PmResult<{ id: string; key: string }>>;
   reference(ws: string, name: string): Promise<PmResult<PmRef[]>>;
   postComment?(ws: string, idOrKey: string, body: string): Promise<PmResult<unknown>>; // append a comment on the task's thread (present iff capabilities.canComment)
+  listComments?(ws: string, idOrKey: string): Promise<PmResult<PmComment[]>>;           // read the task's comment thread (present iff capabilities.canComment)
 }
+// A comment on a provider task's thread — for the hover preview / detail view.
+export interface PmComment { id: string; author?: string; body: string; at?: string }
 
 // SAFE metadata sent to the renderer — no functions, no secrets — so the UI (picker + config form + editor)
 // builds itself entirely from data. Adding a provider needs zero UI change because the UI reads this.

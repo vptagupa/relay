@@ -179,7 +179,8 @@ export function appHtml(panes: string): string {
       <div class="set-panel active" data-panel="general">
         <div class="field"><label>Theme</label><div class="theme-grid" id="themeGrid"></div><div class="fhint">Recolors the whole app and the terminal. Quick-cycle with the ◐ button in the title bar.</div></div>
         <div class="field"><label>Project folder</label><div class="row"><input id="setWs" readonly placeholder="none"><button class="set" id="setWsBtn">Choose…</button></div></div>
-        <div class="field"><label>Open files in</label><select id="fileEditorSel"></select><div class="fhint">Which editor a clicked file (in the Files list or a terminal path) opens in. Non-code files always use your OS default, and it falls back to the OS default if the editor isn't installed.</div></div>
+        <div class="field"><label>Open files in</label><select id="fileEditorSel"></select><div class="fhint">Which editor a clicked file (in the Files list or a terminal path) opens in. <b>System default</b> opens it in a new in-app viewer tab; any other editor launches externally (falling back to the OS default if it isn't installed).</div></div>
+        <div class="field"><label>Syntax highlighting <span class="opt">in-app viewer</span></label><div class="hl-langs" id="hlLangs"></div><div class="fhint">Which languages are colored in the built-in file viewer. Files still open regardless — this only toggles highlighting.</div></div>
         <div class="field"><label>Something broke?</label><div class="row"><button class="set" id="btnReportBug">Report a bug…</button><button class="set" id="btnRevealLog">Reveal error log</button></div><div class="fhint">Collects the app version, OS, and the recent error log (secrets scrubbed), copies it to your clipboard, and opens a pre-filled GitHub issue.</div></div>
       </div>
       <!-- Agents & Pipelines -->

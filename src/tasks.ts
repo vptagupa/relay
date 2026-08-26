@@ -5,7 +5,7 @@
 
 import { state } from './state';
 import { $, esc } from './dom';
-import { toast, addSearch } from './ui';
+import { toast, addSearch, attachHoverCard } from './ui';
 import { stageBrief, renderBrief } from './pipelines';
 import { AGENTS } from './agents-list';
 import { dbCredOptions, dbCredNote, loadDbCreds, dbCredMetas } from './dbcreds';
@@ -499,6 +499,7 @@ export function initTasks(d: TasksDeps): void {
   deps.onAgentTabClosed(onAgentTabClosed);   // closing a validate/author terminal auto-resets the task to draft
   const nw = $('#taskNew'); if (nw) nw.onclick = () => openTaskForm();
   const rsel = $('#taskRepo'); if (rsel) rsel.onclick = (e) => { e.stopPropagation(); openTaskRepoMenu(); };
+  attachHoverCard($('#taskList'), '.tk-row', (row) => taskHoverHtml(row.dataset.id || '')); // hover a task → details preview
   recoverStuckTasks();   // clear any "validating…" left stuck by a previous session before the first render
   render();
   // Resume filed-issue tracking after a reboot: the persisted status shows immediately; re-sync shortly after.
@@ -506,3 +507,16 @@ export function initTasks(d: TasksDeps): void {
   if (Object.values(state.settings.tasksByWs || {}).some((list) => (list || []).some(needsSync))) setTimeout(() => void trackIssues(), 8000);
 }
 export function renderTasks(): void { render(); }   // called on workspace switch so the list reflects the active ws
+
+// Hover-preview HTML for a local task row: its details + the validation result (the local equivalent of a comment
+// thread — a task has no provider comment thread of its own). Everything's already in the in-memory Task.
+function taskHoverHtml(id: string): string | null {
+  const t = tasksFor(wsKey()).find((x) => x.id === id); if (!t) return null;
+  const chips = (t.tags || []).map((tg) => `<span class="tk-tagchip ${esc(tg)}">${esc(LABEL_NAME[tg] || tg)}</span>`).join('');
+  const desc = (t.body || '').trim(), result = (t.result || '').trim();
+  return `<div class="hc-hd"><b>${esc(t.title)}</b></div>`
+    + `<div class="hc-meta"><span>${esc(t.repo)}</span> · <span>${esc(STATUS_LABEL[t.status])}</span>${chips}</div>`
+    + (desc ? `<div class="hc-sec"><div class="hc-lbl">Description</div><div class="hc-body">${esc(desc)}</div></div>` : '')
+    + (result ? `<div class="hc-sec"><div class="hc-lbl">Validation result</div><div class="hc-body">${esc(result)}</div></div>` : '')
+    + (t.issueUrl ? `<div class="hc-sec"><div class="hc-lbl">Filed issue</div><div class="hc-body">#${t.issueNumber} — ${esc(t.issueUrl)}</div></div>` : '');
+}

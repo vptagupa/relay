@@ -17,6 +17,7 @@ import { groupOf, addToList, reorderBookmark, removeGroup } from './bookmarks';
 import { toast, makeEditable } from './ui';
 import { filterHistory, railEntry } from './history';
 import { initFiles, renderFiles } from './files';
+import { initFileViewer, mountFileViewer, disposeFileViewer, focusFileViewer, isFileDirty } from './fileviewer';
 import { initBlockView, blockHtml, bvBlockHtml, collapsedBlocks, fmtDur } from './block-view';
 import { openTplMenu, saveAsTemplate, runStartupIfPending } from './blueprints';
 import { initWorkspaces, loadWorkspaceMeta, restoreWorkspaceSnapshot, settleDeeplink, createWorkspace, openWsMenu, closeWsMenu, handleDeeplink, setActiveWsRoot, setActiveWsTheme, getActiveWsId, duplicateWorkspace, exportWorkspace, importWorkspace, toggleTrust, copyWorkspaceLink, activeWorkspaceDef, isWorkspaceTrusted, wsNameOf } from './workspaces';
@@ -31,6 +32,7 @@ import { initRepoDeps, refreshRepoDeps } from './repo-deps';
 import { initBriefNotes, refreshBriefNotes } from './brief-notes';
 import type { Settings, SavedSession, AgentEvent, ApprovalRequest, ChatTurn, OpenTab, Workspace, WorkspaceDef, Block, Bookmark, BookmarkGroup } from './shared/types';
 import { EDITORS, DEFAULT_EDITOR } from './shared/editors';
+import { LANGUAGES } from './shared/languages';
 import { STAGE_KINDS, kindSpec, type StageKind } from './pipelines';
 
 // TEMP DIAG: surface full stacks (minify is off) for the init crash.
@@ -145,7 +147,7 @@ async function newTab(seed?: Partial<OpenTab> & { libId?: string; runCmd?: strin
   // Open into the focused pane (or the tab's saved group on restore); never a stale/hidden pane.
   let group = (seed as { group?: number })?.group ?? state.focus;
   if (activate && !leaves(state.layout).includes(group)) group = state.focus;
-  const tab: Tab = { id, name: seed?.name || (n > 1 ? `terminal ${n}` : 'terminal'), model: seed?.model || state.settings.defaultModel, cwd, libId: seed?.libId, term, fit, ser, el, tabBg: seed?.tabBg, tabFg: seed?.tabFg, bodyBg: seed?.bodyBg, bodyFg: seed?.bodyFg, chat: seed?.chat ? [...seed.chat] : [], blocks: seed?.blocks ? [...seed.blocks] : [], bkNonce: seed?.bkNonce || uid(), cmdHistory: [], histIdx: 0, liveInteractive: false, group };
+  const tab: Tab = { id, name: seed?.name || (n > 1 ? `terminal ${n}` : 'terminal'), model: seed?.model || state.settings.defaultModel, cwd, libId: seed?.libId, kind: 'terminal', term, fit, ser, el, tabBg: seed?.tabBg, tabFg: seed?.tabFg, bodyBg: seed?.bodyBg, bodyFg: seed?.bodyFg, chat: seed?.chat ? [...seed.chat] : [], blocks: seed?.blocks ? [...seed.blocks] : [], bkNonce: seed?.bkNonce || uid(), cmdHistory: [], histIdx: 0, liveInteractive: false, group };
   state.tabs.push(tab);
   applyTermColors(tab); // honor any restored per-terminal body/text colors
   wireTermLinks(term, tab); // clickable URLs + file paths in the terminal
@@ -228,6 +230,29 @@ async function newTab(seed?: Partial<OpenTab> & { libId?: string; runCmd?: strin
   void resolveTabRepo(tab); // fill the tab's repo (for its hover tooltip) from the cwd's git remote — non-blocking
   return tab;
 }
+// Open a file in a new in-app viewer/editor tab (kind:'file'). Reuses an already-open tab for the same path.
+// Mirrors newTab's mount+activate but with a file-viewer element instead of an xterm — no pty, no terminal chrome.
+async function newFileTab(filePath: string): Promise<Tab> {
+  const existing = state.tabs.find((t) => t.kind === 'file' && t.filePath === filePath);
+  if (existing) { switchTab(existing.id); return existing; }
+  const id = uid();
+  const name = filePath.split(/[\\/]/).pop() || filePath;
+  const cwd = filePath.replace(/[\\/][^\\/]*$/, '') || filePath;
+  const el = document.createElement('div'); el.className = 'file-wrap hidden';
+  E(P_HOST[0]).appendChild(el); // temporary mount; the activate block below moves it to the focused pane host
+  let group = state.focus; if (!leaves(state.layout).includes(group)) group = leaves(state.layout)[0] ?? 0;
+  const tab: Tab = { id, name, model: state.settings.defaultModel, cwd, kind: 'file', el, filePath, chat: [], blocks: [], bkNonce: uid(), cmdHistory: [], histIdx: 0, liveInteractive: false, group };
+  state.tabs.push(tab);
+  mountFileViewer(id, el, filePath);
+  // Activate — same el-based reveal newTab uses for terminals.
+  state.gv[group] = id; state.focus = group; state.active = id;
+  E('#termEmpty').style.display = 'none';
+  const host = E(P_HOST[group]); if (el.parentElement !== host) host.appendChild(el);
+  if (group > 0) (E(PANE[group]) as HTMLElement).style.display = '';
+  for (const x of state.tabs) x.el.classList.toggle('hidden', x.id !== state.gv[x.group]);
+  renderTabs(); switchTab(id); persistWorkspace();
+  return tab;
+}
 // Resolve the git repo (owner/name) for a tab's cwd — shown in the tab's hover tooltip when available. A cheap
 // local git call, deduped by cwd (cd within the same repo won't refetch), re-rendering the tabs when it changes.
 async function resolveTabRepo(t: Tab): Promise<void> {
@@ -251,6 +276,7 @@ async function addFolderTab() {
 // Fit the terminal to its container and resize the pty only when the size actually
 // changed — a no-op resize still makes the shell repaint (flash).
 function applyResize(t: Tab) {
+  if (t.kind !== 'terminal' || !t.term || !t.fit) return; // file tabs have no terminal to fit/resize
   t.fit.fit();
   const c = t.term.cols, r = t.term.rows;
   if (c > 0 && r > 0) {
@@ -373,7 +399,8 @@ function focusGroup(g: number) {
   if (state.maxG !== null && state.maxG !== g) { state.maxG = null; reconcilePanes(); } // leaving a maximized pane restores the grid
   for (let i = 0; i < 4; i++) (E(PANE[i]) as HTMLElement).classList.toggle('focused', state.groups > 1 && i === g);
   reflectModel(); updateStatus();
-  if (blocksMode(t)) (E(P_CMD[g]) as HTMLElement)?.focus(); else t.term.focus();
+  if (t.kind === 'file') focusFileViewer(t.id);
+  else if (blocksMode(t)) (E(P_CMD[g]) as HTMLElement)?.focus(); else t.term?.focus();
 }
 // Move the focused tab to the next/prev pane (Ctrl+Alt+←/→). Splits off a new pane at the edge.
 function moveActiveToGroup(dir: -1 | 1) {
@@ -433,7 +460,10 @@ function closeConfirm(v: boolean) {
 const agentTabCloseSubs: ((tabId: string) => void)[] = [];
 async function closeTab(id: string, skipConfirm = false) {
   const t0 = state.tabs.find((x) => x.id === id); if (!t0) return;
-  if (!skipConfirm) {
+  if (t0.kind === 'file') {
+    // A file tab closes silently unless it has unsaved edits — then confirm the discard.
+    if (!skipConfirm && isFileDirty(t0.id) && !(await confirmDialog('Discard unsaved changes?', `“${t0.name}” has edits you haven't saved.`, 'Discard'))) return;
+  } else if (!skipConfirm) {
     const saved = t0.libId || state.library.some((s) => s.termId === t0.id);
     const detail = saved
       ? `“${t0.name}” is saved in your Library — you can reopen it anytime with its history.`
@@ -442,12 +472,16 @@ async function closeTab(id: string, skipConfirm = false) {
   }
   const i = state.tabs.findIndex((x) => x.id === id); if (i < 0) return; // re-find (state may have changed during confirm)
   const [t] = state.tabs.splice(i, 1);
-  flushTabToLibrary(t); // keep its Library entry current so reopening restores the latest history
-  // Keep a SAVED terminal's shell alive so it can be resumed from the Library; kill an unsaved
-  // one's shell outright — nothing can reattach to it, so leaving it running just leaks processes.
-  const resumable = t.libId || state.library.some((s) => s.termId === t.id);
-  if (resumable) relay.ptyDetach(id); else relay.ptyKill(id);
-  t.term.dispose(); t.el.remove();
+  if (t.kind === 'file') {
+    disposeFileViewer(t.id); t.el.remove(); // file tabs: no pty, no Library, no xterm to dispose
+  } else {
+    flushTabToLibrary(t); // keep its Library entry current so reopening restores the latest history
+    // Keep a SAVED terminal's shell alive so it can be resumed from the Library; kill an unsaved
+    // one's shell outright — nothing can reattach to it, so leaving it running just leaks processes.
+    const resumable = t.libId || state.library.some((s) => s.termId === t.id);
+    if (resumable) relay.ptyDetach(id); else relay.ptyKill(id);
+    t.term?.dispose(); t.el.remove();
+  }
   for (const cb of agentTabCloseSubs) { try { cb(id); } catch { /* a subscriber must never break tab teardown */ } }
   // Replace the visible tab of any pane that was showing the closed tab, then drop the pane if it emptied.
   for (const g of leaves(state.layout)) if (state.gv[g] === id) state.gv[g] = groupTabs(g)[0]?.id || '';
@@ -470,8 +504,10 @@ function tabHtml(t: Tab): string {
   const activeInGroup = t.id === state.gv[t.group]; // the visible tab of its own group
   const running = runningTabs.has(t.id) ? ' running' : '';
   // VS Code-style: while a tab is producing live output, the close slot shows a dot (reverts to ✕ on hover).
-  return `<div class="tab ${activeInGroup ? 'active' : ''}${(t.tabBg || t.tabFg) ? ' colored' : ''}${running}" draggable="true" data-tab="${t.id}" title="${esc(t.name)} · ${esc(modelById(t.model).short)}${t.repo ? ` · ${esc(t.repo)}` : ''}"${style}>
-      <span class="tab-glyph"${fgStyle}>${svgIcon('i-term', 13)}</span><span class="tab-name" data-rename="${t.id}">${esc(t.name)}</span>
+  const isFile = t.kind === 'file';
+  const title = isFile ? esc(t.filePath || t.name) : `${esc(t.name)} · ${esc(modelById(t.model).short)}${t.repo ? ` · ${esc(t.repo)}` : ''}`;
+  return `<div class="tab ${activeInGroup ? 'active' : ''}${(t.tabBg || t.tabFg) ? ' colored' : ''}${running}${isFile ? ' filetab' : ''}" draggable="true" data-tab="${t.id}" title="${title}"${style}>
+      <span class="tab-glyph"${fgStyle}>${svgIcon(isFile ? 'i-file' : 'i-term', 13)}</span><span class="tab-name" data-rename="${t.id}">${esc(t.name)}${isFile && t.fileDirty ? ' •' : ''}</span>
       <span class="tab-close" data-close="${t.id}" title="Close"><i class="tab-live" title="Running — live output"></i><span class="tab-x">✕</span></span>
     </div>`;
 }
@@ -530,11 +566,12 @@ function openTabOverflow(g: number, anchor: HTMLElement) {
   menu.style.top = (r.bottom + 4) + 'px';
   menu.classList.add('show');
 }
-function clearActive() { activeTab()?.term.clear(); }
+function clearActive() { activeTab()?.term?.clear(); }
 // Apply a terminal's per-tab body/text colors by overriding its xterm theme (background,
 // foreground, cursor) and the wrapper background so the padding matches. Rebuilt from the
 // base theme each time, so clearing a color reverts cleanly to the default.
 function applyTermColors(t: Tab) {
+  if (!t.term) { t.el.style.background = t.bodyBg || ''; return; } // file tabs: only the wrapper bg matters
   t.term.options.theme = {
     ...activeXterm(),
     ...(t.bodyBg ? { background: t.bodyBg, cursorAccent: t.bodyBg } : {}),
@@ -639,7 +676,8 @@ function slimBlocks(blocks: Block[]): Block[] {
   return blocks.slice(-120).map((b) => ({ ...b, output: b.output.length > 4000 ? '…' + b.output.slice(-4000) : b.output }));
 }
 function snapshotTabs(): OpenTab[] {
-  return state.tabs.map((t) => ({ id: t.id, name: t.name, model: t.model, libId: t.libId, cwd: t.cwd, group: t.group, bkNonce: t.bkNonce, scrollback: t.ser.serialize({ scrollback: 800 }), tabBg: t.tabBg, tabFg: t.tabFg, bodyBg: t.bodyBg, bodyFg: t.bodyFg, chat: t.chat.slice(-100), blocks: slimBlocks(t.blocks) }));
+  // Only terminal tabs are persisted; file-viewer tabs are ephemeral (reopen from the Files rail after a restart).
+  return state.tabs.filter((t) => t.kind === 'terminal').map((t) => ({ id: t.id, name: t.name, model: t.model, libId: t.libId, cwd: t.cwd, group: t.group, bkNonce: t.bkNonce, scrollback: t.ser!.serialize({ scrollback: 800 }), tabBg: t.tabBg, tabFg: t.tabFg, bodyBg: t.bodyBg, bodyFg: t.bodyFg, chat: t.chat.slice(-100), blocks: slimBlocks(t.blocks) }));
 }
 // Persist the open tabs + their scrollback. Coalescing throttle: the first trigger
 // schedules a save ~800ms out and any triggers within that window are folded in — so a
@@ -688,7 +726,7 @@ function renderLibrary() {
     </div>`).join('');
 }
 async function saveActive() {
-  const t = activeTab(); if (!t) return toast('No terminal to save');
+  const t = activeTab(); if (!t || !t.ser) return toast('Only a terminal can be saved to the Library');
   // Update the existing Library entry if this terminal was already saved — via its
   // link, or (after a restart, when the link is gone) by matching the stable termId.
   const libId = t.libId || state.library.find((s) => s.termId === t.id)?.id || uid();
@@ -706,6 +744,7 @@ async function deleteLib(id: string) {
 // entry so reopening restores the latest history — not just whatever was there at the last
 // manual Save. Updates state.library in memory immediately so an instant reopen sees it too.
 function flushTabToLibrary(t: Tab) {
+  if (!t.ser) return; // file tabs aren't Library-backed
   const libId = t.libId || state.library.find((s) => s.termId === t.id)?.id;
   if (!libId) return; // not a saved terminal — it isn't listed in the Library, so nothing to restore
   const prev = state.library.find((s) => s.id === libId);
@@ -768,7 +807,7 @@ function reflectModel() {
 // The pure theme lookups + var-writing + picker rendering live in ./theme (imported above).
 function applyTheme() {
   applyThemeVars(activeTheme());
-  for (const t of state.tabs) { applyTermColors(t); t.term.refresh(0, t.term.rows - 1); } // re-tint every live terminal
+  for (const t of state.tabs) { applyTermColors(t); if (t.term) t.term.refresh(0, t.term.rows - 1); } // re-tint every live terminal
 }
 async function setTemplate(id: string) {
   setActiveWsTheme(id); // theme is per-workspace; the global setting is only the seed for new ones
@@ -776,7 +815,7 @@ async function setTemplate(id: string) {
   applyTheme(); reflectSettings();
 }
 async function cycleTemplate() { const i = TEMPLATES.findIndex((t) => t.id === curTemplate()); await setTemplate(TEMPLATES[(i + 1) % TEMPLATES.length].id); }
-function applySidebar() { $('#main').classList.toggle('collapsed', state.settings.sidebarCollapsed); const t = activeTab(); if (t) setTimeout(() => { t.fit.fit(); relay.ptyResize(t.id, t.term.cols, t.term.rows); }, 210); }
+function applySidebar() { $('#main').classList.toggle('collapsed', state.settings.sidebarCollapsed); const t = activeTab(); if (t?.term && t.fit) setTimeout(() => { t.fit!.fit(); relay.ptyResize(t.id, t.term!.cols, t.term!.rows); }, 210); }
 function applyToolbar() { document.querySelector('.titlebar')?.classList.toggle('shown', state.settings.toolbarShown); }
 // Rail model: the active view fills the sidebar body — no Library/Files height split.
 function applySplit() { /* no-op (kept: still called on boot + sidebar resize) */ }
@@ -1042,14 +1081,14 @@ function closeBookmarks() { $('#bookmarksPanel').classList.remove('show'); }
 // Save the current highlighted text (DOM selection in a block, or the xterm selection).
 function bookmarkSelection() {
   let text = (window.getSelection()?.toString() || '').trim();
-  if (!text) text = (activeTab()?.term.getSelection() || '').trim();
+  if (!text) text = (activeTab()?.term?.getSelection() || '').trim();
   if (!text) { toast('Highlight a command first'); return; }
   addBookmark(text); hideBkmPop();
 }
 // Floating "★ Bookmark" pill shown next to a text selection (in a block OR the live terminal).
 let pendingBkmText = ''; // captured when the pill shows, so a click can't lose it
 function hideBkmPop() { $('#bkmPop').classList.remove('show'); }
-function xtermSelection(): string { try { return (activeTab()?.term.getSelection() || '').trim(); } catch { return ''; } }
+function xtermSelection(): string { try { return (activeTab()?.term?.getSelection() || '').trim(); } catch { return ''; } }
 function showBkmPopAt(cx: number, top: number) {
   const pop = $('#bkmPop'); pop.classList.add('show');
   pop.style.left = Math.min(Math.max(cx - 55, 8), window.innerWidth - 130) + 'px';
@@ -1079,7 +1118,7 @@ function refreshPill(mx?: number, my?: number, allowXterm = false) {
 /* --------------------- Blocks (Warp-style) main view --------------------- */
 // The live xterm is always mounted underneath; the Blocks view overlays it and becomes the
 // primary surface. Full-screen apps (alt-screen) and Classic mode reveal the xterm.
-function blocksMode(t: Tab | undefined): boolean { return !!t && state.settings.blocksView && !t.liveInteractive; }
+function blocksMode(t: Tab | undefined): boolean { return !!t && t.kind === 'terminal' && state.settings.blocksView && !t.liveInteractive; } // a file tab is never in blocks mode
 const paneSel = (g: number) => ({ view: P_VIEW[g], scroll: P_SCROLL[g], cmd: P_CMD[g], prompt: P_PROMPT[g] });
 // Show Blocks or the live terminal for every open pane (each pane is a full terminal).
 function updateMainView() {
@@ -1091,6 +1130,8 @@ function updatePaneView(g: number) {
   const s = paneSel(g);
   const t = leaves(state.layout).includes(g) ? gTab(g) : undefined;
   if (!t) { E(s.view).classList.remove('show'); return; }
+  // File tab: it lives in the term-host (like an xterm-wrap), so just hide the blocks overlay — no terminal chrome.
+  if (t.kind === 'file') { E(s.view).classList.remove('show'); if (g === state.focus) focusFileViewer(t.id); return; }
   const on = blocksMode(t);
   E(s.view).classList.toggle('show', on);
   if (on) { renderPaneBlocks(g); if (g === state.focus && document.activeElement?.tagName !== 'TEXTAREA') setTimeout(() => (E(s.cmd) as HTMLElement)?.focus(), 0); }
@@ -1098,15 +1139,16 @@ function updatePaneView(g: number) {
     // Reveal the live terminal, fit after layout settles, FORCE a resize so a full-screen app
     // (Claude Code, vim, top) redraws to the exact size (its bottom line isn't clipped).
     requestAnimationFrame(() => {
-      t.fit.fit();
-      if (t.term.cols > 0) {
+      const term = t.term, fit = t.fit; if (!term || !fit) return;
+      fit.fit();
+      if (term.cols > 0) {
         // First time this (reattached) tab is actually VISIBLE: flush the output buffered while it had no
         // measured size — otherwise a full-screen app reattached after a workspace switch shows a blank
         // frame here even though its shell is alive (this was the "Blocks view shows nothing" bug).
-        if (!t.fitted) { t.fitted = true; if (t.replayQ) { t.term.write(t.replayQ); t.replayQ = undefined; } }
-        t.lastCols = t.term.cols; t.lastRows = t.term.rows; relay.ptyResize(t.id, t.term.cols, t.term.rows);
+        if (!t.fitted) { t.fitted = true; if (t.replayQ) { term.write(t.replayQ); t.replayQ = undefined; } }
+        t.lastCols = term.cols; t.lastRows = term.rows; relay.ptyResize(t.id, term.cols, term.rows);
       }
-      if (g === state.focus) { t.term.focus(); t.term.scrollToBottom(); }
+      if (g === state.focus) { term.focus(); term.scrollToBottom(); }
     });
   }
 }
@@ -1400,6 +1442,8 @@ function reflectSettings() {
   ($('#notifyIssuesSet') as HTMLInputElement).checked = state.settings.issuePushNotify !== false;
   const edSel = $('#fileEditorSel') as HTMLSelectElement | null;
   if (edSel) { if (!edSel.options.length) edSel.innerHTML = EDITORS.map((ed) => `<option value="${ed.id}">${ed.label}</option>`).join(''); edSel.value = state.settings.fileEditor || DEFAULT_EDITOR; }
+  const hl = $('#hlLangs') as HTMLElement | null;
+  if (hl) hl.innerHTML = LANGUAGES.map((l) => `<label class="hl-lang"><input type="checkbox" data-hl="${l.id}"${state.settings.highlightLangs?.[l.id] !== false ? ' checked' : ''}> ${esc(l.label)}</label>`).join('');
   pbriefLoad();
   for (const p of ['anthropic', 'openai', 'google']) {
     const on = (state.settings.hasKey as any)[p];
@@ -1720,6 +1764,7 @@ document.querySelectorAll('[data-closeg]').forEach((b) => b.addEventListener('cl
 $('#blocksViewSet').addEventListener('change', async (e) => { state.settings = await relay.patchSettings({ blocksView: (e.target as HTMLInputElement).checked }); updateMainView(); });
 $('#notifySet').addEventListener('change', async (e) => { state.settings = await relay.patchSettings({ notifications: (e.target as HTMLInputElement).checked }); });
 $('#fileEditorSel').addEventListener('change', async (e) => { state.settings = await relay.patchSettings({ fileEditor: (e.target as HTMLSelectElement).value }); });
+$('#hlLangs').addEventListener('change', async (e) => { const cb = (e.target as HTMLElement).closest('[data-hl]') as HTMLInputElement | null; if (!cb?.dataset.hl) return; const cur = { ...(state.settings.highlightLangs || {}) }; cur[cb.dataset.hl] = cb.checked; state.settings = await relay.patchSettings({ highlightLangs: cur }); });
 // Pipeline stage prompts — edit the default brief per stage kind; blank / == built-in clears the override.
 $('#pbriefKind').addEventListener('change', pbriefLoad);
 $('#pbriefText').addEventListener('change', async () => {
@@ -1994,7 +2039,16 @@ $('#mainDivider').addEventListener('mousedown', (e) => {
 });
 
 // file browser
-initFiles({ fsList: (p: string) => relay.fsList(p), fsOpen: (p: string) => relay.fsOpen(p) }); // Files sidebar: wire events + supply the fs bridge
+// In-app file viewer/editor (the content of kind:'file' tabs): fs read/write, per-language highlight toggle, and a
+// dirty→tab-title notifier so an unsaved file shows a • on its tab.
+initFileViewer({
+  fsRead: (p: string) => relay.fsRead(p),
+  fsWrite: (p: string, content: string) => relay.fsWrite(p, content),
+  highlightOn: (langId: string) => state.settings.highlightLangs?.[langId] !== false, // default ON
+  onDirty: (id: string, dirty: boolean) => { const t = state.tabs.find((x) => x.id === id); if (t && t.fileDirty !== dirty) { t.fileDirty = dirty; renderTabs(); } },
+  toast,
+});
+initFiles({ fsList: (p: string) => relay.fsList(p), fsOpen: (p: string) => relay.fsOpen(p), openInApp: (p: string) => void newFileTab(p) }); // Files sidebar: wire events + supply the fs bridge; "System default" opens files in-app
 
 // agent
 $('#btnAgent').onclick = openAgent;
@@ -2084,7 +2138,7 @@ document.addEventListener('keydown', (e) => {
 // (syncScrollArea → undefined `dimensions`); the buffer is bounded (newest kept) and flushed by applyResize
 // the first time the tab is fit while visible. A tab that was ever fit keeps cached dims, so this is a no-op.
 function writeToTab(id: string, data: string): void {
-  const t = state.tabs.find((x) => x.id === id); if (!t) return;
+  const t = state.tabs.find((x) => x.id === id); if (!t || !t.term) return; // file tabs never receive pty output
   if (t.fitted) t.term.write(data);
   else t.replayQ = ((t.replayQ ?? '') + data).slice(-512 * 1024);
 }

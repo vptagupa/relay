@@ -5,13 +5,13 @@
 // nothing here. The renderer only ever handles config values + task data — never a token or client secret.
 
 import { $, esc } from './dom';
-import { toast, addSearch } from './ui';
+import { toast, addSearch, attachHoverCard } from './ui';
 import { state } from './state';
 import { AGENTS } from './agents-list';
-import { assignPmTask, pmRunStatusOf, PM_RUN_LABEL, onPmRunChip, validateBrief, initPmPipeline, pmFiledOf } from './pm-pipeline';
+import { assignPmTask, pmRunStatusOf, PM_RUN_LABEL, onPmRunChip, validateBrief, initPmPipeline, pmFiledOf, stripIssueTag, parseIssueTag } from './pm-pipeline';
 import { TAG_DEFS, tagNote, depsNote, LABEL_NAME } from './tasks';   // reuse the exact task-type set + brief guidance + .deps/ note + label names a local task uses
 import { repoDepsFor } from './repo-deps';   // a repo's default dependency template (same source the local Validate dialog defaults from)
-import type { PmProviderMeta, PmConfig, PmTask, PmProject, EditField } from './pm/types';
+import type { PmProviderMeta, PmConfig, PmTask, PmProject, PmComment, EditField } from './pm/types';
 
 const relay = (window as any).relay;
 
@@ -246,9 +246,11 @@ function renderFilters(meta: PmProviderMeta | undefined): void {
   }).join('');
 }
 
+const hoverCache = new Map<string, string>();   // taskKey → rendered hover-card HTML; cleared on every rail reload so new comments show
 async function loadRailTasks(): Promise<void> {
   const list = $('#pmRailTasks'); if (!list || !railProjectId) return;
   const meta = metaOf(railProvider); if (!meta) return;
+  hoverCache.clear();
   list.innerHTML = '<div class="pm-empty">Loading…</div>';
   const filters: Record<string, string> = {};
   for (const [k, v] of Object.entries(filterState)) if (v) filters[k] = v;
@@ -257,6 +259,34 @@ async function loadRailTasks(): Promise<void> {
   railTasks = (r.data || []) as PmTask[];
   renderPager(meta, railTasks.length);
   rerenderTasks();
+}
+
+// Hover-preview HTML for a provider task: its description + fields + the live comment thread (fetched once per
+// task, cached until the next reload). Async — the hover card awaits it.
+const fmtWhen = (iso?: string): string => { if (!iso) return ''; try { return new Date(iso).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }); } catch { return iso; } };
+async function taskHoverHtml(key: string): Promise<string | null> {
+  const meta = metaOf(railProvider); if (!meta) return null;
+  const summary = railTasks.find((t) => (t.key || t.id) === key); if (!summary) return null;
+  const cached = hoverCache.get(key); if (cached) return cached;
+  const [detail, comments] = await Promise.all([
+    relay.pmTaskGet(ws(), railProvider, key).catch(() => null),
+    meta.capabilities.canComment ? relay.pmComments(ws(), railProvider, key).catch(() => null) : Promise.resolve(null),
+  ]);
+  const desc = ((detail?.ok && detail.data?.description) || summary.description || '').trim();
+  const fields = [summary.status, summary.priority, summary.assignee].filter(Boolean).map((x) => esc(x!)).join(' · ');
+  const cs: PmComment[] = (comments?.ok ? comments.data : []) || [];
+  const commentHtml = comments && !comments.ok
+    ? `<div class="mut">Couldn't load comments</div>`
+    : cs.length
+      ? cs.slice(-6).map((c) => `<div class="hc-cmt"><div class="hc-cmt-hd">${esc(c.author || 'someone')}${c.at ? ` · ${esc(fmtWhen(c.at))}` : ''}</div><div class="hc-cmt-body">${esc(c.body)}</div></div>`).join('')
+        + (cs.length > 6 ? `<div class="mut">…and ${cs.length - 6} earlier</div>` : '')
+      : `<div class="mut">No comments yet</div>`;
+  const html = `<div class="hc-hd"><b>${esc(stripIssueTag(summary.title || ''))}</b> <span class="mut">${esc(summary.key || key)}</span></div>`
+    + (fields ? `<div class="hc-meta">${fields}</div>` : '')
+    + (desc ? `<div class="hc-sec"><div class="hc-lbl">Description</div><div class="hc-body">${esc(desc)}</div></div>` : '')
+    + `<div class="hc-sec"><div class="hc-lbl">Comments${cs.length ? ` (${cs.length})` : ''}</div>${commentHtml}</div>`;
+  if (!comments || comments.ok) hoverCache.set(key, html);   // don't cache a transient comment-load failure
+  return html;
 }
 
 // Re-render the task rows from the in-memory list (no fetch) — used on load AND when a run's status changes so
@@ -269,14 +299,19 @@ function rerenderTasks(): void {
     const st = pmRunStatusOf(railProvider, t.key || t.id);
     const chip = st !== 'idle' ? `<span class="pm-run-chip s-${st}" data-runchip="${esc(t.key || t.id)}" title="Click to dismiss / free">${esc(PM_RUN_LABEL[st])}</span>` : '';
     const canAssign = st === 'idle';
-    // Once validated, this task has a filed issue: show its type labels + an issue #N badge on the row, exactly like
-    // a local task row (same .tk-tagchip / .tk-issue classes). Survives closure — a fixed issue shows as "closed".
+    // Once validated, this task has a filed issue. The number is shared via a "· owner/repo#N" tag on the TITLE
+    // (list-visible on every machine); we strip it for a clean display title and show an issue #N badge instead.
+    // Local pmTracked (own machine) gives a clickable link; otherwise the badge comes from the title tag.
     const filed = pmFiledOf(ws(), railProvider, t.key || t.id);
+    const titleTag = parseIssueTag(t.title || '');
+    const displayTitle = titleTag ? stripIssueTag(t.title || '') : (t.title || '');
     const labelChips = (filed?.tags || []).map((tg) => `<span class="tk-tagchip ${esc(tg)}">${esc(LABEL_NAME[tg] || tg)}</span>`).join('');
-    const issueBadge = filed ? `<span class="tk-issue${filed.closed ? ' closed' : ''}" data-issue-url="${esc(filed.issueUrl)}" title="Open the filed issue (${filed.closed ? 'closed' : 'open'})">issue #${filed.issueNumber}${filed.closed ? ' ✓' : ''} ↗</span>` : '';
+    const issueBadge = filed
+      ? `<span class="tk-issue${filed.closed ? ' closed' : ''}" data-issue-url="${esc(filed.issueUrl)}" title="Open the filed issue (${filed.closed ? 'closed' : 'open'})">issue #${filed.issueNumber}${filed.closed ? ' ✓' : ''} ↗</span>`
+      : titleTag ? `<span class="tk-issue nolink" title="Filed issue ${esc(titleTag.repo)}#${titleTag.number}">issue #${titleTag.number}</span>` : '';
     return `<div class="pm-task" data-key="${esc(t.key || t.id)}">
-      <div class="pm-task-top"><span class="pm-key">${esc(t.key || '')}</span><span class="pm-title" title="${esc(t.title || '')}">${esc(t.title || '')}</span>${labelChips}${issueBadge}${chip}${meta.capabilities.editFields.length ? `<button class="pm-edit" data-edit="${esc(t.key || t.id)}" title="Edit this task">✎</button>` : ''}${canAssign ? `<button class="pm-assign" data-assign="${esc(t.key || t.id)}" title="Validate this task against the repo">⚡</button>` : ''}</div>
-      <div class="pm-task-fields">${selects.map((f) => fieldSelect(meta, f, t)).join('')}${t.priority && !selects.some((f) => f.key === 'priority') ? `<span class="pm-prio">${esc(t.priority)}</span>` : ''}</div>
+      <div class="pm-task-top"><span class="pm-key">${esc(t.key || '')}</span><span class="pm-title" title="${esc(displayTitle)}">${esc(displayTitle)}</span>${labelChips}${issueBadge}${chip}${meta.capabilities.editFields.length ? `<button class="pm-edit" data-edit="${esc(t.key || t.id)}" title="Edit this task">✎</button>` : ''}${canAssign ? `<button class="pm-assign" data-assign="${esc(t.key || t.id)}" title="Validate this task against the repo">⚡</button>` : ''}</div>
+      <div class="pm-task-fields">${selects.map((f) => fieldSelect(meta, f, t)).join('')}${t.priority && !selects.some((f) => f.key === 'priority') ? `<span class="pm-prio">${esc(t.priority)}</span>` : ''}${t.assignee ? `<span class="pm-assignee" title="Assigned to ${esc(t.assignee)}">👤 ${esc(t.assignee.includes('@') ? t.assignee.split('@')[0] : t.assignee)}</span>` : '<span class="pm-assignee unassigned" title="Unassigned">👤 unassigned</span>'}</div>
     </div>`;
   }).join('');
 }
@@ -405,7 +440,7 @@ async function openValidate(taskKey: string): Promise<void> {
   const savedStat = state.settings.pmStatusMapByWs?.[ws()]?.[railProvider] || {};
   const statuses = refCache[`${ws()}:${meta.id}:task-statuses`] || [];
   const detail = await relay.pmTaskGet(ws(), railProvider, taskKey).catch(() => null); // list rows omit the description
-  const task = { key: summary.key || summary.id, title: summary.title || '', description: (detail?.ok && detail.data?.description) || '' };
+  const task = { key: summary.key || summary.id, title: stripIssueTag(summary.title || ''), description: (detail?.ok && detail.data?.description) || '' }; // strip any "· repo#N" tag so the brief + filed-issue title use the clean base
   const projTitle = railProjects.find((p) => p.id === railProjectId)?.title || railProjectId;
   // Task type (same set + guidance as a local task). Like a local task, the type's guidance is NOT shown in the
   // brief box — it's appended silently at launch — so the box shows only the base validate prompt. Default to
@@ -484,34 +519,60 @@ async function openCreateTask(): Promise<void> {
   const statuses = refCache[`${ws()}:${meta.id}:task-statuses`] || [];
   const priorities = refCache[`${ws()}:${meta.id}:task-priorities`] || [];
   const projTitle = railProjects.find((p) => p.id === railProjectId)?.title || railProjectId;
+  // Repo to validate against on ⚡ Create & execute — a tracked-repo picker exactly like the local task's create
+  // form. Defaults to the project's mapped repo, else the first tracked repo.
+  const projKey = `${railProvider}:${railProjectId}`;
+  const trackedRepos = state.settings.issueReposByWs?.[ws()] || [];
+  const savedRepo = state.settings.pmProjectRepoByWs?.[ws()]?.[projKey] || '';
+  const defRepo = (savedRepo && trackedRepos.includes(savedRepo)) ? savedRepo : (trackedRepos[0] || '');
   const { root, close } = tplModal(`<div class="tpl-card iss-card">
     <div class="hd"><span class="dot" style="background:var(--accent)"></span><span class="t">New task<small>${esc(meta.containerLabel)}: ${esc(projTitle)}</small></span></div>
     <div class="bd">
       <label class="iss-lbl">Title</label>
       <input class="tk-input" id="ctTitle" placeholder="What needs doing?" spellcheck="false" autocomplete="off">
+      <label class="iss-lbl" style="margin-top:11px">Validate in repository <span class="mut">— for ⚡ execute (type to filter)</span></label>
+      <input class="tk-input" id="ctRepo" list="ctRepoList" placeholder="${trackedRepos.length ? 'Pick a tracked repo…' : 'No tracked repos — add one under Issues first'}" value="${esc(defRepo)}" spellcheck="false" autocomplete="off"${trackedRepos.length ? '' : ' disabled'}>
+      <datalist id="ctRepoList">${trackedRepos.map((id) => `<option value="${esc(id)}">${esc(id.replace(/^[^:]+:/, ''))} · ${esc(id.replace(/:.*$/, ''))}</option>`).join('')}</datalist>
       <div class="iss-agentrow" style="margin-top:11px"><label class="iss-lbl" style="margin:0">Status</label><select class="iss-agentsel" id="ctStatus">${statuses.length ? statuses.map((s) => `<option value="${esc(s)}">${esc(s)}</option>`).join('') : '<option value="">— no statuses —</option>'}</select></div>
       ${priorities.length ? `<div class="iss-agentrow"><label class="iss-lbl" style="margin:0">Priority <span class="mut">— optional</span></label><select class="iss-agentsel" id="ctPriority"><option value="">— none —</option>${priorities.map((p) => `<option value="${esc(p)}">${esc(p)}</option>`).join('')}</select></div>` : ''}
       <label class="iss-lbl">Description</label>
       <textarea class="iss-brief" id="ctDesc" rows="7" spellcheck="false" placeholder="Details (Markdown ok)…"></textarea>
     </div>
-    <div class="ft"><span class="hint">Created in ${esc(meta.name)}, assigned to you</span><span class="r"><button class="tpl-btn ghost" data-x>Cancel</button><button class="tpl-btn pri" data-go>＋ Create</button></span></div>
+    <div class="ft"><span class="hint">Created in ${esc(meta.name)}, assigned to you</span><span class="r"><button class="tpl-btn ghost" data-x>Cancel</button><button class="tpl-btn ghost" data-go>＋ Create</button><button class="tpl-btn pri" data-exec>⚡ Create &amp; execute</button></span></div>
   </div>`);
   const q = <T extends HTMLElement>(s: string) => root.querySelector(s) as T;
   q<HTMLElement>('[data-x]').onclick = close;
   setTimeout(() => q<HTMLInputElement>('#ctTitle').focus(), 30);
-  q<HTMLElement>('[data-go]').onclick = async () => {
+  // exec=true ("Create & execute") → create the provider task, then jump straight into the validate dialog, exactly
+  // like a local task's "⚡ Create & execute". exec=false ("Create") just creates it and reloads the list.
+  const submit = async (exec: boolean): Promise<void> => {
     const title = q<HTMLInputElement>('#ctTitle').value.trim();
     const status = q<HTMLSelectElement>('#ctStatus').value;
     const priority = (root.querySelector('#ctPriority') as HTMLSelectElement | null)?.value || '';
     const description = q<HTMLTextAreaElement>('#ctDesc').value;
+    const repoId = (root.querySelector('#ctRepo') as HTMLInputElement | null)?.value.trim() || '';
+    const repoOk = /^(github|gitlab|bitbucket):[\w.-]+(\/[\w.-]+)+$/.test(repoId);
     if (!title) { toast('A title is required', false); return; }
     if (!status) { toast('Pick a status', false); return; }
+    if (exec && !repoOk) { toast(repoId ? 'Repository must look like github:owner/repo' : 'Pick a repository to validate against (or use ＋ Create)', false); return; }
     const body: Record<string, unknown> = { title, status, description, assignee: 'me' };
     if (priority) body.priority = priority;
     const r = await relay.pmTaskCreate(ws(), railProvider, railProjectId, body).catch(() => ({ ok: false, error: 'Create failed' }));
-    if (r?.ok && r.data?.key) { toast(`Created ${r.data.key}`, true); close(); railOffset = 0; void loadRailTasks(); } // reload → the new task appears in the synced list
-    else toast(r?.error || 'Could not create the task', false);
+    if (!(r?.ok && r.data?.key)) { toast(r?.error || 'Could not create the task', false); return; }
+    const key = r.data.key;
+    // Mirror the chosen repo onto the project so ⚡ execute (and any later Validate) is pre-set to it — same idea as
+    // a local task carrying its own repo. Only a well-formed repo id is mapped.
+    if (repoOk) { await setProjectRepo(projKey, repoId); renderRepoRow(); }
+    toast(`Created ${key}`, true); close();
+    // Make the new task available to the rail (and the validate dialog, which reads railTasks) NOW, then sync the
+    // real list in the background — so "Create & execute" can open validate even if the task isn't on page 1.
+    const nt: PmTask = { id: key, key, title, status, priority: priority || undefined, description };
+    railTasks = [nt, ...railTasks.filter((t) => (t.key || t.id) !== key)];
+    rerenderTasks(); railOffset = 0; void loadRailTasks();
+    if (exec) void openValidate(key);
   };
+  q<HTMLElement>('[data-go]').onclick = () => void submit(false);
+  q<HTMLElement>('[data-exec]').onclick = () => void submit(true);
 }
 
 // Edit an existing provider task in place — title / status / priority / description → pmTaskUpdate, then reload.
@@ -523,7 +584,8 @@ async function openEditTask(taskKey: string): Promise<void> {
   const statuses = refCache[`${ws()}:${meta.id}:task-statuses`] || [];
   const priorities = refCache[`${ws()}:${meta.id}:task-priorities`] || [];
   const detail = await relay.pmTaskGet(ws(), railProvider, taskKey).catch(() => null);
-  const curTitle = summary.title || '', curStatus = summary.status || '', curPriority = summary.priority || '';
+  const issueTag = parseIssueTag(summary.title || '');   // the " · repo#N" tag is hidden from the input and re-appended on save, so editing never loses it
+  const curTitle = stripIssueTag(summary.title || ''), curStatus = summary.status || '', curPriority = summary.priority || '';
   const curDesc = (detail?.ok && detail.data?.description) || summary.description || '';
   const projTitle = railProjects.find((p) => p.id === railProjectId)?.title || railProjectId;
   const { root, close } = tplModal(`<div class="tpl-card iss-card">
@@ -547,7 +609,7 @@ async function openEditTask(taskKey: string): Promise<void> {
     const priority = (root.querySelector('#etPriority') as HTMLSelectElement | null)?.value || '';
     const description = q<HTMLTextAreaElement>('#etDesc').value;
     if (!title) { toast('A title is required', false); return; }
-    const body: Record<string, unknown> = { title, description };
+    const body: Record<string, unknown> = { title: issueTag ? `${title} · ${issueTag.repo}#${issueTag.number}` : title, description }; // preserve the filed-issue tag
     if (status) body.status = status;
     if (priority) body.priority = priority;
     const r = await relay.pmTaskUpdate(ws(), railProvider, taskKey, body).catch(() => ({ ok: false, error: 'Update failed' }));
@@ -645,6 +707,7 @@ export function initPm(d: PmDeps): void {
   $('#pmRailNew')?.addEventListener('click', () => void openCreateTask());
   $('#pmRailTasks')?.addEventListener('change', (e) => { const sel = (e.target as HTMLElement).closest('.pm-field') as HTMLSelectElement | null; if (sel?.dataset.key && sel.dataset.field) void editField(sel.dataset.key, sel.dataset.field, sel.value, sel); });
   // Validate against the repo (⚡) + dismiss/free a run (chip)
+  attachHoverCard($('#pmRailTasks'), '.pm-task', (row) => taskHoverHtml(row.dataset.key || '')); // hover a task → details + comments preview
   $('#pmRailTasks')?.addEventListener('click', (e) => {
     const t = e.target as HTMLElement;
     const a = t.closest('.pm-assign') as HTMLElement | null; if (a?.dataset.assign) { void openValidate(a.dataset.assign); return; }

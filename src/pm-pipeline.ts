@@ -107,6 +107,16 @@ function noteBody(f: NoteFields): string {
   const foot = f.note ? `\n\n— ${f.note}` : '';
   return `${head}${verdict}${list}${foot}`;
 }
+
+// --- filed-issue title tag ----------------------------------------------------------------------------------
+// The filed issue number lives only in this machine's local pmTracked, so other viewers can't see it. To share it
+// we tag the PROVIDER TASK's TITLE with " · owner/repo#N" — the one list-visible free field, so every machine's
+// task list shows it. These helpers write/parse/strip that tag; they're the single source of its format.
+const ISSUE_TAG_RE = /\s*·\s*[\w.-]+\/[\w.-]+#\d+\s*$/;              // the trailing tag, for stripping (idempotency)
+export const stripIssueTag = (title: string): string => (title || '').replace(ISSUE_TAG_RE, '').replace(/\s+$/, '');
+export const parseIssueTag = (title: string): { repo: string; number: number } | null => { const m = /·\s*([\w.-]+\/[\w.-]+)#(\d+)\s*$/.exec(title || ''); return m ? { repo: m[1], number: Number(m[2]) } : null; };
+const withIssueTag = (title: string, repo: string, n: number): string => `${stripIssueTag(title)} · ${repo}#${n}`;
+
 // On the verdict: INVALID → mark invalid + summary. VALID → file a git issue in the mapped repo, link it on the
 // task, set the "valid/issued" status, and START WATCHING the issue for closure (→ the task's "fixed" status).
 async function reportValidated(run: PmRun, passed: boolean): Promise<void> {
@@ -136,6 +146,10 @@ async function reportValidated(run: PmRun, passed: boolean): Promise<void> {
     note: filed ? 'Closing the issue will mark this task fixed.' : 'Validation passed, but filing the issue failed — see Slayer T.',
   }), run.valid);
   if (filed) {
+    // Tag the provider task's TITLE with the filed issue ref so EVERY viewer (any machine) sees it in the list —
+    // not just this machine's local record. Idempotent (strips any prior tag), best-effort.
+    const newTitle = withIssueTag(run.title, run.repo, iss.number!);
+    if (newTitle !== run.title) void relay.pmTaskUpdate(run.ws, run.provider, run.taskKey, { title: newTitle }).catch(() => {});
     await addTracked({ ws: run.ws, provider: run.provider, taskKey: run.taskKey, projectId: run.projectId, repoProvider: run.repoProvider, repo: run.repo, issueNumber: iss.number!, issueUrl: iss.url || '', fixedStatus: run.fixed, tags: labels.length ? [...(run.tags || [])] : undefined, closed: false });
     deps.refresh();   // the record now exists → redraw the rail row with its issue badge + type labels
     toast(`${run.taskKey} valid → filed ${link} · watching for fix`, true);

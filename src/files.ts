@@ -10,9 +10,11 @@ interface FsEntry { name: string; isDir: boolean }
 interface FsResult { path: string; parent: string; entries: FsEntry[]; error?: string; truncated?: boolean }
 type FsList = (path: string) => Promise<FsResult>;
 type FsOpen = (path: string) => Promise<{ method: string; editor?: string }>;
+type OpenInApp = (path: string) => void;
 
 let fsList: FsList = async () => ({ path: '', parent: '', entries: [] });
 let fsOpen: FsOpen = async () => ({ method: 'error' });
+let openInApp: OpenInApp | undefined;
 
 // Render the current folder into the Files sidebar. Target follows the active terminal's cwd
 // (or the browsed path, or the project folder). Exported so the renderer can refresh on tab switch.
@@ -33,13 +35,16 @@ export async function renderFiles(): Promise<void> {
 
 // Wire the Files sidebar (parent-folder button + click-to-navigate/open) and supply the fs bridge.
 // Call once, after the template is in the DOM.
-export function initFiles(deps: { fsList: FsList; fsOpen: FsOpen }): void {
-  fsList = deps.fsList; fsOpen = deps.fsOpen;
+export function initFiles(deps: { fsList: FsList; fsOpen: FsOpen; openInApp?: OpenInApp }): void {
+  fsList = deps.fsList; fsOpen = deps.fsOpen; openInApp = deps.openInApp;
   $('#filesUp').onclick = () => { if (state.browse && state.browse.parent && state.browse.parent !== state.browse.path) { state.browsePath = state.browse.parent; renderFiles(); } };
   $('#fileList').addEventListener('click', async (e) => {
     const el = (e.target as HTMLElement).closest('[data-fpath]') as HTMLElement | null; if (!el) return;
     const p = el.dataset.fpath!;
     if (el.dataset.dir === 'true') { state.browsePath = p; renderFiles(); return; }
+    // When the file-open editor is "System default", open it INSIDE Slayer T (a new file-viewer tab) rather than
+    // handing it to the OS. Any specific external editor (VS Code, …) still launches externally, unchanged.
+    if (openInApp && state.settings.fileEditor === 'system') { openInApp(p); return; }
     const r = await fsOpen(p);
     const name = p.split('/').pop();
     toast(r.method === 'editor' ? `Opening ${name} in ${r.editor || 'your editor'}` : r.method === 'error' ? `Couldn't open ${name}` : `Opening ${name}`, r.method !== 'error');

@@ -661,6 +661,7 @@ ipcMain.handle('pm:task-create', async (_e, p: { provider: string; ws: string; p
 ipcMain.handle('pm:task-update', async (_e, p: { provider: string; ws: string; idOrKey: string; patch: unknown }) => { const pr = pmProviderOf(p?.provider); if (!pr) return pmErr; try { return await pr.updateTask(p.ws, String(p?.idOrKey || ''), asRecord(p?.patch)); } catch (err) { logFatal('pm:task-update', err); return { ok: false, status: 0, error: 'Request failed' }; } });
 ipcMain.handle('pm:reference', async (_e, p: { provider: string; ws: string; name: string }) => { const pr = pmProviderOf(p?.provider); if (!pr) return pmErr; try { return await pr.reference(p.ws, String(p?.name || '')); } catch (err) { logFatal('pm:reference', err); return { ok: false, status: 0, error: 'Request failed' }; } });
 ipcMain.handle('pm:comment', async (_e, p: { provider: string; ws: string; idOrKey: string; body: string }) => { const pr = pmProviderOf(p?.provider); if (!pr?.postComment) return { ok: false, status: 0, error: 'Comments not supported by this provider' }; try { return await pr.postComment(p.ws, String(p?.idOrKey || ''), String(p?.body || '')); } catch (err) { logFatal('pm:comment', err); return { ok: false, status: 0, error: 'Request failed' }; } });
+ipcMain.handle('pm:comments', async (_e, p: { provider: string; ws: string; idOrKey: string }) => { const pr = pmProviderOf(p?.provider); if (!pr?.listComments) return { ok: false, status: 0, error: 'Comments not supported by this provider' }; try { return await pr.listComments(p.ws, String(p?.idOrKey || '')); } catch (err) { logFatal('pm:comments', err); return { ok: false, status: 0, error: 'Request failed' }; } });
 
 // --- generic provider handlers (dispatch to the registry in providers.ts) ---
 const badProvider = { ok: false, error: 'Unknown provider' } as const;
@@ -1412,6 +1413,34 @@ ipcMain.handle('fs:open', async (_e, p: string) => {
   if (cmd && isCodeFile(abs) && (await tryEditor(cmd, abs))) return { method: 'editor', editor: editorLabel(id) };
   const err = await shell.openPath(abs); // OS default app for the file type (non-code files, 'system', or a missing editor)
   return { method: err ? 'error' : 'default', error: err || undefined };
+});
+// Read a text file for the in-app viewer. Capped (viewer, not a data pipe) and binary-guarded — a NUL in the
+// first chunk ⇒ refuse rather than dump garbage. Local desktop app: it reads the user's own files they browsed to.
+const FILE_READ_CAP = 4 * 1024 * 1024; // 4 MB
+ipcMain.handle('fs:read', async (_e, p: string) => {
+  try {
+    const abs = path.resolve(String(p || ''));
+    const st = await fsp.stat(abs);
+    if (!st.isFile()) return { ok: false, error: 'Not a file' };
+    if (st.size > FILE_READ_CAP) return { ok: false, error: `File is too large to view (${(st.size / 1048576).toFixed(1)} MB > 4 MB)` };
+    const buf = await fsp.readFile(abs);
+    if (buf.subarray(0, 8000).includes(0)) return { ok: false, error: 'Binary file — open it in an external editor' };
+    return { ok: true, text: buf.toString('utf8'), size: st.size };
+  } catch (err) { logFatal('fs:read', err); return { ok: false, error: 'Could not read the file' }; }
+});
+// Save the in-app viewer's edits back to disk. Only overwrites an EXISTING file (the viewer never creates paths);
+// atomic-ish via temp-file + rename so a crash mid-write can't truncate the original.
+ipcMain.handle('fs:write', async (_e, p: { path: string; content: string }) => {
+  try {
+    const abs = path.resolve(String(p?.path || ''));
+    if (!existsSync(abs) || !(await fsp.stat(abs)).isFile()) return { ok: false, error: 'File no longer exists' };
+    if (typeof p?.content !== 'string') return { ok: false, error: 'Nothing to write' };
+    if (Buffer.byteLength(p.content, 'utf8') > FILE_READ_CAP) return { ok: false, error: 'Content is too large to save' };
+    const tmp = `${abs}.slayert-${process.pid}.tmp`;
+    await fsp.writeFile(tmp, p.content, 'utf8');
+    await fsp.rename(tmp, abs);
+    return { ok: true };
+  } catch (err) { logFatal('fs:write', err); return { ok: false, error: 'Could not save the file' }; }
 });
 // Open a path the terminal printed — relative paths resolve against the tab's cwd. Strips a trailing
 // :line[:col] suffix, and SILENTLY no-ops if it doesn't resolve to a real file, so clicking path-like

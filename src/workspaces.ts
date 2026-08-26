@@ -12,6 +12,7 @@ import { type LNode, leaves, isValidLayout } from './layout';
 import { $, E, esc, uid } from './dom';
 import { toast, makeEditable } from './ui';
 import { renderFiles } from './files';
+import { disposeFileViewer } from './fileviewer';
 import { TEMPLATES } from './theme';
 import { initBlueprints, loadBlueprints, openTplMenu, findBlueprint, newFromBlueprint } from './blueprints';
 import type { Settings, Workspace, WorkspaceDef, OpenTab } from './shared/types';
@@ -109,7 +110,7 @@ export async function restoreWorkspaceSnapshot(ws: Workspace, alwaysRestore = fa
   // Focus the active pane's input so typing and Ctrl+C reach the shell immediately after a switch (or boot)
   // — otherwise nothing is focused and a running command can't be interrupted until a click.
   const foc = activeTab();
-  if (foc) requestAnimationFrame(() => { if (deps.blocksMode(foc)) (E(deps.pcmd[foc.group]) as HTMLElement)?.focus(); else foc.term.focus(); });
+  if (foc) requestAnimationFrame(() => { if (deps.blocksMode(foc)) (E(deps.pcmd[foc.group]) as HTMLElement)?.focus(); else foc.term?.focus(); });
 }
 
 // Teardown for a switch. Keep-alive (Phase 2): DETACH each shell — it keeps running and buffering in the
@@ -117,7 +118,7 @@ export async function restoreWorkspaceSnapshot(ws: Workspace, alwaysRestore = fa
 // dies on a switch). Pass `kill` only when the workspace is being deleted. Either way, dispose the xterm
 // renderers + drop the tab nodes (frees DOM/WebGL); pane DOM is reused so the E() cache stays valid.
 function teardownAllTabs(kill = false): void {
-  for (const t of state.tabs) { if (kill) relay.ptyKill(t.id); else relay.ptyDetach(t.id); t.term.dispose(); t.el.remove(); }
+  for (const t of state.tabs) { if (t.kind === 'file') { disposeFileViewer(t.id); t.el.remove(); continue; } if (kill) relay.ptyKill(t.id); else relay.ptyDetach(t.id); t.term?.dispose(); t.el.remove(); }
   state.tabs = [];
   state.layout = { g: 0 }; state.gv = ['', '', '', '']; state.focus = 0; state.active = ''; state.maxG = null;
   deps.reconcilePanes(); // collapse the grid back to one empty pane (like closeTab's last-tab reset) before the rebuild
