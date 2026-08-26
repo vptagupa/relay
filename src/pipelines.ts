@@ -99,6 +99,13 @@ ${BACKEND_GATE}
 
 Write \`{verdictRel}\` as JSON: {"passed": true, "summary": "your review verdict + any concerns"} — passed=true only if the change is correct, builds, runs without errors, and behaves correctly, AND (when the issue is backend-related) you actually ran the backend and confirmed the affected path works. If it's a backend change you could not validate, passed=false.`;
 
+// The review stage of the auto-fix LOOP (issues). Same review, strict gate: ANY concern → passed=false so it's
+// auto-fixed and re-reviewed; only a genuinely clean change ends the loop.
+const REVIEW_LOOP_BRIEF = REVIEW_BRIEF + `
+
+## Auto-fix loop — verdict rule
+This review feeds an automatic fix→re-review loop. Set **passed=true ONLY when the change is clean with ZERO remaining concerns, caveats, or risks**. If ANYTHING should still be addressed — a minor caveat, a missing test, an unverified path — set **passed=false** and list EACH concern as its own point in the summary. Those concerns are auto-fixed (pushed to the same PR) and re-reviewed, so be specific and actionable.`;
+
 const CUSTOM_BRIEF = `{issue}
 
 ---
@@ -146,6 +153,30 @@ ${BACKEND_GATE}
 When you're done, write your verdict to \`{verdictRel}\` as JSON on one object:
 {"passed": true, "summary": "one short paragraph: your review — is it correct & ready to merge, and any concerns/risks"}
 Set passed=true only if it builds, runs without errors, behaves correctly, and is ready to merge — AND (when the PR is backend-related) you actually ran the backend and confirmed the affected path works; false if it needs changes (errors, runtime failures, wrong behaviour, bugs, missing tests, risky) OR it's a backend change you could not validate.`;
+
+// The review stage of the auto-fix LOOP. Same review, but the verdict gate is strict: ANY concern → passed=false,
+// so it gets auto-fixed and re-reviewed. Only a genuinely clean PR ends the loop.
+export const PR_REVIEW_LOOP_BRIEF = PR_REVIEW_BRIEF + `
+
+## Auto-fix loop — verdict rule
+This review feeds an automatic fix→re-review loop. Set **passed=true ONLY when the PR is clean with ZERO remaining concerns, caveats, or risks** and is ready to merge as-is. If ANYTHING should still be addressed — even a minor caveat, a missing test, or an unverified path — set **passed=false** and list EACH concern as its own point in the summary. Those concerns are auto-fixed and the PR is re-reviewed, so be specific and actionable.`;
+
+// The fix stage of the auto-fix loop: address the review's concerns on the PR's OWN branch and push. The concerns
+// from the latest review are appended to this brief by the runner. Hands back to review (always-pass verdict).
+export const PR_REVIEW_FIX_BRIEF = `{issue}
+
+---
+
+## Address the review's concerns on this pull request
+The PR's source branch is checked out in THIS worktree, and a review just ran — its concerns are listed at the end of this brief (and posted as a comment on the PR). Fix EVERY concern, in this repository:
+
+- Make changes on the **current branch** (do NOT create a new branch).
+- Build / type-check / run the affected path to confirm each fix works and adds no new errors.
+- **Commit & push:** \`git add -A && git commit -m "fix: address review feedback"\`, then \`git push origin HEAD:{source}\` to update the pull request's branch. If the push is rejected (e.g. a fork you can't push to), do NOT push elsewhere — stop, report that a maintainer must push, and set passed=false below.
+
+Do not change unrelated code. When you're done, write \`{verdictRel}\` as JSON on one object:
+{"passed": true, "summary": "what you changed to address each concern"}
+This hands back to the review stage for a re-review — it does not decide pass/fail (the review does).`;
 
 /* ----------------------------- stage-kind catalog ----------------------------- */
 // One entry per kind: the palette label, the graph dot colour, whether it typically GATES (→ its brief
@@ -209,7 +240,19 @@ const fixOnly: PipelineDef = {
   desc: 'Skip the gate — go straight to a fix + PR (self-validates in one run).',
   stages: [{ id: 'fix', name: 'Fix', kind: 'fix', brief: FIX_ONLY_BRIEF, edges: [], x: 60, y: 120 }],
 };
-export const BUILTIN_PIPELINES: PipelineDef[] = [validateFix, fixOnly];
+// The auto-fix LOOP for issues: Validate → Fix → Review, where Review's concerns route BACK to Fix (which pushes
+// to the same PR) and re-review — looping until a clean review, capped by the runner. Fix + Review each reuse one
+// terminal across rounds. This is the "automate review + fix" option.
+const validateFixLoop: PipelineDef = {
+  id: 'validate-fix-loop', name: 'Validate → Fix → Review (auto-loop)', builtin: true,
+  desc: 'Validate, fix, and review — then auto-fix any review concerns on the same PR and re-review, looping until clean (capped).',
+  stages: [
+    { id: 'validate', name: 'Validate', kind: 'validate', brief: VALIDATE_BRIEF, edges: [{ when: 'valid', to: 'fix' }, { when: 'invalid', to: STOP }], x: 30, y: 110 },
+    { id: 'fix', name: 'Fix', kind: 'fix', brief: FIX_GATED_BRIEF, edges: [{ when: 'always', to: 'review' }], x: 300, y: 56 },
+    { id: 'review', name: 'Review', kind: 'review', brief: REVIEW_LOOP_BRIEF, edges: [{ when: 'valid', to: STOP }, { when: 'invalid', to: 'fix' }], x: 570, y: 56 },
+  ],
+};
+export const BUILTIN_PIPELINES: PipelineDef[] = [validateFix, validateFixLoop, fixOnly];
 
 /* ----------------------------- registry (built-in + user-authored) ----------------------------- */
 // The full list = built-ins first, then any custom pipelines (Settings.pipelines) that don't collide on id.
@@ -240,7 +283,17 @@ const resolvePr: PipelineDef = {
   desc: 'Merge the base branch in, then have the agent resolve the conflicts, commit, and push the update.',
   stages: [{ id: 'resolve', name: 'Resolve', kind: 'resolve', brief: PR_RESOLVE_BRIEF, edges: [{ when: 'valid', to: STOP }, { when: 'invalid', to: STOP }], x: 60, y: 110 }],
 };
-export const PR_BUILTIN_PIPELINES: PipelineDef[] = [reviewPr, resolvePr];
+// The auto-fix LOOP: Review → (clean) Stop, or (concerns) Fix → back to Review. Loops until a clean review, capped
+// by the runner. The two stages reuse one terminal each across rounds (the runner re-drives their live sessions).
+const reviewFixPr: PipelineDef = {
+  id: 'review-fix-pr', name: 'Review + auto-fix', builtin: true,
+  desc: 'Review the PR; on concerns, auto-fix them on the branch and re-review — looping until clean (capped).',
+  stages: [
+    { id: 'review', name: 'Review', kind: 'review', brief: PR_REVIEW_LOOP_BRIEF, edges: [{ when: 'valid', to: STOP }, { when: 'invalid', to: 'fix' }], x: 60, y: 110 },
+    { id: 'fix', name: 'Fix', kind: 'fix', brief: PR_REVIEW_FIX_BRIEF, edges: [{ when: 'always', to: 'review' }], x: 340, y: 110 },
+  ],
+};
+export const PR_BUILTIN_PIPELINES: PipelineDef[] = [reviewPr, reviewFixPr, resolvePr];
 export function prPipelines(custom?: PipelineDef[]): PipelineDef[] {
   const seen = new Set(PR_BUILTIN_PIPELINES.map((p) => p.id));
   const extra = (custom || []).filter((p) => p && p.id && !seen.has(p.id));
