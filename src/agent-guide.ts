@@ -45,6 +45,8 @@ as a PR comment in this exact shape:
 
 **Summary:** <2–3 plain-language sentences: what you reviewed and the outcome.>
 
+**In plain terms:** <for a NON-technical reader (a product owner) — no jargon, no file names, no code: what this change does for the product and whether it's safe to ship, in 1–2 sentences.>
+
 **What I verified**
 - <e.g. built / type-checked cleanly>
 - <e.g. ran the tests / exercised the affected path — with the actual observed result>
@@ -68,6 +70,8 @@ _In response to the Review Agent's review above._
 **What I changed**
 - <concern 1> → <the fix you made> — \`path/to/file:line\`
 - <concern 2> → <the fix> — \`path/to/file:line\`
+
+**In plain terms:** <for a NON-technical reader — no jargon, no file names, no code: what was wrong before and what's different now, in 1–2 sentences.>
 
 **Verification:** <built / tests — the actual observed result.>
 
