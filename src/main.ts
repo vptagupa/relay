@@ -306,7 +306,7 @@ ipcMain.handle('pty:create', async (e, { id, cwd, cols, rows, restore, runCmd, d
     return { reattached, alt: isAltScreen(id) };
   } catch (err) { logFatal('pty:create', err); return { reattached: false, alt: false }; } // a spawn failure must not reject into the renderer
 });
-ipcMain.on('pty:write', (_e, { id, data }) => writeTerm(id, data));
+ipcMain.on('pty:write', (_e, p: { id?: unknown; data?: unknown }) => { if (p && typeof p.id === 'string' && typeof p.data === 'string') writeTerm(p.id, p.data); }); // guard a malformed payload (writeTerm itself is already try/caught)
 ipcMain.on('pty:resize', (_e, { id, cols, rows }) => resizeTerm(id, cols, rows));
 ipcMain.on('pty:detach', (_e, { id }) => detachTerm(id));
 ipcMain.on('pty:kill', (e, { id }) => killTermFor(id, senderWin(e)?.id ?? 0)); // owner-scoped: don't let one window's eviction kill a shell another window adopted

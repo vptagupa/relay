@@ -13,7 +13,7 @@ import { openAuthorFilter } from './author-filter';
 import type { Issue } from './shared/types';
 import { allPipelines, pipelineById, isGate, nextEdge, stageIndexById, STOP, renderBrief, stageStatus, commentNote, type PipelineDef, type StageDef, type BriefCtx } from './pipelines';
 import { openPipelineBuilder } from './pipeline-editor';
-import { AGENTS, redriveAgent } from './agents-list';
+import { AGENTS, redriveAgent, redrivePrompt } from './agents-list';
 import { dbCredOptions, dbCredNote, loadDbCreds, dbCredMetas } from './dbcreds';
 import { repoDepsFor } from './repo-deps';
 import { noteChecks, notesNote, defaultNoteIds } from './brief-notes';
@@ -778,7 +778,7 @@ const runKey = (prov: ProviderId, rpo: string, n: number) => `${prov}:${rpo}#${n
 
 // Launch stage `idx` of a run: write its brief (stage 0's is already on disk from worktree-add), clear its
 // stale verdict, open the agent in the worktree tab, and — if it's a GATE — start watching for its verdict.
-const MAX_REVIEW_ROUNDS = 3; // review→fix cycles before the auto-fix loop stops and asks for a human
+const MAX_REVIEW_ROUNDS = 5; // review→fix cycles before the auto-fix loop stops and asks for a human
 // Watchdog (activity-based). A flat wall-clock timeout can't tell "slow but working" from "hung" — it killed a
 // legitimate 58-min fix. Instead a gate is "stuck" only if its terminal has produced NO output for STAGE_IDLE_MS
 // (a working agent streams output; a hung/dead one goes silent). STAGE_HARD_CAP_MS is an absolute backstop for a
@@ -836,7 +836,9 @@ async function launchStage(key: string, idx: number): Promise<void> {
   const existingTab = run.stageTabs?.[stage.id];
   if (existingTab && agent?.interactive) {
     const r0 = runs.get(key); if (r0 && r0.stageIdx === idx) r0.agentTabId = existingTab;
-    redriveAgent(existingTab, agent.prompt(briefRel)); // type the next round's prompt + submit it as a SEPARATE Enter (else the REPL treats text+CR as a paste and doesn't run it)
+    // Loop re-entry → a CONTEXTUAL prompt (fix: new concerns to verify+fix; review: new commit to re-review), not the
+    // neutral first-run brief prompt. Submit is a SEPARATE Enter (else the REPL treats text+CR as a paste and won't run it).
+    redriveAgent(existingTab, redrivePrompt(stage.kind, briefRel));
     render(); ensurePolling(); ensureStagePoll();
     return;
   }
@@ -894,6 +896,15 @@ function ensureStagePoll(): void {
   if (active && stageTimer == null) stageTimer = window.setInterval(() => void pollStages(), 4000);
   else if (!active && stageTimer != null) { clearInterval(stageTimer); stageTimer = null; }
 }
+// Isolate a single run's poll failure. An unexpected throw (a corrupt pipeline, a DOM error in render) must never
+// abort the whole poll pass or re-throw every tick — one bad run can't be allowed to starve the others or surface
+// as an unhandled rejection. Log it (mirrored to the crash log), stop the run from re-processing, and mark it
+// invalid so the user can re-assign.
+function pollFail(key: string, run: RunInfo | undefined, err: unknown): void {
+  try { console.error('[loop] pollStages failed for issue', run?.number, err); } catch { /* ignore */ }
+  if (run) { run.awaiting = false; run.recoverStage = undefined; run.recoverUntil = undefined; run.reason = run.reason || 'Stopped after an internal error — re-assign to retry.'; }
+  try { runStatus.set(key, 'invalid'); drainQueue(); render(); } catch { /* render is likely what threw — never recurse */ }
+}
 let pollingStages = false; // re-entrancy guard: the 4s interval must not start a second pass while one awaits
 async function pollStages(): Promise<void> {
   if (pollingStages) return;
@@ -901,48 +912,52 @@ async function pollStages(): Promise<void> {
   try {
     // ── awaiting gates: advance on a verdict, or trip the activity-based watchdog ──
     for (const [key, run] of [...runs.entries()].filter(([, r]) => r.awaiting)) {
-      // Watchdog: a gate is stuck only if its terminal has gone SILENT for STAGE_IDLE_MS (a working agent keeps
-      // emitting output) — or it has blown past the STAGE_HARD_CAP_MS absolute backstop. Fall back to awaitingSince
-      // until the tab has produced its first output. On a stall we free the slot but hand off to recovery (below),
-      // which keeps watching this stage's verdict so a late-finishing agent's real result is never thrown away.
-      if (run.awaitingSince) {
-        const act = run.agentTabId ? deps.tabActivity(run.agentTabId) : undefined;
-        const idleFor = Date.now() - Math.max(run.awaitingSince, act || 0);
-        const ranFor = Date.now() - run.awaitingSince;
-        if (idleFor > STAGE_IDLE_MS || ranFor > STAGE_HARD_CAP_MS) {
-          run.awaiting = false;
-          run.recoverStage = run.stageIdx; run.recoverUntil = Date.now() + RECOVER_GRACE_MS; // keep watching for a late verdict
-          const why = ranFor > STAGE_HARD_CAP_MS ? `ran ${Math.round(STAGE_HARD_CAP_MS / 3600000)}h without a verdict` : `produced no output for ${Math.round(STAGE_IDLE_MS / 60000)}m`;
-          run.reason = `${run.pipeline.stages[run.stageIdx].name} ${why} — the agent looks stuck. Take over from its terminal, or re-assign. (If it's still working, its verdict will still be picked up.)`;
-          runStatus.set(key, 'invalid');
-          toast(`#${run.number} — ${run.pipeline.stages[run.stageIdx].name} stalled`, false);
-          notify(`Issue #${run.number}: stage stalled`, run.reason);
-          drainQueue(); render();
-          continue;
+      try {
+        // Watchdog: a gate is stuck only if its terminal has gone SILENT for STAGE_IDLE_MS (a working agent keeps
+        // emitting output) — or it has blown past the STAGE_HARD_CAP_MS absolute backstop. Fall back to awaitingSince
+        // until the tab has produced its first output. On a stall we free the slot but hand off to recovery (below),
+        // which keeps watching this stage's verdict so a late-finishing agent's real result is never thrown away.
+        if (run.awaitingSince) {
+          const act = run.agentTabId ? deps.tabActivity(run.agentTabId) : undefined;
+          const idleFor = Date.now() - Math.max(run.awaitingSince, act || 0);
+          const ranFor = Date.now() - run.awaitingSince;
+          if (idleFor > STAGE_IDLE_MS || ranFor > STAGE_HARD_CAP_MS) {
+            run.awaiting = false;
+            run.recoverStage = run.stageIdx; run.recoverUntil = Date.now() + RECOVER_GRACE_MS; // keep watching for a late verdict
+            const why = ranFor > STAGE_HARD_CAP_MS ? `ran ${Math.round(STAGE_HARD_CAP_MS / 3600000)}h without a verdict` : `produced no output for ${Math.round(STAGE_IDLE_MS / 60000)}m`;
+            run.reason = `${run.pipeline.stages[run.stageIdx].name} ${why} — the agent looks stuck. Take over from its terminal, or re-assign. (If it's still working, its verdict will still be picked up.)`;
+            runStatus.set(key, 'invalid');
+            toast(`#${run.number} — ${run.pipeline.stages[run.stageIdx].name} stalled`, false);
+            notify(`Issue #${run.number}: stage stalled`, run.reason);
+            drainQueue(); render();
+            continue;
+          }
         }
-      }
-      const v = await relay.pipelineVerdict(run.wt, run.stageIdx).catch(() => null);
-      if (!runs.has(key) || !run.awaiting) continue;  // resolved/cleared while we awaited
-      if (!v || !v.found) continue;                    // verdict not written yet — keep polling
-      run.awaiting = false;
-      run.recoverStage = undefined; run.recoverUntil = undefined; // a real, on-time verdict supersedes any recovery
-      await advanceOnVerdict(key, run, v);
+        const v = await relay.pipelineVerdict(run.wt, run.stageIdx).catch(() => null);
+        if (!runs.has(key) || !run.awaiting) continue;  // resolved/cleared while we awaited
+        if (!v || !v.found) continue;                    // verdict not written yet — keep polling
+        run.awaiting = false;
+        run.recoverStage = undefined; run.recoverUntil = undefined; // a real, on-time verdict supersedes any recovery
+        await advanceOnVerdict(key, run, v);
+      } catch (err) { pollFail(key, run, err); } // one bad run must not abort the pass or wedge the others
     }
     // ── late-verdict recovery: a stalled gate whose verdict finally landed still advances (never lose finished work) ──
     for (const [key, run] of [...runs.entries()].filter(([, r]) => r.recoverStage != null && !r.awaiting)) {
-      if (run.recoverUntil && Date.now() > run.recoverUntil) { run.recoverStage = undefined; run.recoverUntil = undefined; continue; } // grace expired — give up (manual override still works)
-      const v = await relay.pipelineVerdict(run.wt, run.recoverStage!).catch(() => null);
-      if (!runs.has(key) || run.recoverStage == null) continue; // cleared while we read (override / re-assign / relaunch)
-      if (!v || !v.found) continue;                             // still no verdict — keep watching until grace expires
-      // Only require a free slot when the verdict actually ADVANCES to another stage; a clean stop / invalid off-ramp
-      // needs none, so it must finalize immediately rather than linger with the stale "stalled" reason.
-      const e = nextEdge(run.pipeline.stages[run.recoverStage], !!v.passed);
-      const willAdvance = !!(e && e.to !== STOP && stageIndexById(run.pipeline, e.to) >= 0);
-      if (willAdvance && workingCount() >= CAP()) continue;     // no slot to resume into — retry next tick
-      run.stageIdx = run.recoverStage; run.recoverStage = undefined; run.recoverUntil = undefined; run.reason = undefined;
-      toast(`#${run.number} — verdict arrived after the stall; resuming`, true);
-      notify(`Issue #${run.number}: resuming`, 'A late verdict landed — continuing the pipeline.');
-      await advanceOnVerdict(key, run, v);
+      try {
+        if (run.recoverUntil && Date.now() > run.recoverUntil) { run.recoverStage = undefined; run.recoverUntil = undefined; continue; } // grace expired — give up (manual override still works)
+        const v = await relay.pipelineVerdict(run.wt, run.recoverStage!).catch(() => null);
+        if (!runs.has(key) || run.recoverStage == null) continue; // cleared while we read (override / re-assign / relaunch)
+        if (!v || !v.found) continue;                             // still no verdict — keep watching until grace expires
+        // Only require a free slot when the verdict actually ADVANCES to another stage; a clean stop / invalid off-ramp
+        // needs none, so it must finalize immediately rather than linger with the stale "stalled" reason.
+        const e = nextEdge(run.pipeline.stages[run.recoverStage], !!v.passed);
+        const willAdvance = !!(e && e.to !== STOP && stageIndexById(run.pipeline, e.to) >= 0);
+        if (willAdvance && workingCount() >= CAP()) continue;     // no slot to resume into — retry next tick
+        run.stageIdx = run.recoverStage; run.recoverStage = undefined; run.recoverUntil = undefined; run.reason = undefined;
+        toast(`#${run.number} — verdict arrived after the stall; resuming`, true);
+        notify(`Issue #${run.number}: resuming`, 'A late verdict landed — continuing the pipeline.');
+        await advanceOnVerdict(key, run, v);
+      } catch (err) { pollFail(key, run, err); } // one bad run must not abort the pass or wedge the others
     }
   } finally { pollingStages = false; ensureStagePoll(); }
 }

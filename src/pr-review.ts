@@ -14,7 +14,7 @@ import { esc } from './dom';
 import { toast } from './ui';
 import { prPipelines, prPipelineById, renderBrief, nextEdge, stageIndexById, STOP, kindSpec, commentNote, type PipelineDef, type BriefCtx } from './pipelines';
 import { openPipelineBuilder } from './pipeline-editor';
-import { AGENTS, redriveAgent } from './agents-list';
+import { AGENTS, redriveAgent, redrivePrompt } from './agents-list';
 import { dbCredOptions, dbCredNote, loadDbCreds, dbCredMetas } from './dbcreds';
 
 const relay = (window as any).relay;
@@ -117,7 +117,7 @@ function stageBriefText(p: PipelineDef, idx: number, ctx: { number: number; titl
 }
 
 /* ----------------------------- runner (staged, gated by verdict files) ----------------------------- */
-const MAX_REVIEW_ROUNDS = 3; // review→fix cycles before the auto-fix loop stops and asks for a human
+const MAX_REVIEW_ROUNDS = 5; // review→fix cycles before the auto-fix loop stops and asks for a human
 // Watchdog (activity-based) — see issues.ts for the rationale. A gate is "stuck" only if its terminal has gone
 // silent for STAGE_IDLE_MS (a working agent streams output); STAGE_HARD_CAP_MS is an absolute backstop. On a stall
 // we free the slot but keep watching the verdict for RECOVER_GRACE_MS so a late-finishing agent still advances.
@@ -160,7 +160,9 @@ async function launchPrStage(key: string, idx: number): Promise<void> {
   const existingTab = run.stageTabs?.[stage.id];
   if (existingTab && agent?.interactive) {
     run.agentTabId = existingTab;
-    redriveAgent(existingTab, agent.prompt(briefRel)); // type the next round's prompt + submit it as a SEPARATE Enter (else the REPL treats text+CR as a paste and doesn't run it)
+    // Loop re-entry → a CONTEXTUAL prompt (fix: new concerns to verify+fix; review: new commit to re-review), not the
+    // neutral first-run brief prompt. Submit is a SEPARATE Enter (else the REPL treats text+CR as a paste and won't run it).
+    redriveAgent(existingTab, redrivePrompt(stage.kind, briefRel));
     deps.refresh(); ensureStagePoll();
     return;
   }
@@ -213,6 +215,13 @@ function ensureStagePoll(): void {
   if (active && stageTimer == null) stageTimer = window.setInterval(() => void pollStages(), 4000);
   else if (!active && stageTimer != null) { clearInterval(stageTimer); stageTimer = null; }
 }
+// Isolate a single run's poll failure — an unexpected throw must never abort the whole pass, spin every tick, or
+// surface as an unhandled rejection. Log it, stop the run re-processing, and surface it as changes-requested.
+function pollFail(key: string, run: PrRunInfo | undefined, err: unknown): void {
+  try { console.error('[loop] pollStages failed for PR', run?.number, err); } catch { /* ignore */ }
+  if (run) { run.awaiting = false; run.recoverStage = undefined; run.recoverUntil = undefined; run.reason = run.reason || 'Stopped after an internal error — re-assign to retry.'; }
+  try { prRunStatus.set(key, 'changes'); drainQueue(); deps.refresh(); } catch { /* refresh is likely what threw — never recurse */ }
+}
 let polling = false;
 async function pollStages(): Promise<void> {
   if (polling) return;
@@ -220,45 +229,49 @@ async function pollStages(): Promise<void> {
   try {
     // ── awaiting gates: advance on a verdict, or trip the activity-based watchdog ──
     for (const [key, run] of [...prRuns.entries()].filter(([, r]) => r.awaiting)) {
-      // Watchdog: stuck only if the terminal has gone SILENT for STAGE_IDLE_MS (a working agent keeps emitting) or
-      // blown past the STAGE_HARD_CAP_MS backstop. On a stall we free the slot but hand off to recovery (below), which
-      // keeps watching this stage's verdict so a late-finishing agent's real result is never thrown away.
-      if (run.awaitingSince) {
-        const act = run.agentTabId ? deps.tabActivity(run.agentTabId) : undefined;
-        const idleFor = Date.now() - Math.max(run.awaitingSince, act || 0);
-        const ranFor = Date.now() - run.awaitingSince;
-        if (idleFor > STAGE_IDLE_MS || ranFor > STAGE_HARD_CAP_MS) {
-          run.awaiting = false;
-          run.recoverStage = run.stageIdx; run.recoverUntil = Date.now() + RECOVER_GRACE_MS; // keep watching for a late verdict
-          const why = ranFor > STAGE_HARD_CAP_MS ? `ran ${Math.round(STAGE_HARD_CAP_MS / 3600000)}h without a verdict` : `produced no output for ${Math.round(STAGE_IDLE_MS / 60000)}m`;
-          run.reason = `${run.pipeline.stages[run.stageIdx].name} ${why} — the agent looks stuck. Take over from its terminal, or re-assign. (If it's still working, its verdict will still be picked up.)`;
-          prRunStatus.set(key, 'changes');
-          toast(`PR #${run.number} — ${run.pipeline.stages[run.stageIdx].name} stalled`, false);
-          notify(`PR #${run.number}: stage stalled`, run.reason);
-          drainQueue(); deps.refresh();
-          continue;
+      try {
+        // Watchdog: stuck only if the terminal has gone SILENT for STAGE_IDLE_MS (a working agent keeps emitting) or
+        // blown past the STAGE_HARD_CAP_MS backstop. On a stall we free the slot but hand off to recovery (below), which
+        // keeps watching this stage's verdict so a late-finishing agent's real result is never thrown away.
+        if (run.awaitingSince) {
+          const act = run.agentTabId ? deps.tabActivity(run.agentTabId) : undefined;
+          const idleFor = Date.now() - Math.max(run.awaitingSince, act || 0);
+          const ranFor = Date.now() - run.awaitingSince;
+          if (idleFor > STAGE_IDLE_MS || ranFor > STAGE_HARD_CAP_MS) {
+            run.awaiting = false;
+            run.recoverStage = run.stageIdx; run.recoverUntil = Date.now() + RECOVER_GRACE_MS; // keep watching for a late verdict
+            const why = ranFor > STAGE_HARD_CAP_MS ? `ran ${Math.round(STAGE_HARD_CAP_MS / 3600000)}h without a verdict` : `produced no output for ${Math.round(STAGE_IDLE_MS / 60000)}m`;
+            run.reason = `${run.pipeline.stages[run.stageIdx].name} ${why} — the agent looks stuck. Take over from its terminal, or re-assign. (If it's still working, its verdict will still be picked up.)`;
+            prRunStatus.set(key, 'changes');
+            toast(`PR #${run.number} — ${run.pipeline.stages[run.stageIdx].name} stalled`, false);
+            notify(`PR #${run.number}: stage stalled`, run.reason);
+            drainQueue(); deps.refresh();
+            continue;
+          }
         }
-      }
-      const v = await relay.pipelineVerdict(run.wt, run.stageIdx).catch(() => null);
-      if (!prRuns.has(key) || !run.awaiting) continue;   // resolved/cleared while we awaited
-      if (!v || !v.found) continue;                       // verdict not written yet — keep polling
-      run.awaiting = false;
-      run.recoverStage = undefined; run.recoverUntil = undefined; // a real, on-time verdict supersedes any recovery
-      await advanceOnVerdict(key, run, v);
+        const v = await relay.pipelineVerdict(run.wt, run.stageIdx).catch(() => null);
+        if (!prRuns.has(key) || !run.awaiting) continue;   // resolved/cleared while we awaited
+        if (!v || !v.found) continue;                       // verdict not written yet — keep polling
+        run.awaiting = false;
+        run.recoverStage = undefined; run.recoverUntil = undefined; // a real, on-time verdict supersedes any recovery
+        await advanceOnVerdict(key, run, v);
+      } catch (err) { pollFail(key, run, err); } // one bad run must not abort the pass or wedge the others
     }
     // ── late-verdict recovery: a stalled gate whose verdict finally landed still advances (never lose finished work) ──
     for (const [key, run] of [...prRuns.entries()].filter(([, r]) => r.recoverStage != null && !r.awaiting)) {
-      if (run.recoverUntil && Date.now() > run.recoverUntil) { run.recoverStage = undefined; run.recoverUntil = undefined; continue; } // grace expired — give up (re-assign still works)
-      const v = await relay.pipelineVerdict(run.wt, run.recoverStage!).catch(() => null);
-      if (!prRuns.has(key) || run.recoverStage == null) continue; // cleared while we read (re-assign / relaunch)
-      if (!v || !v.found) continue;                               // still no verdict — keep watching until grace expires
-      const e = nextEdge(run.pipeline.stages[run.recoverStage], !!v.passed);
-      const willAdvance = !!(e && e.to !== STOP && stageIndexById(run.pipeline, e.to) >= 0);
-      if (willAdvance && workingCount() >= CAP()) continue;       // no slot to resume into — retry next tick
-      run.stageIdx = run.recoverStage; run.recoverStage = undefined; run.recoverUntil = undefined; run.reason = undefined;
-      toast(`PR #${run.number} — verdict arrived after the stall; resuming`, true);
-      notify(`PR #${run.number}: resuming`, 'A late verdict landed — continuing the pipeline.');
-      await advanceOnVerdict(key, run, v);
+      try {
+        if (run.recoverUntil && Date.now() > run.recoverUntil) { run.recoverStage = undefined; run.recoverUntil = undefined; continue; } // grace expired — give up (re-assign still works)
+        const v = await relay.pipelineVerdict(run.wt, run.recoverStage!).catch(() => null);
+        if (!prRuns.has(key) || run.recoverStage == null) continue; // cleared while we read (re-assign / relaunch)
+        if (!v || !v.found) continue;                               // still no verdict — keep watching until grace expires
+        const e = nextEdge(run.pipeline.stages[run.recoverStage], !!v.passed);
+        const willAdvance = !!(e && e.to !== STOP && stageIndexById(run.pipeline, e.to) >= 0);
+        if (willAdvance && workingCount() >= CAP()) continue;       // no slot to resume into — retry next tick
+        run.stageIdx = run.recoverStage; run.recoverStage = undefined; run.recoverUntil = undefined; run.reason = undefined;
+        toast(`PR #${run.number} — verdict arrived after the stall; resuming`, true);
+        notify(`PR #${run.number}: resuming`, 'A late verdict landed — continuing the pipeline.');
+        await advanceOnVerdict(key, run, v);
+      } catch (err) { pollFail(key, run, err); } // one bad run must not abort the pass or wedge the others
     }
   } finally { polling = false; ensureStagePoll(); }
 }

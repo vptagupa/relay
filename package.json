@@ -1,7 +1,7 @@
 {
   "name": "relay-terminal",
   "productName": "Relay",
-  "version": "0.1.56",
+  "version": "0.1.59",
   "description": "An agent terminal — real cross-platform shells with a switchable multi-provider AI coding agent (Claude, GPT, Gemini).",
   "main": ".vite/build/main.js",
   "author": "Relay",

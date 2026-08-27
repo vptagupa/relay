@@ -31,3 +31,18 @@ export function redriveAgent(tabId: string, prompt: string): void {
   relay.ptyWrite(tabId, prompt);                                          // type the next round's prompt into the live REPL
   setTimeout(() => relay.ptyWrite(tabId, '\r'), REDRIVE_SUBMIT_DELAY_MS); // …then submit it as a DISTINCT Enter keystroke
 }
+
+// The prompt for a LOOP re-entry (re-driving a stage's live terminal for the NEXT round), framed by what just
+// happened rather than the neutral "carry out the brief" — because on a re-drive the agent is already mid-session
+// and needs to know what changed. A re-driven FIX stage was reached because the reviewer posted new concerns; a
+// re-driven REVIEW stage was reached because a new commit was pushed. Both point at the freshly-rewritten brief
+// FILE (rel) for the full details (the fix brief carries the exact concerns; the review brief, the review rubric).
+// The first run of each stage does NOT use this — it launches fresh with the neutral MSG. Other stage kinds fall
+// back to MSG (they don't loop, so this is only ever reached for fix/review).
+export function redrivePrompt(stageKind: string, rel: string): string {
+  if (stageKind === 'fix')
+    return `A new review was just posted with concerns on the pull request. Read ${rel} for the details, then VERIFY and VALIDATE each concern and FIX it — build/run to confirm, then commit and push to the same PR branch. Summarize what you changed.`;
+  if (stageKind === 'review')
+    return `A new commit was just pushed addressing your previous review. Read ${rel} and RE-REVIEW the updated change: build/run it to confirm the concerns are resolved and nothing regressed, then write your verdict.`;
+  return MSG(rel);
+}
