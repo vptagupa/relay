@@ -20,6 +20,14 @@ const templates = (): Record<string, string[]> => state.settings.repoDepsByRepo 
 /** The configured default dependency repo ids for a main repo (empty if none). Used by the deps pickers. */
 export function repoDepsFor(repoId: string): string[] { return templates()[repoId] || []; }
 
+// The brief section that points the agent at the read-only reference repos (linked under .deps/ at build time).
+// One source of truth, shared by the issue Assign, the task Validate, and the PR review deps pickers.
+export function depsNote(ids: string[]): string {
+  if (!ids.length) return '';
+  const lines = ids.map((id) => `- \`.deps/${shortName(id)}\` — ${id}`).join('\n');
+  return `\n\n---\n\n## Reference repositories (read-only — do NOT modify or commit these)\nThese related repos are checked out under \`.deps/\` for context:\n${lines}\nRead them to understand interfaces/contracts; your changes belong ONLY in this repository.`;
+}
+
 // Every tracked repo id across ALL workspaces — the pool for building a template.
 function allRepos(): string[] {
   const s = new Set<string>();

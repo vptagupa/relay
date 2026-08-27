@@ -153,6 +153,7 @@ export interface Settings {
   issueDbCredByKey?: Record<string, string>;   // per-issue DB credential template id (see DbCredMeta), keyed "provider:repo#number"; injected into the run's env
   prPipelineByKey?: Record<string, string>;    // per-PR review pipeline id, keyed "provider:repo#number"; unset → default review-pr
   prDbCredByKey?: Record<string, string>;      // per-PR DB credential template id, keyed "provider:repo#number"; injected into the review run's env
+  prDepsByKey?: Record<string, string[]>;      // per-PR dependency repo ids (qualified "provider:repo"), keyed "provider:repo#number" — checked out read-only under .deps/ in the review worktree
   tasksByWs?: Record<string, Task[]>;          // per-workspace Tasks: draft an issue, validate it against the repo, file it only if valid
   pmProjectRepoByWs?: Record<string, Record<string, string>>; // per-ws PM integration → the git repo its tasks build in: { wsId: { "provider:projectId": "provider:owner/repo" } }
   pmStatusMapByWs?: Record<string, Record<string, { start?: string; valid?: string; fixed?: string }>>; // per-ws, per-PM-provider status names for the lifecycle write-back: on validate start / on valid (issue filed) / on fixed (issue closed)

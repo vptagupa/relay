@@ -15,6 +15,9 @@ const api = {
   // `dbCredId` (optional) references a saved DB credential template — main resolves it into env vars for the run.
   ptyCreate: (id: string, cwd: string, cols: number, rows: number, restore?: string, runCmd?: string, dbCredId?: string): Promise<{ reattached: boolean; alt: boolean }> => ipcRenderer.invoke('pty:create', { id, cwd, cols, rows, restore, runCmd, dbCredId }),
   ptyWrite: (id: string, data: string) => ipcRenderer.send('pty:write', { id, data }),
+  // Type a prompt into a live agent REPL and submit its Enter as a SEPARATE keystroke after a short gap — the delay
+  // runs in MAIN (Node timer, never throttled/frozen by an unfocused window), unlike a renderer setTimeout.
+  ptySubmitPrompt: (id: string, data: string) => ipcRenderer.send('pty:submit-prompt', { id, data }),
   ptyResize: (id: string, cols: number, rows: number) => ipcRenderer.send('pty:resize', { id, cols, rows }),
   ptyDetach: (id: string) => ipcRenderer.send('pty:detach', { id }),
   ptyKill: (id: string) => ipcRenderer.send('pty:kill', { id }),

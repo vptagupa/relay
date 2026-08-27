@@ -307,6 +307,18 @@ ipcMain.handle('pty:create', async (e, { id, cwd, cols, rows, restore, runCmd, d
   } catch (err) { logFatal('pty:create', err); return { reattached: false, alt: false }; } // a spawn failure must not reject into the renderer
 });
 ipcMain.on('pty:write', (_e, p: { id?: unknown; data?: unknown }) => { if (p && typeof p.id === 'string' && typeof p.data === 'string') writeTerm(p.id, p.data); }); // guard a malformed payload (writeTerm itself is already try/caught)
+// Re-drive an interactive agent REPL (the review⇄fix loop) with the next round's prompt, submitting the Enter as a
+// SEPARATE keystroke after a short gap so the TUI doesn't read prompt+CR as one paste (and fold the CR into the
+// input instead of running it). The delay MUST run HERE in main — a renderer setTimeout is throttled, and after a
+// while frozen, whenever the window is unfocused/hidden, which left the prompt typed but never submitted until the
+// user refocused and pressed Enter themselves. A main-process (Node) timer fires regardless of window focus.
+const REDRIVE_SUBMIT_DELAY_MS = 250;
+ipcMain.on('pty:submit-prompt', (_e, p: { id?: unknown; data?: unknown }) => {
+  if (!p || typeof p.id !== 'string' || typeof p.data !== 'string') return;
+  const id = p.id;
+  writeTerm(id, p.data);                                            // type the prompt into the live REPL
+  setTimeout(() => writeTerm(id, '\r'), REDRIVE_SUBMIT_DELAY_MS);   // …then submit it as a distinct Enter (both no-op if the tab is gone)
+});
 ipcMain.on('pty:resize', (_e, { id, cols, rows }) => resizeTerm(id, cols, rows));
 ipcMain.on('pty:detach', (_e, { id }) => detachTerm(id));
 ipcMain.on('pty:kill', (e, { id }) => killTermFor(id, senderWin(e)?.id ?? 0)); // owner-scoped: don't let one window's eviction kill a shell another window adopted

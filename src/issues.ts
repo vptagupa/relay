@@ -15,7 +15,7 @@ import { allPipelines, pipelineById, isGate, nextEdge, stageIndexById, STOP, ren
 import { openPipelineBuilder } from './pipeline-editor';
 import { AGENTS, redriveAgent, redrivePrompt } from './agents-list';
 import { dbCredOptions, dbCredNote, loadDbCreds, dbCredMetas } from './dbcreds';
-import { repoDepsFor } from './repo-deps';
+import { repoDepsFor, depsNote } from './repo-deps';
 import { noteChecks, notesNote, defaultNoteIds } from './brief-notes';
 
 const relay = (window as any).relay;
@@ -204,12 +204,6 @@ function setIssueDbCred(prov: ProviderId, rpo: string, n: number, id: string): P
     try { state.settings = await relay.patchSettings({ issueDbCredByKey: map }); } catch { /* keep the in-memory pick */ }
   });
   return dbCredWriteChain;
-}
-// The brief section that points the agent at the read-only reference repos (linked under .deps/ at build time).
-function depsNote(ids: string[]): string {
-  if (!ids.length) return '';
-  const lines = ids.map((id) => { const { repo: r } = parseRepoId(id); return `- \`.deps/${r.split('/').pop()}\` — ${id}`; }).join('\n');
-  return `\n\n---\n\n## Reference repositories (read-only — do NOT modify or commit these)\nThese related repos are checked out under \`.deps/\` for context:\n${lines}\nRead them to understand interfaces/contracts; your changes belong ONLY in this repository.`;
 }
 
 // A defensive copy of a pipeline captured at assign time — so an in-flight run keeps the wiring it started

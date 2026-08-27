@@ -16,6 +16,7 @@ import { prPipelines, prPipelineById, renderBrief, nextEdge, stageIndexById, STO
 import { openPipelineBuilder } from './pipeline-editor';
 import { AGENTS, redriveAgent, redrivePrompt } from './agents-list';
 import { dbCredOptions, dbCredNote, loadDbCreds, dbCredMetas } from './dbcreds';
+import { repoDepsFor, depsNote } from './repo-deps';
 
 const relay = (window as any).relay;
 
@@ -67,6 +68,20 @@ function setPrDbCred(prov: ProviderId, repo: string, n: number, id: string): Pro
   });
   return prDbCredWriteChain;
 }
+
+// Per-PR dependency repos (read-only reference), keyed like the per-PR pipeline. Checked out under .deps/ in the
+// review worktree so the agent can read related repos (interfaces/contracts) while reviewing. Same model as the
+// issue Assign's deps picker; serialized writes so two fast board actions can't clobber the map.
+function prDepsFor(prov: ProviderId, repo: string, n: number): string[] { return (state.settings.prDepsByKey || {})[prPipeKey(prov, repo, n)] || []; }
+let prDepsWriteChain: Promise<void> = Promise.resolve();
+function setPrDeps(prov: ProviderId, repo: string, n: number, ids: string[]): Promise<void> {
+  prDepsWriteChain = prDepsWriteChain.then(async () => {
+    const map = { ...(state.settings.prDepsByKey || {}) };
+    if (ids.length) map[prPipeKey(prov, repo, n)] = ids; else delete map[prPipeKey(prov, repo, n)];
+    try { state.settings = await relay.patchSettings({ prDepsByKey: map }); } catch { /* keep the in-memory pick */ }
+  });
+  return prDepsWriteChain;
+}
 const clonePipeline = (p: PipelineDef): PipelineDef => JSON.parse(JSON.stringify(p));
 
 /* ----------------------------- run state ----------------------------- */
@@ -110,10 +125,12 @@ const prHead = (n: number, title: string, body?: string): string =>
 function prBriefCtx(run: { number: number; title: string; headText: string; base: string; source?: string }, idx: number): BriefCtx {
   return { issue: run.headText, number: run.number, title: run.title, closeStep: 'Summarize your review verdict.', base: run.base || '', source: run.source || '', verdictRel: `.slayer/stage-${idx}.json` };
 }
-// The rendered seed brief for a stage — editable in Assign before launch.
-function stageBriefText(p: PipelineDef, idx: number, ctx: { number: number; title: string; headText: string; base: string; source?: string }): string {
+// The rendered seed brief for a stage — editable in Assign before launch. Includes the commentNote nudge so a
+// REVIEW stage (always stage 0 of a PR pipeline, written once from the dialog and never rewritten by launchPrStage)
+// still tells the agent to post its verdict on the PR per ./CLAUDE.md — on a first-attempt pass as well as re-reviews.
+function stageBriefText(p: PipelineDef, idx: number, ctx: { number: number; title: string; headText: string; base: string; source?: string }, prov: ProviderId): string {
   const stage = p.stages[idx]; if (!stage) return '';
-  return renderBrief(stage.brief, prBriefCtx(ctx, idx));
+  return renderBrief(stage.brief, prBriefCtx(ctx, idx)) + commentNote(stage.kind, prov);
 }
 
 /* ----------------------------- runner (staged, gated by verdict files) ----------------------------- */
@@ -147,7 +164,7 @@ async function launchPrStage(key: string, idx: number): Promise<void> {
   const dbCredId = prDbCredFor(run.provider, run.repo, run.number);
   // Stage 0's brief file is already on disk (pr-worktree-add wrote it); write later stages + clear this stage's
   // stale verdict so a reused worktree can't read a previous run's pass/fail. Then launch the agent on the FILE.
-  let brief = renderBrief(stage.brief, prBriefCtx(run, idx)) + dbCredNote(dbCredId) + commentNote(stage.kind, run.provider); // ← post result on the PR per ./CLAUDE.md (Review/Fix Agent)
+  let brief = renderBrief(stage.brief, prBriefCtx(run, idx)) + dbCredNote(dbCredId) + depsNote(prDepsFor(run.provider, run.repo, run.number)) + commentNote(stage.kind, run.provider); // + .deps/ reference note + post result on the PR per ./CLAUDE.md
   // Auto-fix loop: hand the Fix stage the exact concerns the latest review raised.
   if (stage.kind === 'fix' && run.lastReviewSummary) brief += `\n\n---\n\n## Review concerns to address\n${run.lastReviewSummary}`;
   await relay.pipelinePrep(run.wt, idx === 0 ? null : briefRel, idx === 0 ? null : brief, idx).catch(() => {});
@@ -381,7 +398,16 @@ export async function openPrAssign(pr: PrRef, ctx: PrCtx, opts?: { pipelineId?: 
   let head = prHead(num, pr.title || '', '');
   let base = '';
   let briefDirty = false;
+  let ptitle = pr.title || '';                          // best-known PR title (list item now; enriched by fetchDetail)
   let selectedDbCred = prDbCredFor(prov, repo, num);   // DB credential template injected into the run's env
+  // Dependencies: read-only reference repos checked out under .deps/ for the review. Candidates = the workspace's
+  // OTHER tracked repos; default to this repo's saved deps template until the user customizes it for this PR.
+  const prRepoId = `${prov}:${repo || ''}`;
+  const depCandidates = ((state.settings.issueReposByWs || {})[activeWs()] || []).filter((id) => id !== prRepoId);
+  const savedPrDeps = prDepsFor(prov, repo, num);
+  const selectedDeps = new Set((savedPrDeps.length ? savedPrDeps : repoDepsFor(prRepoId)).filter((id) => depCandidates.includes(id)));
+  // The full stage-0 brief: template + DB-creds note + .deps/ note. One source, so every re-seed stays consistent.
+  const seedBrief = () => stageBriefText(pipeline, 0, { number: num, title: ptitle, headText: head, base, source }, prov) + dbCredNote(selectedDbCred) + depsNote([...selectedDeps]);
   const running = prStatusOf(prov, repo, num);
   const active = running !== 'idle' && running !== 'ready' && running !== 'changes';
   // Verb/primary/worktree-note track the selected pipeline: a resolve pipeline reads "Resolve", a review "Review".
@@ -401,8 +427,10 @@ export async function openPrAssign(pr: PrRef, ctx: PrCtx, opts?: { pipelineId?: 
         <div class="pipe-preview" id="prGraph">${pipePreview(pipeline)}</div>
         <div class="iss-pipedesc" id="prPipeDesc">${esc(pipeline.desc)}</div>
         ${dbCredMetas().length ? `<div class="iss-agentrow"><label class="iss-lbl" style="margin:0">Database</label><select class="iss-agentsel" id="prDb">${dbCredOptions(selectedDbCred)}</select></div>` : ''}
+        ${depCandidates.length ? `<label class="iss-lbl">Dependencies <span class="mut">— read-only repos the agent can view under <code>.deps/</code></span></label>
+        <div class="iss-deps" id="prDeps">${depCandidates.map((id) => `<label class="iss-dep"><input type="checkbox" value="${esc(id)}"${selectedDeps.has(id) ? ' checked' : ''}><b>${esc(id.split('/').pop() || id)}</b><span class="mut">${esc(id)}</span></label>`).join('')}</div>` : ''}
         <label class="iss-lbl">Brief · <span id="prBriefStage">${esc(pipeline.stages[0].name)}</span> stage <span class="mut">— edit before launch</span></label>
-        <textarea class="iss-brief" spellcheck="false" rows="10" id="prBrief">${esc(stageBriefText(pipeline, 0, { number: num, title: pr.title || '', headText: head, base, source }) + dbCredNote(selectedDbCred))}</textarea>
+        <textarea class="iss-brief" spellcheck="false" rows="10" id="prBrief">${esc(seedBrief())}</textarea>
         <div class="iss-wt" id="prAsgWt">${wtNoteFor(pipeline)}</div>
       </div>
       <div class="ft"><span class="hint">Saved as <code>.slayer/pr-${num}.md</code> (git-excluded)</span><span class="r"><button class="tpl-btn ghost" data-x>Cancel</button><button class="tpl-btn pri" data-ok>${primaryFor()}</button></span></div>
@@ -421,11 +449,17 @@ export async function openPrAssign(pr: PrRef, ctx: PrCtx, opts?: { pipelineId?: 
     const vb = root.querySelector('#prAsgVerb'); if (vb) vb.textContent = verbFor(pipeline);           // Resolve / Review header
     const wn = root.querySelector('#prAsgWt'); if (wn) wn.innerHTML = wtNoteFor(pipeline);              // worktree note follows the kind
     if (!assigning) okBtn.textContent = primaryFor();                                                   // "⚔ Resolve conflict" / "⚡ Run review"
-    if (!briefDirty) ta.value = stageBriefText(pipeline, 0, { number: num, title: pr.title || '', headText: head, base, source }) + dbCredNote(selectedDbCred);
+    if (!briefDirty) ta.value = seedBrief();
   };
   if (psel) psel.onchange = () => { pipelineId = psel.value; void setPrPipeline(prov, repo, num, pipelineId); syncPipe(); };
   const dbSel = root.querySelector('#prDb') as HTMLSelectElement | null;   // pick a DB credential template → persist + re-seed the DB note (unless edited)
-  if (dbSel) dbSel.onchange = () => { selectedDbCred = dbSel.value; void setPrDbCred(prov, repo, num, selectedDbCred); if (!briefDirty) ta.value = stageBriefText(pipeline, 0, { number: num, title: pr.title || '', headText: head, base, source }) + dbCredNote(selectedDbCred); };
+  if (dbSel) dbSel.onchange = () => { selectedDbCred = dbSel.value; void setPrDbCred(prov, repo, num, selectedDbCred); if (!briefDirty) ta.value = seedBrief(); };
+  // Toggle a dependency repo → persist it for this PR and re-seed the brief's .deps/ note (unless the brief was edited).
+  root.querySelectorAll<HTMLInputElement>('#prDeps input').forEach((cb) => cb.onchange = () => {
+    if (cb.checked) selectedDeps.add(cb.value); else selectedDeps.delete(cb.value);
+    void setPrDeps(prov, repo, num, [...selectedDeps]);
+    if (!briefDirty) ta.value = seedBrief();
+  });
   root.querySelector('#prPipeBuild')?.addEventListener('click', () => {
     openPipelineBuilder(pipeline, (savedId) => {
       if (savedId) { pipelineId = savedId; void setPrPipeline(prov, repo, num, pipelineId); }
@@ -442,9 +476,10 @@ export async function openPrAssign(pr: PrRef, ctx: PrCtx, opts?: { pipelineId?: 
   async function fetchDetail(): Promise<void> {
     const res = await relay.providerPrDetail(activeWs(), prov, repo, num).catch(() => null);
     if (!root.isConnected || !res || !res.ok || !res.detail) return;
-    head = prHead(num, res.detail.title || pr.title || '', res.detail.body);
+    ptitle = res.detail.title || pr.title || '';
+    head = prHead(num, ptitle, res.detail.body);
     base = res.detail.baseBranch || '';
-    if (!briefDirty) ta.value = stageBriefText(pipeline, 0, { number: num, title: res.detail.title || pr.title || '', headText: head, base, source }) + dbCredNote(selectedDbCred);
+    if (!briefDirty) ta.value = seedBrief();
   }
 
   setTimeout(() => ta.focus(), 30);
@@ -463,6 +498,8 @@ export async function openPrAssign(pr: PrRef, ctx: PrCtx, opts?: { pipelineId?: 
     // Launch even if the dialog was Escaped during prep — the worktree exists and the agent/brief are already
     // captured; an accidental Escape must not silently drop the run (the toast still fires).
     if (!res.ok) { okBtn.disabled = false; okBtn.textContent = primaryFor(); toast(res.error || (resolveMode ? 'Could not prepare the conflict worktree' : 'Could not check out the PR')); return; }
+    // Link the selected dependency repos read-only under .deps/ (best-effort — a dep that won't clone is skipped).
+    if (selectedDeps.size) { okBtn.textContent = 'Linking dependencies…'; await relay.linkDeps(res.path!, dir, [...selectedDeps].map((id) => { const s = id.indexOf(':'); return { provider: (s > 0 ? id.slice(0, s) : 'github') as ProviderId, repo: s > 0 ? id.slice(s + 1) : id }; })).catch(() => null); }
     const brief0Rel = res.briefRel || '';
     const agent = AGENTS.find((a) => a.id === agentId);
     if (!(agentOk && agent)) {   // no coding agent → just open the (conflict-materialized) worktree as a plain terminal
@@ -568,7 +605,7 @@ export async function openPrMap(prs: PrRef[], ctx: PrCtx): Promise<void> {
       // A resolve pipeline needs the base branch (fetched per-PR) merged into the worktree; a review just checks out the head.
       let base = '';
       if (resolveMode) { const d = await relay.providerPrDetail(activeWs(), prov, repo, n).catch(() => null); if (d && d.ok && d.detail) base = d.detail.baseBranch || ''; }
-      const brief0 = stageBriefText(pipeline, 0, { number: n, title: p.title || '', headText: head, base, source: p.branch });
+      const brief0 = stageBriefText(pipeline, 0, { number: n, title: p.title || '', headText: head, base, source: p.branch }, prov);
       const res = resolveMode
         ? await relay.prResolveWorktree(prov, repo, ctx.dir, n, p.branch, base, brief0).catch(() => ({ ok: false } as { ok: boolean; path?: string; briefRel?: string }))
         : await relay.prWorktreeAdd(prov, repo, ctx.dir, n, p.branch, brief0).catch(() => ({ ok: false } as { ok: boolean; path?: string; briefRel?: string }));
