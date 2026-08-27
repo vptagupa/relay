@@ -12,7 +12,8 @@ const relay = (window as any).relay;
 
 function parseRepoId(id: string): { provider: string; repo: string } {
   const m = /^(github|gitlab|bitbucket):(.+)$/.exec(id || '');
-  return m ? { provider: m[1], repo: m[2] } : { provider: 'github', repo: id };
+  const norm = (r: string) => r.replace(/\/+$/, '').replace(/\.git$/i, ''); // tolerate a repo id stored with a trailing .git/ (e.g. a pasted clone URL) — the API expects "owner/repo"
+  return m ? { provider: m[1], repo: norm(m[2]) } : { provider: 'github', repo: norm(id) };
 }
 const shortName = (id: string): string => { const { repo } = parseRepoId(id); return repo.split('/').pop() || repo; };
 

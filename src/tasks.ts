@@ -36,7 +36,8 @@ const wsKey = () => deps.activeWsId() || 'ws_default';
 
 function parseRepoId(id: string): { provider: ProviderId; repo: string } {
   const m = /^(github|gitlab|bitbucket):(.+)$/.exec(id || '');
-  return m ? { provider: m[1] as ProviderId, repo: m[2] } : { provider: 'github', repo: id };
+  const norm = (r: string) => r.replace(/\/+$/, '').replace(/\.git$/i, ''); // tolerate a repo id stored with a trailing .git/ (e.g. a pasted clone URL) — the API expects "owner/repo"
+  return m ? { provider: m[1] as ProviderId, repo: norm(m[2]) } : { provider: 'github', repo: norm(id) };
 }
 
 /* ----------------------------- persistence (per workspace) ----------------------------- */

@@ -98,9 +98,10 @@ const PROVIDER_LIST = [PROVS.github, PROVS.gitlab, PROVS.bitbucket]; // Sources 
 // Qualified repo id "provider:owner/name". A bare "owner/name" (legacy) is treated as GitHub.
 function parseRepoId(id: string): { provider: ProviderId; repo: string } {
   const m = /^(github|gitlab|bitbucket):(.+)$/.exec(id || '');
-  return m ? { provider: m[1] as ProviderId, repo: m[2] } : { provider: 'github', repo: id };
+  const norm = (r: string) => r.replace(/\/+$/, '').replace(/\.git$/i, ''); // tolerate a repo id stored with a trailing .git/ (e.g. a pasted clone URL) — the API expects "owner/repo"
+  return m ? { provider: m[1] as ProviderId, repo: norm(m[2]) } : { provider: 'github', repo: norm(id) };
 }
-const repoId = (p: ProviderId, r: string) => `${p}:${r}`;
+const repoId = (p: ProviderId, r: string) => `${p}:${r.replace(/\/+$/, '').replace(/\.git$/i, '')}`; // never store a repo id with a trailing .git/ (a pasted clone URL) — the provider API expects "owner/repo"
 
 type Phase = 'idle' | 'loading' | 'ready' | 'error' | 'noauth' | 'norepo';
 // A run moves through pipeline-stage statuses (validating/fixing) before a PR flips it to review; a closed
