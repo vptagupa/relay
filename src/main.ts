@@ -969,16 +969,23 @@ async function dropSlayerBrief(git: string, wtPath: string, briefRel: string, br
 //  • the repo already tracks its own CLAUDE.md → APPEND our delimited block, then mark the file `skip-worktree`
 //    so `git add -A` / commit can't carry the change into the PR (the repo's own instructions are preserved);
 //  • otherwise → write our own CLAUDE.md and git-exclude it (same mechanism as .slayer/).
-// Idempotent: a reused worktree already carrying our marker is left untouched. Best-effort — a failure here never
-// blocks the worktree from opening.
+// Idempotent-by-REPLACE: on a reused worktree we swap our OLD block for the CURRENT protocol (rather than skip), so
+// a worktree first created under an older protocol picks up protocol UPDATES on its next open instead of keeping a
+// stale CLAUDE.md forever (which would make the agent post in the outdated format). Best-effort — a failure here
+// never blocks the worktree from opening.
 async function dropAgentGuide(git: string, wtPath: string): Promise<void> {
   try {
     const cm = path.join(wtPath, 'CLAUDE.md');
     let existing = ''; try { existing = await fsp.readFile(cm, 'utf8'); } catch { /* none yet */ }
-    if (existing.includes(AGENT_GUIDE_MARK)) return; // already added (reused worktree) — don't duplicate
-    const tracked = !!existing && (await runBin(git, ['-C', wtPath, 'ls-files', '--error-unmatch', 'CLAUDE.md'])).ok;
+    // Is CLAUDE.md the repo's OWN tracked file (we APPEND our block + hide it) or ours to own outright?
+    const tracked = (await runBin(git, ['-C', wtPath, 'ls-files', '--error-unmatch', 'CLAUDE.md'])).ok;
+    // Preserve the repo's content BEFORE our marker; drop any previous Slayer T block; re-append the current one.
+    const markIdx = existing.indexOf(AGENT_GUIDE_MARK);
+    const before = (markIdx >= 0 ? existing.slice(0, markIdx) : (tracked ? existing : '')).replace(/\s+$/, '');
     const block = `${AGENT_GUIDE_MARK}\n\n${AGENT_GUIDE}`;
-    await fsp.writeFile(cm, existing ? existing.replace(/\s+$/, '') + '\n\n' + block + '\n' : block + '\n', 'utf8');
+    const next = before ? before + '\n\n' + block + '\n' : block + '\n';
+    if (next === existing) return; // already current — leave it (and its mtime) untouched
+    await fsp.writeFile(cm, next, 'utf8');
     if (tracked) {
       // The repo owns CLAUDE.md → keep our appended section out of git so a fix's `git add -A` never commits it.
       await runBin(git, ['-C', wtPath, 'update-index', '--skip-worktree', 'CLAUDE.md']);
