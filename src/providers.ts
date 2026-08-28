@@ -22,7 +22,7 @@ const isProvider = (s: unknown): s is ProviderId => typeof s === 'string' && (PR
 
 export interface RepoRow { repo: string; desc: string; priv: boolean; }
 export interface RepoListOpts { workspaces?: string[]; } // Bitbucket lists per workspace (CHANGE-2770); others ignore this
-export interface PrRow { number: number; branch: string; url: string; draft: boolean; title?: string; author?: string; state?: string; updatedAt?: number; }
+export interface PrRow { number: number; branch: string; url: string; draft: boolean; title?: string; author?: string; state?: string; createdAt?: number; updatedAt?: number; }
 // Mergeability, as far as the provider will tell us: 'conflict' = the head can't auto-merge into the base (needs
 // manual resolution); 'clean' = merges cleanly; 'unknown' = the provider hasn't computed it (GitHub is lazy) or
 // doesn't expose it (Bitbucket). Only 'conflict' drives the ⚠ badge + resolve action — 'unknown' shows nothing.
@@ -261,7 +261,7 @@ const github = {
   // detection just reads branch/url/draft on the default open+page-1 call, so its behaviour is unchanged.
   async prs(ws: string, repo: string, state: IssueState = 'open', page = 1, authors?: string[]): Promise<{ ok: boolean; prs?: PrRow[]; hasMore?: boolean; error?: string }> {
     const st = state === 'closed' ? 'closed' : 'open';
-    const norm = (raw: Raw): PrRow[] => raw.map((p) => ({ number: Number(p.number) || 0, branch: str(asObj(p.head).ref), url: str(p.html_url), draft: !!p.draft, title: str(p.title), author: str(asObj(p.user).login) || undefined, state: p.merged_at ? 'merged' : (str(p.state) || undefined), updatedAt: Date.parse(str(p.updated_at)) || 0 })).filter((p) => p.branch);
+    const norm = (raw: Raw): PrRow[] => raw.map((p) => ({ number: Number(p.number) || 0, branch: str(asObj(p.head).ref), url: str(p.html_url), draft: !!p.draft, title: str(p.title), author: str(asObj(p.user).login) || undefined, state: p.merged_at ? 'merged' : (str(p.state) || undefined), createdAt: Date.parse(str(p.created_at)) || 0, updatedAt: Date.parse(str(p.updated_at)) || 0 })).filter((p) => p.branch);
     if (authors && authors.length) {
       // /pulls has no author param, so deep-scan (bounded) and keep the selected authors' PRs. Branch/state stay intact.
       const want = new Set(authors); const out: PrRow[] = [];
@@ -443,7 +443,7 @@ const gitlab = {
     const glState = state === 'closed' ? 'all' : 'opened';
     // "Closed" asks GitLab for state=all (it splits closed + merged) then drops the still-open ones here.
     const norm = (raw: Raw): PrRow[] => raw.filter((m) => state === 'closed' ? str(m.state) !== 'opened' : true)
-      .map((m) => ({ number: Number(m.iid) || 0, branch: str(m.source_branch), url: str(m.web_url), draft: !!m.draft || !!m.work_in_progress, title: str(m.title), author: str(asObj(m.author).username) || undefined, state: str(m.state) || undefined, updatedAt: Date.parse(str(m.updated_at)) || 0 })).filter((p) => p.branch);
+      .map((m) => ({ number: Number(m.iid) || 0, branch: str(m.source_branch), url: str(m.web_url), draft: !!m.draft || !!m.work_in_progress, title: str(m.title), author: str(asObj(m.author).username) || undefined, state: str(m.state) || undefined, createdAt: Date.parse(str(m.created_at)) || 0, updatedAt: Date.parse(str(m.updated_at)) || 0 })).filter((p) => p.branch);
     if (authors && authors.length) {
       // Native server-side author filter: ?author_username= takes one username, so fan out per selected author.
       const results = await Promise.all(authors.map((a) => glApi(ws, `/projects/${enc(repo)}/merge_requests?state=${glState}&author_username=${encodeURIComponent(a)}&per_page=100&order_by=updated_at&sort=desc`)));

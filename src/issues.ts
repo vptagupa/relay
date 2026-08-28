@@ -11,7 +11,7 @@ import { $, esc } from './dom';
 import { toast, addSearch } from './ui';
 import { openAuthorFilter } from './author-filter';
 import type { Issue } from './shared/types';
-import { allPipelines, pipelineById, isGate, nextEdge, stageIndexById, STOP, renderBrief, stageStatus, commentNote, browserNote, type PipelineDef, type StageDef, type BriefCtx } from './pipelines';
+import { allPipelines, pipelineById, isGate, nextEdge, stageIndexById, STOP, renderBrief, stageStatus, commentNote, browserNote, orchestratorStopBody, type PipelineDef, type StageDef, type BriefCtx } from './pipelines';
 import { openPipelineBuilder } from './pipeline-editor';
 import { AGENTS, redriveAgent, redrivePrompt } from './agents-list';
 import { dbCredOptions, dbCredNote, loadDbCreds, dbCredMetas } from './dbcreds';
@@ -988,7 +988,7 @@ async function advanceOnVerdict(key: string, run: RunInfo, v: { passed?: boolean
         const concerns = (v.summary || '').trim();
         run.reason = `Still has concerns after ${MAX_REVIEW_ROUNDS} review⇄fix rounds — needs a human.\n\n${concerns}`;
         runStatus.set(key, 'invalid');
-        orchestratorNote(run, `⚠️ **Auto-fix stopped** after ${MAX_REVIEW_ROUNDS} review⇄fix rounds — a human should take over. Latest review concerns:\n\n${concerns}`);
+        orchestratorNote(run, orchestratorStopBody(MAX_REVIEW_ROUNDS, concerns));
         toast(`#${run.number} — auto-fix stopped after ${MAX_REVIEW_ROUNDS} rounds`, false);
         notify(`Issue #${run.number}: needs a human`, `Still has concerns after ${MAX_REVIEW_ROUNDS} review⇄fix rounds.`);
         drainQueue(); render();

@@ -12,7 +12,7 @@
 import { state } from './state';
 import { esc } from './dom';
 import { toast } from './ui';
-import { prPipelines, prPipelineById, renderBrief, nextEdge, stageIndexById, STOP, kindSpec, commentNote, browserNote, type PipelineDef, type BriefCtx } from './pipelines';
+import { prPipelines, prPipelineById, renderBrief, nextEdge, stageIndexById, STOP, kindSpec, commentNote, browserNote, orchestratorStopBody, type PipelineDef, type BriefCtx } from './pipelines';
 import { openPipelineBuilder } from './pipeline-editor';
 import { AGENTS, redriveAgent, redrivePrompt } from './agents-list';
 import { dbCredOptions, dbCredNote, loadDbCreds, dbCredMetas } from './dbcreds';
@@ -342,7 +342,7 @@ async function advanceOnVerdict(key: string, run: PrRunInfo, v: { passed?: boole
       if (run.rounds > MAX_REVIEW_ROUNDS) {
         run.reason = `Still has concerns after ${MAX_REVIEW_ROUNDS} review⇄fix rounds — needs a human.\n\n${summary}`;
         prRunStatus.set(key, 'changes');
-        postOrchestratorNote(run, `⚠️ **Auto-fix stopped** after ${MAX_REVIEW_ROUNDS} review⇄fix rounds — a human should take over. Latest review concerns:\n\n${summary}`);
+        postOrchestratorNote(run, orchestratorStopBody(MAX_REVIEW_ROUNDS, summary));
         toast(`PR #${run.number} — auto-fix stopped after ${MAX_REVIEW_ROUNDS} rounds`, false);
         notify(`PR #${run.number}: needs a human`, `Still has concerns after ${MAX_REVIEW_ROUNDS} review⇄fix rounds.`);
         drainQueue(); deps.refresh();

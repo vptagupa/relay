@@ -24,7 +24,7 @@ let deps: PrsDeps;
 
 type ProviderId = 'github' | 'gitlab' | 'bitbucket';
 // `repo`/`provider` are set only in the "All repos" scope (each row then labels its source repo).
-interface PrItem { number: number; branch: string; url: string; draft: boolean; title?: string; author?: string; state?: string; updatedAt?: number; repo?: string; provider?: ProviderId; }
+interface PrItem { number: number; branch: string; url: string; draft: boolean; title?: string; author?: string; state?: string; createdAt?: number; updatedAt?: number; repo?: string; provider?: ProviderId; }
 type Phase = 'idle' | 'loading' | 'noauth' | 'norepo' | 'error' | 'ready';
 
 const PROV_NAME: Record<ProviderId, string> = { github: 'GitHub', gitlab: 'GitLab', bitbucket: 'Bitbucket' };
@@ -55,6 +55,10 @@ let members: string[] = [];      // the active repo's collaborators (the author-
 let membersFor = '';             // the "provider:repo" the loaded members belong to — gate a re-fetch to a repo change
 const activeAuthors = new Set<string>(); // filter to these authors (OR); empty = all. Applied SERVER-SIDE in repo scope.
 let authorReloadT: number | null = null; // debounce: coalesce rapid author toggles into one server-side re-query
+// Client-side sort + text filter over the LOADED PRs (does not refetch). Default keeps the provider's updated-desc.
+let prSort: 'updated' | 'created' | 'number' = 'updated';
+let prSortDir: 'asc' | 'desc' = 'desc';
+let prQuery = ''; // filter by PR number or title text
 
 // The PR rail's OWN active repo pick (independent of Issues), per workspace.
 const prRepoFor = (): string => (state.settings.prRepoByWs || {})[wsKey()] || '';
@@ -69,8 +73,16 @@ async function loadMembers(mkey: string, p: ProviderId, r: string): Promise<void
   const res = await relay.providerRepoMembers(wsKey(), p, r).catch(() => ({ ok: false } as { ok: boolean; members?: string[] }));
   if (membersFor === mkey) members = res.ok && res.members ? res.members : [];
 }
-// The list actually shown = loaded PRs filtered to the selected authors (OR; empty selection = all).
-const visiblePrs = (): PrItem[] => activeAuthors.size ? prs.filter((p) => activeAuthors.has(p.author || '')) : prs;
+// The list actually shown = loaded PRs, filtered to the selected authors (OR; empty = all) + the text filter, then
+// sorted by the chosen key/direction. All client-side over what's loaded (see the note in the sort UI).
+const visiblePrs = (): PrItem[] => {
+  let list = activeAuthors.size ? prs.filter((p) => activeAuthors.has(p.author || '')) : prs;
+  const q = prQuery.trim().toLowerCase();
+  if (q) list = list.filter((p) => String(p.number).includes(q) || (p.title || '').toLowerCase().includes(q));
+  const dir = prSortDir === 'asc' ? 1 : -1;
+  const key = (p: PrItem): number => prSort === 'number' ? p.number : prSort === 'created' ? (p.createdAt || 0) : (p.updatedAt || 0);
+  return [...list].sort((a, b) => (key(a) - key(b)) * dir);
+};
 // Author options = repo members ∪ the authors already in the loaded PRs (so external / not-yet-member authors show too).
 function authorOptions(): string[] {
   const set = new Set<string>(members);
@@ -466,6 +478,18 @@ function render(): void {
     authorEl.setAttribute('data-n', activeAuthors.size ? String(activeAuthors.size) : '');
     authorEl.setAttribute('title', activeAuthors.size ? `Filtering by ${activeAuthors.size} author${activeAuthors.size > 1 ? 's' : ''}` : 'Filter by author');
   }
+  // Filter box + sort segmented — shown once there are PRs (or a filter is active). The active sort button carries a
+  // direction arrow; label = base + ↓/↑ so no CSS is needed.
+  const showTools = (phase === 'ready' && prs.length > 0) || prQuery.length > 0;
+  const searchEl = $('#prSearch') as HTMLInputElement | null;
+  if (searchEl) { (searchEl as HTMLElement).style.display = showTools ? '' : 'none'; if (document.activeElement !== searchEl && searchEl.value !== prQuery) searchEl.value = prQuery; }
+  const sortEl = $('#prSort');
+  if (sortEl) {
+    (sortEl as HTMLElement).style.display = showTools ? '' : 'none';
+    const arrow = prSortDir === 'asc' ? ' ↑' : ' ↓';
+    const labels: Record<string, string> = { updated: 'Updated', created: 'Created', number: 'Number' };
+    sortEl.querySelectorAll<HTMLElement>('.iss-seg').forEach((b) => { const k = b.dataset.so!; b.classList.toggle('on', k === prSort); b.textContent = labels[k] + (k === prSort ? arrow : ''); });
+  }
   const el = $('#prList'); if (!el) return;
   const hint = (icon: string, msg: string, sub = '') =>
     `<div class="isr-empty"><div class="isr-ei">${icon}</div><div>${msg}</div>${sub ? `<div class="isr-es">${sub}</div>` : ''}</div>`;
@@ -479,7 +503,7 @@ function render(): void {
       ? hint('✍', `No ${prState} ${word}s by the selected author${activeAuthors.size > 1 ? 's' : ''}`, 'Clear the author filter (✍) to see all.')
       : hint('✓', `No ${prState} ${word}s`, allMode ? 'across your tracked repos' : (repo ? esc(repo) : '')); return; }
   const shown = visiblePrs();
-  if (!shown.length)       { el.innerHTML = hint('✍', `No ${prState} ${word}s by the selected author${activeAuthors.size > 1 ? 's' : ''}`, 'Clear the author filter (✍) to see all.'); return; }
+  if (!shown.length)       { const why = prQuery.trim() ? `matching “${esc(prQuery.trim())}”` : `by the selected author${activeAuthors.size > 1 ? 's' : ''}`; el.innerHTML = hint('🔎', `No ${prState} ${word}s ${why}`, 'Clear the filter to see all.'); return; }
 
   el.innerHTML = shown.map((p) => {
     const pp = p.provider || provider;
@@ -491,7 +515,7 @@ function render(): void {
       <div class="pr-hash">#${p.number}</div>
       <div class="pr-body">
         <div class="pr-title">${esc(p.title || '(no title)')}</div>
-        <div class="pr-meta">${p.repo ? `<span class="pr-repo-lbl"><span class="src-dot ${PROV_DOT[pp]}"></span>${esc(p.repo)}</span>` : ''}<span class="pr-branch" title="source branch">⎇ ${esc(p.branch)}</span>${p.author ? `<span class="pr-author">${esc(p.author)}</span>` : ''}</div>
+        <div class="pr-meta">${p.repo ? `<span class="pr-repo-lbl"><span class="src-dot ${PROV_DOT[pp]}"></span>${esc(p.repo)}</span>` : ''}<span class="pr-branch" title="source branch">⎇ ${esc(p.branch)}</span>${p.author ? `<span class="pr-author">${esc(p.author)}</span>` : ''}${(prSort === 'created' ? p.createdAt : p.updatedAt) ? `<span class="pr-author" title="${prSort === 'created' ? 'opened' : 'updated'}">${prSort === 'created' ? 'opened' : 'updated'} ${esc(relTime((prSort === 'created' ? p.createdAt : p.updatedAt)!))}</span>` : ''}</div>
       </div>
       <div class="pr-side">
         ${runSt !== 'idle' ? `<span class="pr-run ${runSt}" data-prrun="1" title="Review: ${esc(PR_STATUS_LABEL[runSt] || runSt)} — click to manage">${esc(PR_STATUS_LABEL[runSt] || runSt)}</span>` : ''}
@@ -540,6 +564,18 @@ export function initPrs(d: PrsDeps): void {
   $('#prState')?.querySelectorAll<HTMLElement>('.iss-seg').forEach((b) => {
     b.onclick = () => { const s = b.dataset.st === 'closed' ? 'closed' : 'open'; if (s === prState) return; prState = s; void loadPrs(); };
   });
+  // Sort segmented: click a key to sort by it (desc); click the active key again to flip direction. Client-side over
+  // the loaded PRs — no refetch, so it's instant.
+  $('#prSort')?.querySelectorAll<HTMLElement>('.iss-seg').forEach((b) => {
+    b.onclick = () => {
+      const k = (b.dataset.so as 'updated' | 'created' | 'number') || 'updated';
+      if (prSort === k) prSortDir = prSortDir === 'desc' ? 'asc' : 'desc'; else { prSort = k; prSortDir = 'desc'; }
+      render();
+    };
+  });
+  // Filter box: filter the loaded PRs by number or title text (client-side; re-render on each keystroke).
+  const search = $('#prSearch') as HTMLInputElement | null;
+  if (search) search.oninput = () => { prQuery = search.value; render(); };
   const listEl = $('#prList');
   if (listEl) listEl.addEventListener('scroll', () => { if (listEl.scrollTop + listEl.clientHeight >= listEl.scrollHeight - 240) void loadMorePrs(); });
   render();

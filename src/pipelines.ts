@@ -213,6 +213,20 @@ export function commentNote(kind: StageKind, prov: string): string {
   return `\n\n---\n## Post your result on the pull request\nBefore you finish, ${what}, following the commenting protocol in \`./CLAUDE.md\` — read it, identify yourself as ${who}, and use its standard format. Post with ${cmd}.`;
 }
 
+// The BODY of the app-posted "auto-fix stopped" orchestrator comment (the caller prepends the "### 🤖 Slayer T
+// orchestrator" identity header). Kept readable + in ONE place so the PR and issue loops post the same well-formatted
+// note instead of a terse run-on line.
+export function orchestratorStopBody(rounds: number, summary: string): string {
+  const s = (summary || '').trim();
+  return `🛑 **Auto-fix stopped — a human is needed**
+
+The automated review⇄fix loop ran its maximum of **${rounds} rounds** without reaching a clean review, so Slayer T has stopped fixing this pull request. Please take it from here.
+
+**Latest review concerns**
+
+${s || '_(none recorded)_'}`;
+}
+
 // A browser-verification gate appended to a review/fix brief when the user opts into "verify in Chrome": a UI change
 // must be exercised in a REAL browser, not passed on inspection alone (mirrors BACKEND_GATE). Shared by the PR and
 // issue pipelines. Returns '' unless enabled AND the stage is a review or fix.
