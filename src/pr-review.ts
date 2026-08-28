@@ -12,7 +12,7 @@
 import { state } from './state';
 import { esc } from './dom';
 import { toast } from './ui';
-import { prPipelines, prPipelineById, renderBrief, nextEdge, stageIndexById, STOP, kindSpec, commentNote, type PipelineDef, type BriefCtx } from './pipelines';
+import { prPipelines, prPipelineById, renderBrief, nextEdge, stageIndexById, STOP, kindSpec, commentNote, browserNote, type PipelineDef, type BriefCtx } from './pipelines';
 import { openPipelineBuilder } from './pipeline-editor';
 import { AGENTS, redriveAgent, redrivePrompt } from './agents-list';
 import { dbCredOptions, dbCredNote, loadDbCreds, dbCredMetas } from './dbcreds';
@@ -81,6 +81,38 @@ function setPrDeps(prov: ProviderId, repo: string, n: number, ids: string[]): Pr
     try { state.settings = await relay.patchSettings({ prDepsByKey: map }); } catch { /* keep the in-memory pick */ }
   });
   return prDepsWriteChain;
+}
+
+// Per-PR auto-approve: when on, a clean Review Agent verdict (passed=true) auto-posts an "Approve" review on the PR.
+function prAutoApproveFor(prov: ProviderId, repo: string, n: number): boolean { return !!(state.settings.prAutoApproveByKey || {})[prPipeKey(prov, repo, n)]; }
+let prAutoApproveWriteChain: Promise<void> = Promise.resolve();
+function setPrAutoApprove(prov: ProviderId, repo: string, n: number, on: boolean): Promise<void> {
+  prAutoApproveWriteChain = prAutoApproveWriteChain.then(async () => {
+    const map = { ...(state.settings.prAutoApproveByKey || {}) };
+    if (on) map[prPipeKey(prov, repo, n)] = true; else delete map[prPipeKey(prov, repo, n)];
+    try { state.settings = await relay.patchSettings({ prAutoApproveByKey: map }); } catch { /* keep the in-memory pick */ }
+  });
+  return prAutoApproveWriteChain;
+}
+// When auto-approve is ON, the review verdict gates a REAL merge-approval — so tighten the bar in the brief: the
+// agent must treat a pass as an approval and hold passed=true to "genuinely clean", failing even non-blocking /
+// fixable concerns it would otherwise leave as a comment. Only applies to a REVIEW stage.
+function autoApproveNote(kind: string, on: boolean): string {
+  if (!on || kind !== 'review') return '';
+  return `\n\n---\n## Auto-approve is ON for this review\nYour verdict gates a real merge-approval: **passed=true here will auto-approve this pull request.** Hold it to a strict bar — set passed=true ONLY if the PR is genuinely clean with NO remaining concerns, **blocking OR non-blocking/fixable**. If there is ANY concern you would otherwise leave as a non-blocking review comment (a nit, a missing test, a follow-up), set **passed=false** instead, so it's surfaced rather than silently approved.`;
+}
+
+// Per-PR "verify in Chrome": when on, a browser gate (mirrors the backend gate) is appended to the review + fix
+// briefs — a UI/frontend change must be exercised in a REAL browser, not passed on inspection alone.
+function prBrowserFor(prov: ProviderId, repo: string, n: number): boolean { return !!(state.settings.prBrowserByKey || {})[prPipeKey(prov, repo, n)]; }
+let prBrowserWriteChain: Promise<void> = Promise.resolve();
+function setPrBrowser(prov: ProviderId, repo: string, n: number, on: boolean): Promise<void> {
+  prBrowserWriteChain = prBrowserWriteChain.then(async () => {
+    const map = { ...(state.settings.prBrowserByKey || {}) };
+    if (on) map[prPipeKey(prov, repo, n)] = true; else delete map[prPipeKey(prov, repo, n)];
+    try { state.settings = await relay.patchSettings({ prBrowserByKey: map }); } catch { /* keep the in-memory pick */ }
+  });
+  return prBrowserWriteChain;
 }
 const clonePipeline = (p: PipelineDef): PipelineDef => JSON.parse(JSON.stringify(p));
 
@@ -164,7 +196,7 @@ async function launchPrStage(key: string, idx: number): Promise<void> {
   const dbCredId = prDbCredFor(run.provider, run.repo, run.number);
   // Stage 0's brief file is already on disk (pr-worktree-add wrote it); write later stages + clear this stage's
   // stale verdict so a reused worktree can't read a previous run's pass/fail. Then launch the agent on the FILE.
-  let brief = renderBrief(stage.brief, prBriefCtx(run, idx)) + dbCredNote(dbCredId) + depsNote(prDepsFor(run.provider, run.repo, run.number)) + commentNote(stage.kind, run.provider); // + .deps/ reference note + post result on the PR per ./CLAUDE.md
+  let brief = renderBrief(stage.brief, prBriefCtx(run, idx)) + dbCredNote(dbCredId) + depsNote(prDepsFor(run.provider, run.repo, run.number)) + browserNote(stage.kind, prBrowserFor(run.provider, run.repo, run.number)) + commentNote(stage.kind, run.provider); // + .deps/ note + browser gate + post result per ./CLAUDE.md
   // Auto-fix loop: hand the Fix stage the exact concerns the latest review raised.
   if (stage.kind === 'fix' && run.lastReviewSummary) brief += `\n\n---\n\n## Review concerns to address\n${run.lastReviewSummary}`;
   await relay.pipelinePrep(run.wt, idx === 0 ? null : briefRel, idx === 0 ? null : brief, idx).catch(() => {});
@@ -325,6 +357,16 @@ async function advanceOnVerdict(key: string, run: PrRunInfo, v: { passed?: boole
     run.reason = summary || 'Looks good.'; prRunStatus.set(key, 'ready');
     toast(`PR #${run.number} — review passed ✓ ready to merge`, true);
     notify(`PR #${run.number}: review passed ✓`, summary || 'Ready to merge.');
+    // Auto-approve (opt-in, per-PR): a clean REVIEW verdict posts an Approve review on the user's behalf. Best-effort
+    // — most providers refuse to approve your OWN PR (author ≠ reviewer identity), so surface that as a toast.
+    if (fromStage.kind === 'review' && prAutoApproveFor(run.provider, run.repo, run.number)) {
+      void relay.providerPrReview(activeWs(), run.provider, run.repo, run.number, 'approve', `✅ Auto-approved by Slayer T — the Review Agent's verdict passed clean.\n\n${summary}`.slice(0, 60000))
+        .then((r: { ok: boolean; error?: string }) => {
+          if (r.ok) { toast(`PR #${run.number} — auto-approved ✓`, true); notify(`PR #${run.number}: auto-approved ✓`, 'The review passed clean.'); }
+          else { toast(`PR #${run.number} — auto-approve failed: ${r.error || 'request failed'}`, false); }
+        })
+        .catch(() => toast(`PR #${run.number} — auto-approve request failed`, false));
+    }
     drainQueue(); deps.refresh();
   } else {
     // The invalid off-ramp (or a failed verdict with no matching edge) → changes requested (the Review Agent posted it).
@@ -406,8 +448,11 @@ export async function openPrAssign(pr: PrRef, ctx: PrCtx, opts?: { pipelineId?: 
   const depCandidates = ((state.settings.issueReposByWs || {})[activeWs()] || []).filter((id) => id !== prRepoId);
   const savedPrDeps = prDepsFor(prov, repo, num);
   const selectedDeps = new Set((savedPrDeps.length ? savedPrDeps : repoDepsFor(prRepoId)).filter((id) => depCandidates.includes(id)));
-  // The full stage-0 brief: template + DB-creds note + .deps/ note. One source, so every re-seed stays consistent.
-  const seedBrief = () => stageBriefText(pipeline, 0, { number: num, title: ptitle, headText: head, base, source }, prov) + dbCredNote(selectedDbCred) + depsNote([...selectedDeps]);
+  let selectedAutoApprove = prAutoApproveFor(prov, repo, num); // auto-post an Approve review when the verdict passes clean
+  let selectedBrowser = prBrowserFor(prov, repo, num);        // verify UI changes in a real Chrome browser
+  // The full stage-0 brief: template + DB-creds note + .deps/ note + (if on) the browser gate + the strict
+  // auto-approve note. One source, so every re-seed stays consistent.
+  const seedBrief = () => stageBriefText(pipeline, 0, { number: num, title: ptitle, headText: head, base, source }, prov) + dbCredNote(selectedDbCred) + depsNote([...selectedDeps]) + browserNote(pipeline.stages[0].kind, selectedBrowser) + autoApproveNote(pipeline.stages[0].kind, selectedAutoApprove);
   const running = prStatusOf(prov, repo, num);
   const active = running !== 'idle' && running !== 'ready' && running !== 'changes';
   // Verb/primary/worktree-note track the selected pipeline: a resolve pipeline reads "Resolve", a review "Review".
@@ -429,6 +474,8 @@ export async function openPrAssign(pr: PrRef, ctx: PrCtx, opts?: { pipelineId?: 
         ${dbCredMetas().length ? `<div class="iss-agentrow"><label class="iss-lbl" style="margin:0">Database</label><select class="iss-agentsel" id="prDb">${dbCredOptions(selectedDbCred)}</select></div>` : ''}
         ${depCandidates.length ? `<label class="iss-lbl">Dependencies <span class="mut">— read-only repos the agent can view under <code>.deps/</code></span></label>
         <div class="iss-deps" id="prDeps">${depCandidates.map((id) => `<label class="iss-dep"><input type="checkbox" value="${esc(id)}"${selectedDeps.has(id) ? ' checked' : ''}><b>${esc(id.split('/').pop() || id)}</b><span class="mut">${esc(id)}</span></label>`).join('')}</div>` : ''}
+        <label class="iss-check" style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;margin:2px 0"><input type="checkbox" id="prBrowser"${selectedBrowser ? ' checked' : ''}> Verify UI changes in a Chrome browser <span class="mut">— the agent opens the affected page and exercises it, not just the diff</span></label>
+        <label class="iss-check" style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;margin:2px 0"><input type="checkbox" id="prAutoApprove"${selectedAutoApprove ? ' checked' : ''}> Auto-approve the pull request when the review passes <span class="mut">— posts an Approve review only if the verdict is clean</span></label>
         <label class="iss-lbl">Brief · <span id="prBriefStage">${esc(pipeline.stages[0].name)}</span> stage <span class="mut">— edit before launch</span></label>
         <textarea class="iss-brief" spellcheck="false" rows="10" id="prBrief">${esc(seedBrief())}</textarea>
         <div class="iss-wt" id="prAsgWt">${wtNoteFor(pipeline)}</div>
@@ -460,6 +507,12 @@ export async function openPrAssign(pr: PrRef, ctx: PrCtx, opts?: { pipelineId?: 
     void setPrDeps(prov, repo, num, [...selectedDeps]);
     if (!briefDirty) ta.value = seedBrief();
   });
+  // Browser-verify toggle → persist + re-seed the brief's browser gate.
+  const brCb = root.querySelector('#prBrowser') as HTMLInputElement | null;
+  if (brCb) brCb.onchange = () => { selectedBrowser = brCb.checked; void setPrBrowser(prov, repo, num, selectedBrowser); if (!briefDirty) ta.value = seedBrief(); };
+  // Auto-approve toggle → persist + re-seed the brief's strict-verdict note (so a pass truly means clean).
+  const aaCb = root.querySelector('#prAutoApprove') as HTMLInputElement | null;
+  if (aaCb) aaCb.onchange = () => { selectedAutoApprove = aaCb.checked; void setPrAutoApprove(prov, repo, num, selectedAutoApprove); if (!briefDirty) ta.value = seedBrief(); };
   root.querySelector('#prPipeBuild')?.addEventListener('click', () => {
     openPipelineBuilder(pipeline, (savedId) => {
       if (savedId) { pipelineId = savedId; void setPrPipeline(prov, repo, num, pipelineId); }

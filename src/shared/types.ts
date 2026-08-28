@@ -149,11 +149,14 @@ export interface Settings {
   issueConcurrency?: number; // max agents the assign queue runs at once (per repo); default 2
   issuePipelineByKey?: Record<string, string>; // per-issue pipeline id, keyed "provider:repo#number"; unset → default validate-fix
   issueDepsByKey?: Record<string, string[]>;   // per-issue dependency repo ids (qualified "provider:repo"), keyed "provider:repo#number" — checked out read-only under .deps/ in the worktree for reference
+  issueBrowserByKey?: Record<string, boolean>; // per-issue: tell the fix/review agent to verify UI changes in a real Chrome browser, keyed "provider:repo#number"
   repoDepsByRepo?: Record<string, string[]>;   // per-MAIN-repo default dependency repo ids (qualified "provider:repo") — auto-selected in the Assign/Validate deps picker when that repo has no saved deps yet
   issueDbCredByKey?: Record<string, string>;   // per-issue DB credential template id (see DbCredMeta), keyed "provider:repo#number"; injected into the run's env
   prPipelineByKey?: Record<string, string>;    // per-PR review pipeline id, keyed "provider:repo#number"; unset → default review-pr
   prDbCredByKey?: Record<string, string>;      // per-PR DB credential template id, keyed "provider:repo#number"; injected into the review run's env
   prDepsByKey?: Record<string, string[]>;      // per-PR dependency repo ids (qualified "provider:repo"), keyed "provider:repo#number" — checked out read-only under .deps/ in the review worktree
+  prAutoApproveByKey?: Record<string, boolean>; // per-PR: auto-post an Approve review when the Review Agent's verdict passes clean, keyed "provider:repo#number"
+  prBrowserByKey?: Record<string, boolean>;     // per-PR: tell the review/fix agent to verify UI changes in a real Chrome browser (not on inspection alone), keyed "provider:repo#number"
   tasksByWs?: Record<string, Task[]>;          // per-workspace Tasks: draft an issue, validate it against the repo, file it only if valid
   pmProjectRepoByWs?: Record<string, Record<string, string>>; // per-ws PM integration → the git repo its tasks build in: { wsId: { "provider:projectId": "provider:owner/repo" } }
   pmStatusMapByWs?: Record<string, Record<string, { start?: string; valid?: string; fixed?: string }>>; // per-ws, per-PM-provider status names for the lifecycle write-back: on validate start / on valid (issue filed) / on fixed (issue closed)

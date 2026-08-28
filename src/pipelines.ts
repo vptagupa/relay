@@ -213,6 +213,17 @@ export function commentNote(kind: StageKind, prov: string): string {
   return `\n\n---\n## Post your result on the pull request\nBefore you finish, ${what}, following the commenting protocol in \`./CLAUDE.md\` — read it, identify yourself as ${who}, and use its standard format. Post with ${cmd}.`;
 }
 
+// A browser-verification gate appended to a review/fix brief when the user opts into "verify in Chrome": a UI change
+// must be exercised in a REAL browser, not passed on inspection alone (mirrors BACKEND_GATE). Shared by the PR and
+// issue pipelines. Returns '' unless enabled AND the stage is a review or fix.
+export function browserNote(kind: StageKind | string, on: boolean): string {
+  if (!on || (kind !== 'review' && kind !== 'fix')) return '';
+  const tail = kind === 'review'
+    ? 'If it is a UI change you could NOT verify in a browser, or it misbehaves on screen, set passed=false and state what stayed unverified.'
+    : 'Confirm your fix in the browser before you push.';
+  return `\n\n---\n## Verify in the browser (Chrome) — do NOT pass a UI change on inspection alone\nThis change may touch the FRONTEND / UI. Reading the diff is not enough: start the app (its dev server or build) and open the affected page in a REAL Chrome browser using your browser tooling (a Chrome/Playwright/Puppeteer MCP, or drive Chrome directly). Exercise the changed flow — navigate to it, click, submit, resize — and confirm it renders and behaves correctly: the intended result on screen, no broken layout, and a clean browser console (no new errors/warnings from this change). ${tail} If the change is purely backend / non-UI, say so briefly and skip the browser step.`;
+}
+
 /* ----------------------------- brief rendering ----------------------------- */
 export interface BriefCtx { issue: string; number: number; title: string; closeStep: string; verdictRel: string; base?: string; source?: string; }
 // Interpolate ONLY the known tokens (so literal JSON braces like {"passed":…} in the template are untouched).

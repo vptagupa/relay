@@ -11,7 +11,7 @@ import { $, esc } from './dom';
 import { toast, addSearch } from './ui';
 import { openAuthorFilter } from './author-filter';
 import type { Issue } from './shared/types';
-import { allPipelines, pipelineById, isGate, nextEdge, stageIndexById, STOP, renderBrief, stageStatus, commentNote, type PipelineDef, type StageDef, type BriefCtx } from './pipelines';
+import { allPipelines, pipelineById, isGate, nextEdge, stageIndexById, STOP, renderBrief, stageStatus, commentNote, browserNote, type PipelineDef, type StageDef, type BriefCtx } from './pipelines';
 import { openPipelineBuilder } from './pipeline-editor';
 import { AGENTS, redriveAgent, redrivePrompt } from './agents-list';
 import { dbCredOptions, dbCredNote, loadDbCreds, dbCredMetas } from './dbcreds';
@@ -193,6 +193,18 @@ function setIssueDeps(prov: ProviderId, rpo: string, n: number, ids: string[]): 
     try { state.settings = await relay.patchSettings({ issueDepsByKey: map }); } catch { /* keep the in-memory pick */ }
   });
   return depsWriteChain;
+}
+// Per-issue "verify in Chrome": when on, the browser gate is appended to the fix + review stage briefs (a UI change
+// must be exercised in a real browser, not passed on inspection alone). Keyed like the per-issue pipeline.
+function issueBrowserFor(prov: ProviderId, rpo: string, n: number): boolean { return !!(state.settings.issueBrowserByKey || {})[pipeKeyFor(prov, rpo, n)]; }
+let browserWriteChain: Promise<void> = Promise.resolve();
+function setIssueBrowser(prov: ProviderId, rpo: string, n: number, on: boolean): Promise<void> {
+  browserWriteChain = browserWriteChain.then(async () => {
+    const map = { ...(state.settings.issueBrowserByKey || {}) };
+    if (on) map[pipeKeyFor(prov, rpo, n)] = true; else delete map[pipeKeyFor(prov, rpo, n)];
+    try { state.settings = await relay.patchSettings({ issueBrowserByKey: map }); } catch { /* keep the in-memory pick */ }
+  });
+  return browserWriteChain;
 }
 // Per-issue DB credential template id (see dbcreds.ts), keyed like the per-issue pipeline. Injected into the
 // run's env at each stage launch so the agent can connect to the DB without being asked for credentials.
@@ -816,6 +828,7 @@ async function launchStage(key: string, idx: number): Promise<void> {
   let brief = renderBrief(stage.brief, briefCtx(run.issue, run.provider, idx))
     + prNotes(stage, run.pipeline, run.provider)   // Fix → pipeline in the PR body; Review → verdict as a PR comment
     + depsNote(issueDepsFor(run.provider, run.repo, run.number))
+    + browserNote(stage.kind, issueBrowserFor(run.provider, run.repo, run.number)) // + browser gate on fix/review when opted in
     + dbCredNote(dbCredId);
   // Auto-fix loop re-fix: hand the Fix stage the review's concerns, and OVERRIDE the brief's "open a PR" step — a
   // PR already exists from the first fix, so it must push to the same branch (a fresh/reopened terminal would
@@ -1279,6 +1292,7 @@ async function openAssign(i: Issue): Promise<void> {
   const initialDeps = savedDeps.length ? savedDeps : repoDepsFor(`${asgProvider}:${asgRepo || ''}`); // no saved deps → default to this repo's dependency template
   const selectedDeps = new Set(initialDeps.filter((id) => depCandidates.includes(id)));
   let selectedDbCred = issueDbCredFor(asgProvider, asgRepo || '', i.number); // DB credential template injected into the run's env
+  let selectedBrowser = issueBrowserFor(asgProvider, asgRepo || '', i.number); // verify UI changes in a real Chrome browser (applied to the fix/review stages)
   const selectedNotes = new Set(defaultNoteIds());   // configurable brief notes (Settings) — default-on ones pre-checked
   const seedBrief = () => stageBriefText(pipeline, 0, i, asgProvider) + depsNote([...selectedDeps]) + dbCredNote(selectedDbCred) + notesNote([...selectedNotes]); // brief + .deps/ + DB-creds + notes
   const { root, close } = modal(`<div class="tpl-card iss-card">
@@ -1293,6 +1307,7 @@ async function openAssign(i: Issue): Promise<void> {
         <div class="iss-deps" id="issDeps">${depCandidates.map((id) => { const { repo: r } = parseRepoId(id); return `<label class="iss-dep"><input type="checkbox" value="${esc(id)}"${selectedDeps.has(id) ? ' checked' : ''}><b>${esc(r.split('/').pop() || r)}</b><span class="mut">${esc(id)}</span></label>`; }).join('')}</div>` : ''}
         ${dbCredMetas().length ? `<div class="iss-agentrow"><label class="iss-lbl" style="margin:0">Database</label><select class="iss-agentsel" id="issDbSel">${dbCredOptions(selectedDbCred)}</select></div>` : ''}
         ${noteChecks(selectedNotes)}
+        <label class="iss-check" style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;margin:2px 0"><input type="checkbox" id="issBrowser"${selectedBrowser ? ' checked' : ''}> Verify UI changes in a Chrome browser <span class="mut">— the fix/review agent opens the affected page and exercises it</span></label>
         <label class="iss-lbl">Brief · <span id="issBriefStage">${esc(pipeline.stages[0].name)}</span> stage <span class="mut">— edit before launch</span></label>
         <textarea class="iss-brief" spellcheck="false" rows="10">${esc(seedBrief())}</textarea>
         <div class="iss-wt">Creates an isolated worktree on branch <code>issue-${i.number}</code> and runs the pipeline there. Later stages use their built-in briefs.</div>
@@ -1324,6 +1339,9 @@ async function openAssign(i: Issue): Promise<void> {
   // Pick a DB credential template → persist it for this issue and re-seed the brief's DB note (unless edited).
   const dbSel = root.querySelector('#issDbSel') as HTMLSelectElement | null;
   if (dbSel) dbSel.onchange = () => { selectedDbCred = dbSel.value; void setIssueDbCred(asgProvider, asgRepo || '', i.number, selectedDbCred); if (!briefDirty) ta.value = seedBrief(); };
+  // Browser-verify toggle → persist for this issue (applied to the fix/review stage briefs at launch).
+  const brCb = root.querySelector('#issBrowser') as HTMLInputElement | null;
+  if (brCb) brCb.onchange = () => { selectedBrowser = brCb.checked; void setIssueBrowser(asgProvider, asgRepo || '', i.number, selectedBrowser); };
   root.querySelector('#bnChecks')?.addEventListener('change', () => {   // toggle a brief note → re-seed (unless the brief was edited)
     selectedNotes.clear();
     root.querySelectorAll<HTMLInputElement>('#bnChecks input:checked').forEach((cb) => selectedNotes.add(cb.dataset.note!));
