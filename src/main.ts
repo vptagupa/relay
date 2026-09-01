@@ -884,6 +884,12 @@ async function resolveRepoRoot(git: string, provider: ProviderId, repo: string, 
       repoRoot = cacheRoot;
     }
   }
+  // A remote configured as https://…/repo.git/ (trailing slash) breaks GitHub's smart-HTTP transport — it builds
+  // …/repo.git//info/refs → 404, so EVERY `fetch origin` fails ("repository … not found"). Strip the trailing slash:
+  // it points at the exact same repo (the canonical form has none), and only a URL that actually has one is rewritten,
+  // so a well-formed remote is never touched.
+  const oru = await runBin(git, ['-C', repoRoot, 'remote', 'get-url', 'origin']);
+  if (oru.ok) { const u = oru.stdout.trim(); const fixed = u.replace(/\/+$/, ''); if (fixed && fixed !== u) await runBin(git, ['-C', repoRoot, 'remote', 'set-url', 'origin', fixed]); }
   return { ok: true, repoRoot };
 }
 
