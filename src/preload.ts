@@ -95,7 +95,8 @@ const api = {
   syncPull: (): Promise<{ ok: boolean; error?: string; applied?: boolean; ts?: number; missing?: boolean }> => ipcRenderer.invoke('sync:pull'),
   syncRelaunch: (): Promise<{ ok: boolean }> => ipcRenderer.invoke('sync:relaunch'),
   // Awaitable workspace flush — the renderer calls this before a sync push so the backup captures the live tabs.
-  syncFlushWorkspace: (ws: Workspace): Promise<{ ok: boolean }> => ipcRenderer.invoke('workspace:flush', ws),
+  // Keyed by THIS window's workspace id (multi-window safe).
+  syncFlushWorkspace: (id: string, ws: Workspace): Promise<{ ok: boolean }> => ipcRenderer.invoke('workspace:flush', { id, ws }),
 
   // --- sessions (the Library) ---
   listSessions: (): Promise<SavedSession[]> => ipcRenderer.invoke('sessions:list'),
@@ -103,11 +104,10 @@ const api = {
   deleteSession: (id: string): Promise<SavedSession[]> => ipcRenderer.invoke('sessions:delete', id),
   reorderSessions: (ids: string[]): Promise<SavedSession[]> => ipcRenderer.invoke('sessions:reorder', ids),
 
-  // --- workspace (open tabs restored on relaunch) — operate on the ACTIVE workspace ---
-  getWorkspace: (): Promise<Workspace> => ipcRenderer.invoke('workspace:get'),
-  setWorkspace: (ws: Workspace) => ipcRenderer.send('workspace:set', ws),
+  // --- workspace (open tabs restored on relaunch) — keyed by THIS window's workspace id (multi-window safe) ---
+  setWorkspace: (id: string, ws: Workspace) => ipcRenderer.send('workspace:set', { id, ws }),
   // Synchronous write for the final flush on window close (blocks until it's on disk).
-  flushWorkspace: (ws: Workspace) => ipcRenderer.sendSync('workspace:set-sync', ws),
+  flushWorkspace: (id: string, ws: Workspace) => ipcRenderer.sendSync('workspace:set-sync', { id, ws }),
 
   // --- named workspaces (definitions + per-id snapshots) ---
   getWorkspaceMeta: (): Promise<{ workspaces: WorkspaceDef[]; activeWorkspaceId: string }> => ipcRenderer.invoke('workspaces:meta'),

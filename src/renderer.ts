@@ -24,6 +24,7 @@ import { initWorkspaces, loadWorkspaceMeta, restoreWorkspaceSnapshot, settleDeep
 import { initIssues, pullIssues, loadIssues } from './issues';
 import { initPrs, loadPrs } from './prs';
 import { initTasks, renderTasks } from './tasks';
+import { initBuild, renderBuild } from './build';
 import { initNotifications, renderBell } from './notifications';
 import { initDbCreds } from './dbcreds';
 import { initSync, refreshSync } from './sync';
@@ -691,7 +692,7 @@ function snapshotTabs(): OpenTab[] {
 // shared with workspaces.ts (which owns the switch/restore that sets it). See persistWorkspace below.
 function persistWorkspace(immediate = false) {
   if (!state.settings.autoSave || state.booting) return;
-  const run = () => { wsT = null; if (state.booting) return; relay.setWorkspace({ active: state.active, tabs: snapshotTabs(), gv: state.gv, focus: state.focus, layout: state.layout }); flashSaved(); }; // re-check booting: a timer scheduled before a switch must NOT fire mid-teardown (state emptied, store still on the old id) and overwrite the outgoing workspace with an empty snapshot
+  const run = () => { wsT = null; if (state.booting) return; relay.setWorkspace(getActiveWsId(), { active: state.active, tabs: snapshotTabs(), gv: state.gv, focus: state.focus, layout: state.layout }); flashSaved(); }; // key by THIS window's workspace id (never the global active — a second window drives a different workspace); re-check booting: a timer scheduled before a switch must NOT fire mid-teardown (state emptied) and overwrite the outgoing workspace with an empty snapshot
   if (immediate) { if (wsT) clearTimeout(wsT); run(); return; }
   if (wsT) return;              // a save is already scheduled — coalesce into it
   wsT = setTimeout(run, 800);
@@ -825,14 +826,15 @@ function applySplit() { /* no-op (kept: still called on boot + sidebar resize) *
 // Which sidebar panel (Files / Library / Issues) the rail has active.
 function applySidebarView() {
   const v = state.settings.sidebarView || 'library';
-  const map: Record<string, string> = { library: '#viewLibrary', files: '#viewFiles', issues: '#viewIssues', prs: '#viewPRs', tasks: '#viewTasks' };
+  const map: Record<string, string> = { library: '#viewLibrary', files: '#viewFiles', issues: '#viewIssues', prs: '#viewPRs', tasks: '#viewTasks', build: '#viewBuild' };
   for (const [name, id] of Object.entries(map)) (document.querySelector(id) as HTMLElement | null)?.classList.toggle('active', name === v);
   document.querySelectorAll<HTMLElement>('.rail-btn[data-view]').forEach((b) => b.classList.toggle('on', b.dataset.view === v));
 }
-function switchSidebarView(v: 'library' | 'files' | 'issues' | 'prs' | 'tasks') {
+function switchSidebarView(v: 'library' | 'files' | 'issues' | 'prs' | 'tasks' | 'build') {
   state.settings.sidebarView = v; applySidebarView(); void relay.patchSettings({ sidebarView: v });
   if (v === 'prs') void loadPrs();   // load-on-show — PRs refresh whenever the rail is opened
   if (v === 'tasks') void renderTaskRail(); // unified rail: source segment (Local + connected integrations) + the active source
+  if (v === 'build') renderBuild();  // rebuild the source/agent/pipeline pickers from current state + tracked repos
 }
 
 /* ---- unified Tasks rail: "Local" + a tab per connected PM integration ---- */
@@ -1997,7 +1999,7 @@ $('#libList').addEventListener('dragend', endLibDrag);
 function r(el: HTMLElement) { return el.getBoundingClientRect(); }
 
 // rail: New (new terminal) · Files/Library/Issues (switch the active panel) · Agent (open agent panel)
-document.querySelectorAll<HTMLElement>('.rail-btn[data-view]').forEach((b) => { b.onclick = () => switchSidebarView(b.dataset.view as 'library' | 'files' | 'issues' | 'prs' | 'tasks'); });
+document.querySelectorAll<HTMLElement>('.rail-btn[data-view]').forEach((b) => { b.onclick = () => switchSidebarView(b.dataset.view as 'library' | 'files' | 'issues' | 'prs' | 'tasks' | 'build'); });
 // Unified Tasks rail: the source segment (Local + a tab per connected integration) picks what the rail shows.
 $('#taskSrcSeg')?.addEventListener('click', (e) => { const c = (e.target as HTMLElement).closest('.src-chip') as HTMLElement | null; if (c?.dataset.src && c.dataset.src !== taskSource) { taskSource = c.dataset.src; void renderTaskRail(); } });
 (document.querySelector('.rail-btn[data-act="new"]') as HTMLElement | null)?.addEventListener('click', () => void newTab());
@@ -2158,7 +2160,7 @@ relay.onPtyAlt((id: string, alt: boolean) => {
 // Wrapped so a failed flush can never throw mid-unload (which would abort a clean close).
 window.addEventListener('beforeunload', () => {
   // !state.booting: never let a close mid-restore flush a partial tab set over the full saved workspace.
-  try { if (state.settings.autoSave && !state.booting) relay.flushWorkspace({ active: state.active, tabs: snapshotTabs(), gv: state.gv, focus: state.focus, layout: state.layout }); } catch { /* ignore */ }
+  try { if (state.settings.autoSave && !state.booting) relay.flushWorkspace(getActiveWsId(), { active: state.active, tabs: snapshotTabs(), gv: state.gv, focus: state.focus, layout: state.layout }); } catch { /* ignore */ }
 });
 relay.onPtyExit((id: string) => { writeToTab(id, '\r\n\x1b[90m[process exited]\x1b[0m\r\n'); clearTabActive(id); });
 relay.onApproval((req: ApprovalRequest) => showApproval(req));
@@ -2189,6 +2191,9 @@ new ResizeObserver(() => { clearTimeout(_roT); _roT = setTimeout(() => { fitPane
   initPrs({ activeWsId: getActiveWsId, focusIssues: () => switchSidebarView('issues'), openAgentTab, onAgentTabClosed, tabActivity });
   // Tasks rail — draft/validate a proposed issue, file it only if valid. Its own validate worktree + agent tab.
   initTasks({ activeWsId: getActiveWsId, openAgentTab, onAgentTabClosed, pushToProvider: pushLocalTask }); // ↑ push a local task up to a connected PM integration
+  // Build rail — run a chosen pipeline against a local folder or a tracked repo, seeded by a free-form prompt.
+  initBuild({ activeWsId: getActiveWsId, openAgentTab, onAgentTabClosed, tabActivity });
+  if (state.settings.sidebarView === 'build') renderBuild(); // restore-on-boot
   if ((state.settings.sidebarView || 'library') === 'prs') void loadPrs(); // restore-on-boot when PR was the last view
   if ((state.settings.sidebarView as string) === 'pm') state.settings.sidebarView = 'tasks'; // migrate: the separate Sync rail is now a source inside the Tasks rail
   if (state.settings.sidebarView === 'tasks') void renderTaskRail(); // restore-on-boot: build the source segment + active source
@@ -2204,7 +2209,7 @@ new ResizeObserver(() => { clearTimeout(_roT); _roT = setTimeout(() => { fitPane
   // push first flushes the live tab snapshot so the backup isn't a debounce-stale copy.
   initSync({
     confirm: confirmDialog,
-    flushWorkspace: async () => { await relay.syncFlushWorkspace({ active: state.active, tabs: snapshotTabs(), gv: state.gv, focus: state.focus, layout: state.layout }); },
+    flushWorkspace: async () => { await relay.syncFlushWorkspace(getActiveWsId(), { active: state.active, tabs: snapshotTabs(), gv: state.gv, focus: state.focus, layout: state.layout }); },
   });
   initPm({ activeWsId: getActiveWsId, confirm: confirmDialog, openAgentTab, onAgentTabClosed, onConnectionChange: () => void renderTaskRail() }); // PM provider integrations: OAuth sign-in + task sync + run a synced task through the build pipeline; rebuild the Tasks rail when a provider connects/disconnects
   await loadWorkspaceMeta(); // load workspace defs + blueprints, mirror the active workspace's folder + theme into settings before first paint

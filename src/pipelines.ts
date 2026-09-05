@@ -293,6 +293,35 @@ const validateFixLoop: PipelineDef = {
 };
 export const BUILTIN_PIPELINES: PipelineDef[] = [validateFix, validateFixLoop, fixOnly];
 
+/* ----------------------------- build rail ----------------------------- */
+// The Build rail runs a chosen pipeline against a chosen SOURCE (a local folder, or a repo worktree), seeded by a
+// free-form prompt instead of an issue/PR. Its default is a single "Run" stage that just carries out the prompt with
+// no PR and no gate; the full validate/fix/review pipelines are also offered (best paired with a repo source, whose
+// Fix stage opens a PR). buildRun goes first so it's the default pick.
+const BUILD_RUN_BRIEF = `{issue}
+
+---
+
+## Task
+Carry out the task described above in THIS repository/folder. Make the changes it asks for, run the project's build / tests / checks if there are any, and confirm your work end-to-end. Do NOT open a pull request. When you're done, summarize what you changed and how you verified it.`;
+const buildRun: PipelineDef = {
+  id: 'build-run', name: 'Run (no PR)', builtin: true,
+  desc: 'Run the prompt with the agent directly in the source — no PR, no gate. Best for a local folder.',
+  stages: [{ id: 'run', name: 'Run', kind: 'custom', brief: BUILD_RUN_BRIEF, edges: [], x: 60, y: 120 }],
+};
+// The Build rail's pipeline registry: the run-in-place default, then the issue pipelines (for a repo source), then
+// any user-authored ones. Separate from the issue/PR registries so those pickers never offer "Run (no PR)".
+export function buildPipelines(custom?: PipelineDef[]): PipelineDef[] {
+  const base = [buildRun, ...BUILTIN_PIPELINES];
+  const seen = new Set(base.map((p) => p.id));
+  const extra = (custom || []).filter((p) => p && p.id && !seen.has(p.id));
+  return [...base, ...extra];
+}
+export function buildPipelineById(id?: string, custom?: PipelineDef[]): PipelineDef {
+  const all = buildPipelines(custom);
+  return all.find((p) => p.id === id) || all[0];
+}
+
 /* ----------------------------- registry (built-in + user-authored) ----------------------------- */
 // The full list = built-ins first, then any custom pipelines (Settings.pipelines) that don't collide on id.
 export function allPipelines(custom?: PipelineDef[]): PipelineDef[] {

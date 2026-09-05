@@ -186,23 +186,18 @@ export async function reorderSessions(ids: string[]): Promise<SavedSession[]> {
   return db.sessions;
 }
 
-// --- active workspace's tab snapshot (what the renderer boots into / autosaves) ---
-export async function getWorkspace(): Promise<Workspace> {
-  const db = await load();
-  return db.wsById[db.activeWorkspaceId] ?? { active: '', tabs: [] };
-}
+// --- per-workspace tab snapshots (what each window boots into / autosaves) ---
+// Multi-window: reads AND writes are keyed by an EXPLICIT workspace id, never the single global
+// `activeWorkspaceId`. Two windows drive two different workspaces at once; keying the autosave off the
+// shared global let one window's tabs get written into the OTHER window's workspace slot — that was the
+// "tabs from the previous workspace copied into the new one" bug. The async id-keyed writer is
+// `saveWorkspaceSnapshot` (below); the shutdown/close flush is `saveWorkspaceSnapshotSync` (here).
 
-export async function setWorkspace(ws: Workspace): Promise<void> {
-  const db = await load();
-  db.wsById[db.activeWorkspaceId] = ws;
-  await flushWorkspace();
-}
-
-// Synchronous write for shutdown, when there's no time to await async fs. Writes only the small
+// Synchronous snapshot write for shutdown, when there's no time to await async fs. Writes only the small
 // workspace file (the cache is always populated by boot; if not, there's nothing to persist).
-export function setWorkspaceSync(ws: Workspace): void {
-  if (!cache || suspended) return; // a sync pull restored files on disk + is relaunching — don't overwrite with stale cache
-  cache.wsById[cache.activeWorkspaceId] = ws;
+export function saveWorkspaceSnapshotSync(id: string, ws: Workspace): void {
+  if (!cache || suspended || !id) return; // a sync pull restored files on disk + is relaunching — don't overwrite with stale cache
+  cache.wsById[id] = ws;
   wsFinalized = true; // set BEFORE writing: this is the last word on close, so any queued/in-flight async flush skips its rename
   try {
     const f = wsFile(); const tmp = `${f}.sync.tmp`;

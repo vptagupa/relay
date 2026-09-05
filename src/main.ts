@@ -1520,17 +1520,19 @@ ipcMain.handle('fs:open-rel', async (_e, p: { cwd?: string; target: string }) =>
 });
 
 /* -------------------- workspace (open tabs) -------------------- */
-ipcMain.handle('workspace:get', () => store.getWorkspace());
-ipcMain.on('workspace:set', (_e, ws) => { void store.setWorkspace(ws); });
+// Every snapshot write carries the SENDING window's workspace id (multi-window: the single global
+// `activeWorkspaceId` is not authoritative — each window drives its own workspace, so keying off the
+// global let one window's autosave clobber another workspace's tabs).
+ipcMain.on('workspace:set', (_e, { id, ws }) => { if (typeof id === 'string' && id) void store.saveWorkspaceSnapshot(id, ws); });
 // Awaitable flush (unlike the fire-and-forget 'workspace:set') — cloud-sync push calls this first so the backup
 // captures the CURRENT tab snapshot rather than one up to ~1.5s stale from the autosave debounce. Does NOT
 // finalize (unlike set-sync), so autosave keeps working afterward.
-ipcMain.handle('workspace:flush', async (_e, ws) => { try { await store.setWorkspace(ws); } catch (err) { logFatal('workspace:flush', err); } return { ok: true }; });
+ipcMain.handle('workspace:flush', async (_e, { id, ws }) => { try { if (typeof id === 'string' && id) await store.saveWorkspaceSnapshot(id, ws); } catch (err) { logFatal('workspace:flush', err); } return { ok: true }; });
 // Synchronous variant for the renderer's final flush on close — write completes before we
 // reply. Best-effort: a failed final flush must never throw here (that would surface as a
 // main-process error dialog while the user is just closing the app).
-ipcMain.on('workspace:set-sync', (e, ws) => {
-  try { store.setWorkspaceSync(ws); } catch (err) { logFatal('flush', err); }
+ipcMain.on('workspace:set-sync', (e, { id, ws }) => {
+  try { if (typeof id === 'string' && id) store.saveWorkspaceSnapshotSync(id, ws); } catch (err) { logFatal('flush', err); }
   e.returnValue = true;
 });
 // Named workspaces: definitions + active id (rare) and per-workspace snapshots (used on switch).

@@ -139,7 +139,12 @@ export interface Settings {
   bookmarkGroups: BookmarkGroup[];  // groups for organizing bookmarks (display order = array order)
   hasKey: Record<string, boolean>;  // provider -> whether a key is stored (never the key itself)
   issueTags?: Record<string, string[]>; // private local tags, keyed "repo#number" → ["mine","reviewing"] (never touch GitHub)
-  sidebarView?: 'library' | 'files' | 'issues' | 'prs' | 'tasks' | 'pm'; // which rail panel is active in the sidebar ('pm' = synced provider tasks)
+  sidebarView?: 'library' | 'files' | 'issues' | 'prs' | 'tasks' | 'pm' | 'build'; // which rail panel is active in the sidebar ('pm' = synced provider tasks)
+  // Build rail (run a pipeline against a folder or repo, seeded by a prompt) — remembered picks.
+  buildSourceKind?: 'folder' | 'repo'; // whether the Build rail targets a local folder or a tracked repo
+  buildFolder?: string;                // the selected project-folder path (folder source)
+  buildRepo?: string;                  // the selected repo id "provider:owner/repo" (repo source)
+  buildPipeline?: string;              // the selected build pipeline id
   issueRepos?: string[]; // LEGACY (pre per-workspace): global tracked repos — migrated into issueReposByWs
   issueRepo?: string;    // LEGACY (pre per-workspace): global active repo — migrated into issueRepoByWs
   issueReposByWs?: Record<string, string[]>; // tracked repos per workspace id (Issues are per-workspace)
